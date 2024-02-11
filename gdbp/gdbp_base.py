@@ -225,9 +225,9 @@ def loss_fn(module: layer.Layer,
     
     contrastive_loss = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
 
-    total_loss = mse_loss + 0.1 * contrastive_loss
+    total_loss = mse_loss + 1 * contrastive_loss
 
-    return mse_loss, updated_state
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
