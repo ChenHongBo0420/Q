@@ -67,7 +67,7 @@ def make_base_module(steps: int = 3,
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
         layer.MIMOAF(train=mimo_train),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=1)) 
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=1)) 
         
     return base
 
