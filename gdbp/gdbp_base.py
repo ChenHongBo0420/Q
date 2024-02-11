@@ -222,9 +222,7 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
-    # 计算对比损失
-    contrastive_loss = simclr_contrastive_loss(z_original.val, z_transformed.val, temperature=0.1)
-
+    contrastive_loss = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
     # 计算总损失
     total_loss = mse_loss + contrastive_loss
 
