@@ -69,7 +69,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train),
         if mode == 'train':
         layers.append(layer.vmap(layer.Conv1d)(name='RConv1', taps=1))
-        
+        base = layer.Serial(*layers)
     return base
 
 
