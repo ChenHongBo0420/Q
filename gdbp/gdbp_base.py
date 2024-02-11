@@ -262,7 +262,7 @@ def update_step(module: layer.Layer,
         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
                                           aux, const, sparams)
     opt_state = opt.update_fn(i, grads, opt_state)
-    print("Contrastive Loss:", jax.device_get(contrastive_loss))
+    print("Contrastive Loss:", jax.device_get(loss))
     return loss, opt_state, module_state
 
 
