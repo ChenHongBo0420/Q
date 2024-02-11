@@ -224,7 +224,6 @@ def loss_fn(module: layer.Layer,
     z_transformed_real = jnp.abs(z_transformed.val) 
     contrastive_loss = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
     # 计算总损失
-    print(contrastive_loss)
     total_loss = mse_loss + contrastive_loss
 
     return total_loss, updated_state
@@ -263,6 +262,7 @@ def update_step(module: layer.Layer,
         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
                                           aux, const, sparams)
     opt_state = opt.update_fn(i, grads, opt_state)
+    print("Contrastive Loss:", loss)
     return loss, opt_state, module_state
 
 
