@@ -8,7 +8,7 @@ from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
-import jax.numpy as jnp
+import jax
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
