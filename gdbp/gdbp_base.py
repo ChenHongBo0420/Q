@@ -26,29 +26,48 @@ def make_base_module(steps: int = 3,
     make base module that derives DBP, FDBP, EDBP, GDBP depending on
     specific initialization method and trainable parameters defined
     by trainer.
+
+    Args:
+        steps: GDBP steps/layers
+        dtaps: D-filter length
+        ntaps: N-filter length
+        rtaps: R-filter length
+        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+        mode: 'train' or 'test'
+
+    Returns:
+        A layer object
     '''
+
     _assert_taps(dtaps, ntaps, rtaps)
+
     d_init, n_init = init_fn
 
     if mode == 'train':
+        # configure mimo to its training mode
         mimo_train = True
     elif mode == 'test':
+        # mimo operates at training mode for the first 200000 symbols,
+        # then switches to tracking mode afterwards
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-
-    layers = [
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
+        
+    base = layer.Serial(
+        layer.FDBP(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train)
-    ]
-
-    if mode == 'train':
-        layers.append(layer.vmap(layer.Conv1d)(name='RConv1', taps=61))
-
-    base = layer.Serial(*layers)
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        
     return base
 
 
