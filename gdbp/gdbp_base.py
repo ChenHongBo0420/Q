@@ -227,7 +227,7 @@ def loss_fn(module: layer.Layer,
 
     total_loss = mse_loss + contrastive_loss
 
-    return contrastive_loss, updated_state
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
