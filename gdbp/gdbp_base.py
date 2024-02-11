@@ -198,6 +198,13 @@ def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
         scale = np.random.uniform(scale_range[0], scale_range[1])
         x = x * scale
     return x
+  
+def mlp(x):
+    """一个简单的多层感知机，包含两个全连接层和ReLU激活函数"""
+    x = jax.nn.Dense(x, features=128)  # 第一个全连接层
+    x = jax.nn.relu(x)  # ReLU激活函数
+    x = jax.nn.Dense(x, features=64)  # 第二个全连接层
+    return x
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -220,8 +227,11 @@ def loss_fn(module: layer.Layer,
     # 计算 MSE 损失
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    z_original_transformed = mlp(z_original)
+    z_transformed_transformed = mlp(z_transformed)
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
+    
     contrastive_loss = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
     # 计算总损失
     total_loss = mse_loss + contrastive_loss
