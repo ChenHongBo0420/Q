@@ -46,7 +46,7 @@ def make_base_module(steps: int = 3,
     ]
 
     if mode == 'train':
-        layers.append(layer.vmap(layer.Conv1d)(name='RConv1', taps=1))
+        layers.append(layer.vmap(layer.Conv1d)(name='RConv1', taps=61))
 
     base = layer.Serial(*layers)
     return base
