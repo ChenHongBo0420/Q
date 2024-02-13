@@ -201,7 +201,7 @@ def apply_transform2(x, range=(0, 300), p=0.5):
         mask_len = int(np.random.uniform(range[0], range[1]))
         start = int(np.random.uniform(0, len(x) - mask_len))
         mask = jnp.ones_like(x)
-        mask[start:start + mask_len] = 0
+        mask = mask.at[start:start + mask_len].set(0)
         x = x * mask
     return x
   
