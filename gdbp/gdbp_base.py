@@ -196,32 +196,15 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
         x = x + shift
     return x
   
-# def apply_transform2(x, range=(0, 300), p=0.5):
-#     if np.random.rand() < p:
-#         mask_len = int(np.random.uniform(range[0], range[1]))
-#         start = int(np.random.uniform(0, len(x) - mask_len))
-#         mask = jnp.ones_like(x)
-#         mask = mask.at[start:start + mask_len].set(0)
-#         x = x * mask
-#     return x
-  
 def apply_transform2(x, range=(0, 300), p=0.5):
     if np.random.rand() < p:
         mask_len = int(np.random.uniform(range[0], range[1]))
         start = int(np.random.uniform(0, len(x) - mask_len))
-        end = start + mask_len
-
-        # 使用比较和逻辑运算来创建遮罩
-        indices = jnp.arange(x.size)
-        mask = (indices < start) | (indices >= end)
-        
-        # 将布尔遮罩转换为浮点数遮罩（0.0和1.0）
-        mask = mask.astype(float)
-        
-        # 应用遮罩
+        mask = jnp.ones_like(x)
+        mask = mask.at[start:start + mask_len].set(0)
         x = x * mask
-
     return x
+
 def apply_transform3(x, range=(0.0, 0.2), p=0.5):
     if np.random.rand() < p:
         sigma = np.random.uniform(range[0], range[1])
