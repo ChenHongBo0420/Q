@@ -190,9 +190,9 @@ def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
         x = x * scale
     return x
   
-def apply_transform1(x, range=(-10.0, 10.0), p=0.5):
+def apply_transform1(x, shift_range=(-10.0, 10.0), p=0.5):
     if np.random.rand() < p:
-        shift = random.uniform(minval=range[0], maxval=range[1])
+        shift = np.random.uniform(shift_range[0], shift_range[1])
         x = x + shift
     return x
   
