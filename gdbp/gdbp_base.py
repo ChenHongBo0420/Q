@@ -156,15 +156,6 @@ def model_init(data: gdat.Input,
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
-
-
-def l2_normalize(x, axis=None, epsilon=1e-12):
-    """L2归一化"""
-    square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
-    x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
-    return x / x_inv_norm
-
-
 def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
     batch_size = z1.shape[0]
 
@@ -198,7 +189,37 @@ def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
         scale = np.random.uniform(scale_range[0], scale_range[1])
         x = x * scale
     return x
-
+  
+def apply_transform1(x, range=(-300, 300), p=0.5):
+    """Random Time Shift"""
+    if np.random.rand() < p:
+        t_shift = np.random.randint(range[0], range[1])
+        x = np.roll(x, t_shift) 
+    return x
+  
+def apply_transform2(x, range=(0, 300), p=0.5):
+    if np.random.rand() < p:
+        mask_len = np.random.randint(range[0], range[1])
+        mask = np.ones_like(x)
+        start = np.random.randint(0, len(x) - mask_len)
+        mask[start:start + mask_len] = 0
+        x = x * mask
+    return x
+  
+def apply_transform3(x, range=(0.0, 0.2), p=0.5):
+    if np.random.rand() < p:
+        sigma = np.random.uniform(range[0], range[1])
+        x = x + np.random.normal(0, sigma, x.shape)
+    return x
+  
+def apply_transform4(x, range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, p=0.5):
+    if np.random.rand() < p:
+        low_freq = np.random.uniform(range[0], range[1])
+        center_freq = low_freq + band_width / 2.0
+        b, a = signal.iirnotch(center_freq, center_freq / band_width, fs=sampling_rate)
+        x = signal.lfilter(b, a, x)
+    return x
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -209,7 +230,7 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
 
-    y_transformed = apply_transform(y)
+    y_transformed = apply_transform1(y)
 
    
     z_original, updated_state = module.apply(
