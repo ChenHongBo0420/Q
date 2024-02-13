@@ -190,11 +190,10 @@ def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
         x = x * scale
     return x
   
-def apply_transform1(x, range=(-300, 300), p=0.5):
-    """Random Time Shift"""
+def apply_transform1(key, x, range=(-10.0, 10.0), p=0.5):
     if np.random.rand() < p:
-        t_shift = np.random.randint(range[0], range[1])
-        x = np.roll(x, t_shift) 
+        shift = random.uniform(minval=range[0], maxval=range[1])
+        x = x + shift
     return x
   
 def apply_transform2(x, range=(0, 300), p=0.5):
