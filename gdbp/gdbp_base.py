@@ -198,8 +198,8 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
   
 def apply_transform2(x, range=(0, 300), p=0.5):
     if np.random.rand() < p:
-        mask_len = np.random.randint(range[0], range[1])
-        start = np.random.randint(0, len(x) - mask_len)
+        mask_len = np.random.uniform(range[0], range[1])
+        start = np.random.uniform(0, len(x) - mask_len)
         mask = np.ones_like(x)
         mask[start:start + mask_len] = 0
         x = x * mask
