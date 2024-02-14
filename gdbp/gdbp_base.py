@@ -207,7 +207,7 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
 
 def apply_transform2(x, mask_range=(0, 300), p=0.5):
     if np.random.rand() < p:
-        mask_len = np.random.randint(mask_range[0], mask_range[1])
+        mask_len = random.randint(mask_range[0], mask_range[1])
         total_length = x.shape[0]
         mask = jnp.concatenate([
             jnp.zeros(mask_len),
