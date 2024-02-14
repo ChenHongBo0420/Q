@@ -205,18 +205,35 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
 #         x = x * mask
 #     return x
 
-def apply_transform2(x, mask_range=(0, 300), p=0.5):
-    if np.random.rand() < p:
-        mask_len = np.random.randint(mask_range[0], mask_range[1])
+# def apply_transform2(x, mask_range=(0, 300), p=0.5):
+#     if np.random.rand() < p:
+#         mask_len = np.random.randint(mask_range[0], mask_range[1])
+#         total_length = x.shape[0]
+#         mask = jnp.concatenate([
+#             jnp.zeros(mask_len),
+#             jnp.ones(total_length - mask_len)
+#         ])
+#         mask = random.permutation(mask)
+#         x = x * mask
+
+#     return x
+def apply_transform2(x, mask_range=(0, 300), p=0.5, key=None):
+    if key is None:
+        print("No key provided, returning original array.")
+        return x
+    if random.uniform(key, shape=()) < p:
         total_length = x.shape[0]
-        mask = jnp.concatenate([
-            jnp.zeros(mask_len),
-            jnp.ones(total_length - mask_len)
-        ])
-        mask = random.permutation(mask)
-        x = x * mask
-    return x
+        mask_len = random.randint(key, (), minval=mask_range[0], maxval=mask_range[1])
+        mask = jnp.ones(total_length)
   
+        key, subkey = random.split(key)
+        shuffled_indices = jnp.arange(total_length)
+        shuffled_indices = random.permutation(subkey, shuffled_indices)
+        mask = mask.at[shuffled_indices[:mask_len]].set(0)
+
+        x = x * mask
+
+    return x 
 def apply_transform3(x, range=(0.0, 0.2), p=0.5):
     if np.random.rand() < p:
         sigma = np.random.uniform(range[0], range[1])
@@ -240,8 +257,8 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-
-    y_transformed = apply_transform2(y)
+    key = random.PRNGKey(0)
+    y_transformed = apply_transform2(y, key)
 
    
     z_original, updated_state = module.apply(
