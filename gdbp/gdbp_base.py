@@ -213,7 +213,7 @@ def apply_transform2(x, mask_range=(0, 300), p=0.5):
             jnp.zeros(mask_len),
             jnp.ones(total_length - mask_len)
         ])
-        mask = jnp.random.permutation(mask)
+        mask = np.random.permutation(mask)
         x = x * mask
     return x
   
