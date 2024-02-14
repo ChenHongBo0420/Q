@@ -205,17 +205,12 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
 #         x = x * mask
 #     return x
 
-def apply_transform2(x, mask_range=(0, 300), p=0.5):
+def apply_transform2(x, p=0.5):
     if np.random.rand() < p:
-        mask_len = random.randint(mask_range[0], mask_range[1])
         total_length = x.shape[0]
-        mask = jnp.concatenate([
-            jnp.zeros(mask_len),
-            jnp.ones(total_length - mask_len)
-        ])
-        # mask = random.permutation(mask)
+        mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
+        mask = jnp.array(mask)
         x = x * mask
-
     return x
 
 def apply_transform3(x, range=(0.0, 0.2), p=0.5):
