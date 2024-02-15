@@ -213,7 +213,7 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
 #         x = x * mask
 #     return x
 
-def apply_transform2(x, mask_range=(0, 300), p=0.5):
+def apply_transform2(x, mask_range=(0, 30), p=0.5):
     if np.random.rand() < p:
         total_length = x.shape[0]
         mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
