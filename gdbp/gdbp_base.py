@@ -260,7 +260,7 @@ def loss_fn(module: layer.Layer,
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    contrastive_loss = simclr_contrastive_loss(jnp.vstack([z_original_real, z_original_real]), jnp.vstack([z_transformed_real, z_transformed_real1]), temperature=0.1)
+    contrastive_loss = simclr_contrastive_loss(z_transformed_real, z_transformed_real1, temperature=0.1)
 
     total_loss = mse_loss + 0.1 * contrastive_loss
 
