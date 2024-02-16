@@ -246,20 +246,21 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
     y_transformed = apply_transform(y)
-    y_transformed = apply_transform1(y_transformed)
+    y_transformed1 = apply_transform1(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
-
+    z_transformed1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
     
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
-    
-    contrastive_loss = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    contrastive_loss = simclr_contrastive_loss(jnp.vstack([z_original_real, z_original_real]), jnp.vstack([z_transformed_real, z_transformed_real1]), temperature=0.1)
 
     total_loss = mse_loss + 0.1 * contrastive_loss
 
