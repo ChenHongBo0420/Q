@@ -183,6 +183,8 @@ def l2_normalize(x, axis=None, epsilon=1e-12):
     return x / x_inv_norm
   
 def negative_cosine_similarity(p, z):
+    p = l2_normalize(p, axis=1)
+    z = l2_normalize(z, axis=1)
     return -jnp.mean(jnp.sum(p * z, axis=1))
 
 def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
@@ -261,10 +263,8 @@ def loss_fn(module: layer.Layer,
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed_norm = l2_normalize(z_transformed.val, axis=1)
-    z_transformed1_norm = l2_normalize(z_transformed1.val, axis=1)
-    z_transformed1_val = jax.lax.stop_gradient(z_transformed1_norm)
-    contrastive_loss = negative_cosine_similarity(jnp.abs(z_transformed_norm), jnp.abs(z_transformed1_val))
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_transformed_real, z_transformed_real1)
     total_loss = mse_loss + 0.1 * contrastive_loss
 
     return total_loss, updated_state
