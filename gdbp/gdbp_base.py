@@ -177,12 +177,15 @@ def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
 
     return loss
 
-
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
-
+  
+def negative_cosine_similarity(p, z):
+    p = l2_normalize(p, axis=1)
+    z = l2_normalize(z, axis=1)
+    return -jnp.mean(jnp.sum(p * z, axis=1))
 
 def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
     if np.random.rand() < p:
@@ -260,9 +263,8 @@ def loss_fn(module: layer.Layer,
     z_original_real = jnp.abs(z_original.val)  
     z_transformed_real = jnp.abs(z_transformed.val) 
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    contrastive_loss = simclr_contrastive_loss(z_transformed_real, z_transformed_real1, temperature=0.1)
-    contrastive_loss1 = simclr_contrastive_loss(z_original_real, z_transformed_real, temperature=0.1)
-    total_loss = mse_loss + 0.1 * contrastive_loss + 0.1 * contrastive_loss1
+    contrastive_loss = negative_cosine_similarity(z_transformed.val, z_transformed1.val.detach())
+    total_loss = mse_loss + 0.1 * contrastive_loss
 
     return total_loss, updated_state
 
