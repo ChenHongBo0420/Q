@@ -264,7 +264,7 @@ def loss_fn(module: layer.Layer,
     z_transformed_norm = l2_normalize(z_transformed.val, axis=1)
     z_transformed1_norm = l2_normalize(z_transformed1.val, axis=1)
     z_transformed1_val = jax.lax.stop_gradient(z_transformed1_norm)
-    contrastive_loss = negative_cosine_similarity(z_transformed_norm, z_transformed1_val)
+    contrastive_loss = negative_cosine_similarity(jnp.abs(z_transformed_norm), jnp.abs(z_transformed1_val))
     total_loss = mse_loss + 0.1 * contrastive_loss
 
     return total_loss, updated_state
