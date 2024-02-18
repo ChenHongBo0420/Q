@@ -306,13 +306,11 @@ def loss_fn(module: layer.Layer,
 #     return loss, opt_state, module_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))                  
-def update_step(module, optimizer, opt_state, module_state, y, x, aux, const, sparams):
+def update_step(module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams):
     
     def loss_fn(params):
         loss, new_module_state = model_apply_fn(module, params, module_state, y, x, aux, const, sparams)
         return loss, new_module_state
-
-    params = get_params(opt_state)
 
     (loss, new_module_state), grads = value_and_grad(loss_fn, has_aux=True)(params)
 
