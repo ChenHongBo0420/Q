@@ -309,12 +309,16 @@ def loss_fn(module: layer.Layer,
 def update_step(module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams):
     
     def loss_fn(params):
-        loss, new_module_state = model_apply_fn(module, params, module_state, y, x, aux, const, sparams)
+        # 假设module.apply返回损失和新的模块状态
+        loss, new_module_state = module.apply({'params': params, 'aux_inputs': aux, 'const': const, **module_state}, y, x)
         return loss, new_module_state
 
-    (loss, new_module_state), grads = value_and_grad(loss_fn, has_aux=True)(params)
+    # 计算损失函数的梯度，同时保留新的模块状态
+    grads_fn = value_and_grad(loss_fn, has_aux=True)
+    (loss, new_module_state), grads = grads_fn(params)
 
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    # 使用优化器更新梯度和优化器状态
+    updates, new_opt_state = optimizer.update(grads, opt_state)
     new_params = optax.apply_updates(params, updates)
 
     return loss, new_opt_state, new_module_state, new_params
