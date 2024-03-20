@@ -186,19 +186,22 @@ def negative_cosine_similarity(p, z):
     p = l2_normalize(p, axis=1)
     z = l2_normalize(z, axis=1)
     return -jnp.mean(jnp.sum(p * z, axis=1))
-
+  
+#scale-1
 def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
     if np.random.rand() < p:
         scale = np.random.uniform(scale_range[0], scale_range[1])
         x = x * scale
     return x
   
+# shift-2  
 def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
     if np.random.rand() < p:
         shift = np.random.uniform(shift_range[0], shift_range[1])
         x = x + shift
     return x
   
+# mask-3
 # def apply_transform2(x, range=(0, 300), p=0.5):
 #     if np.random.rand() < p:
 #         mask_len = int(np.random.uniform(range[0], range[1]))
@@ -224,13 +227,15 @@ def apply_transform2(x, mask_range=(0, 30), p=0.5):
         mask = jnp.broadcast_to(mask, x.shape)
         x = x * mask
     return x
-
+  
+# random-4
 def apply_transform3(x, range=(0.0, 0.2), p=0.5):
     if np.random.rand() < p:
         sigma = np.random.uniform(range[0], range[1])
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
+# filter-5
 def apply_transform4(x, range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, p=0.5):
     if np.random.rand() < p:
         low_freq = np.random.uniform(range[0], range[1])
@@ -249,7 +254,7 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
     y_transformed = apply_transform(y)
-    y_transformed1 = apply_transform1(y)
+    y_transformed1 = apply_transform2(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
