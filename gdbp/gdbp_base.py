@@ -254,7 +254,7 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
     y_transformed = apply_transform(y)
-    y_transformed1 = apply_transform3(y)
+    y_transformed1 = apply_transform4(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
