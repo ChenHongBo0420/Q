@@ -268,12 +268,14 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
     
     aligned_x = x[z_original.t.start:z_original.t.stop]
+    x, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(aligned_x))
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     # z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
-    loss = triplet_loss(aligned_x, z_original_real, z_transformed_real1, 1.0)
+    loss = triplet_loss(x, z_original_real, z_transformed_real1, 1.0)
     # total_loss = mse_loss + 0.1 * contrastive_loss
 
     return loss, updated_state
