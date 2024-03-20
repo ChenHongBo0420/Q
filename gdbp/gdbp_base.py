@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
 import jax
+from scipy import signal
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -243,7 +244,7 @@ def apply_transform4(x, range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, 
         b, a = signal.iirnotch(center_freq, center_freq / band_width, fs=sampling_rate)
         x = signal.lfilter(b, a, x)
     return x
-  
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
