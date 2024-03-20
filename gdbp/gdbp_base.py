@@ -236,19 +236,6 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
-# filter-5
-def apply_transform4(x, range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, p=0.5):
-    x = np.asarray(x, dtype=float)
-    
-    if np.random.rand() < p:
-        low_freq = np.random.uniform(range[0], range[1])
-        center_freq = low_freq + band_width / 2.0
-        b, a = signal.iirnotch(center_freq, center_freq / band_width, fs=sampling_rate)
-        b = np.asarray(b, dtype=float)
-        a = np.asarray(a, dtype=float)
-        
-        x = signal.lfilter(b, a, x)
-    return x
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -259,8 +246,8 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    y_transformed = apply_transform(y)
-    y_transformed1 = apply_transform4(y)
+    # y_transformed = apply_transform(y)
+    y_transformed1 = apply_transform(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
