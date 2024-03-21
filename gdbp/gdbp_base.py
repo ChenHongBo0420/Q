@@ -177,19 +177,6 @@ def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
     loss = jnp.mean(loss)
 
     return loss
-  
-def triplet_loss(anchor, positive, negative, margin=1.0):
-   
-    anchor = l2_normalize(anchor, axis=1)
-    positive = l2_normalize(positive, axis=1)
-    negative = l2_normalize(negative, axis=1)
-
-    pos_dist = jnp.sum(jnp.square(anchor - positive), axis=1)
-    neg_dist = jnp.sum(jnp.square(anchor - negative), axis=1)
-
-    basic_loss = pos_dist - neg_dist + margin
-    loss = jnp.maximum(basic_loss, 0.0)
-    return jnp.mean(loss)
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
@@ -268,17 +255,14 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
     
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    x, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(aligned_x))
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    # z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
-    loss = triplet_loss(x, z_original_real, z_transformed_real1, 1.0)
-    # total_loss = mse_loss + 0.1 * contrastive_loss
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
+    total_loss = 0.9* mse_loss + 0.1 * contrastive_loss
 
-    return loss, updated_state
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
