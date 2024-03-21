@@ -77,7 +77,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
     if training_type == 'unsupervised':
-        base_layers.append(layer.vmap(layer.Conv1d)(name='RConv1', taps=61))
+        base_layers.append(layer.Conv1d)
       
     base = layer.Serial(*base_layers)
     return base
