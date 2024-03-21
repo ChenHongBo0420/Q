@@ -22,7 +22,8 @@ def make_base_module(steps: int = 3,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0 = 0.,
-                     mode: str = 'train'):
+                     mode: str = 'train',
+                     training_type: str = 'unsupervised'):
     '''
     make base module that derives DBP, FDBP, EDBP, GDBP depending on
     specific initialization method and trainable parameters defined
@@ -54,21 +55,29 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
         
-    base = layer.Serial(
-        layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
+    # base = layer.Serial(
+    #     layer.FDBP(steps=steps,
+    #                dtaps=dtaps,
+    #                ntaps=ntaps,
+    #                d_init=d_init,
+    #                n_init=n_init),
+    #     layer.BatchPowerNorm(mode=mode),
+    #     layer.MIMOFOEAf(name='FOEAf',
+    #                     w0=w0,
+    #                     train=mimo_train,
+    #                     preslicer=core.conv1d_slicer(rtaps),
+    #                     foekwargs={}),
+    #     layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+    #     layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+    base_layers = [
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
+        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
+    ]
+    if training_type == 'unsupervised':
+        base_layers.append(layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps))
     return base
 
 
