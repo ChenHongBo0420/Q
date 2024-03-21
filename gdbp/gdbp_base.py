@@ -273,9 +273,8 @@ def loss_fn(module: layer.Layer,
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
     aligned_y = y[z_original.t.start:z_original.t.stop]
-    print("z_original.val shape:", z_original.val.shape)
-    print("aligned_y shape:", aligned_y.shape)
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_y) ** 2)        
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)     
+    mse_loss = jnp.mean(jnp.abs(y - aligned_x) ** 2)   
     total_loss = mse_loss + contrastive_loss
 
     return total_loss, updated_state
