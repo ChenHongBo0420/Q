@@ -77,7 +77,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
     if training_type == 'unsupervised':
-        base_layers.append(layer.Conv1d)
+        base_layers.append(nn.Dense(features=your_desired_output_features, name='LinearLayer'))
       
     base = layer.Serial(*base_layers)
     return base
