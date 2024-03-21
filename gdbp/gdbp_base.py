@@ -10,6 +10,7 @@ from typing import Any, Optional, Union
 from . import data as gdat
 import jax
 from scipy import signal
+from flax import linen as nn
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -77,7 +78,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
     if training_type == 'unsupervised':
-        base_layers.append(nn.Dense(features=your_desired_output_features, name='LinearLayer'))
+        base_layers.append(nn.Dense(features=1, name='LinearLayer'))
       
     base = layer.Serial(*base_layers)
     return base
