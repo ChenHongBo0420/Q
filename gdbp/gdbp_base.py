@@ -274,7 +274,7 @@ def loss_fn(module: layer.Layer,
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
     aligned_y = y[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)     
-    mse_loss = jnp.mean(jnp.abs(y - aligned_x) ** 2)   
+    mse_loss = jnp.mean(jnp.abs(y - x) ** 2)   
     total_loss = mse_loss + contrastive_loss
 
     return total_loss, updated_state
