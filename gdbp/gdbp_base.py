@@ -23,8 +23,7 @@ def make_base_module(steps: int = 3,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0 = 0.,
-                     mode: str = 'train',
-                     training_type: str = 'unsupervised'):
+                     mode: str = 'train'):
     '''
     make base module that derives DBP, FDBP, EDBP, GDBP depending on
     specific initialization method and trainable parameters defined
@@ -77,8 +76,6 @@ def make_base_module(steps: int = 3,
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
     ]
-    if training_type == 'unsupervised':
-        base_layers.append(layer.BatchPowerNorm(mode=mode))
       
     base = layer.Serial(*base_layers)
     return base
