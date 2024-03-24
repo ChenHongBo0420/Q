@@ -8,7 +8,7 @@ import labptptm2
 Input = namedtuple('DataInput', ['y', 'x', 'w0', 'a'])
 
 
-def load(src, lp, ch, rep, n_symbols=15000):
+def load(src, lp, ch, rep, n_symbols=150000):
     dat_grps, sup_grps = labptptm2.select(src, lp, ch, rep)
 
     inputs = []
@@ -20,7 +20,7 @@ def load(src, lp, ch, rep, n_symbols=15000):
     return inputs
 
 
-def loader(dat_grp, sup_grp, n_symbol=15000):
+def loader(dat_grp, sup_grp, n_symbol=150000):
     ''' dataloader of LabPtPTm2 dataset
         more info: https://github.com/remifan/LabPtPTm2
         Args:
