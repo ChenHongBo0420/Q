@@ -274,7 +274,7 @@ def loss_fn(module: layer.Layer,
     mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1) ** 2)   
     total_loss = mmse_loss + contrastive_loss
 
-    return total_loss, updated_state
+    return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
