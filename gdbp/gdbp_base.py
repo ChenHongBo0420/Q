@@ -276,8 +276,8 @@ def loss_fn(module: layer.Layer,
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real11 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real11)
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
     # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)     
     aligned_y = x[0:500]
     key = random.PRNGKey(0)
