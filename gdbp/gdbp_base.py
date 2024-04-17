@@ -289,7 +289,7 @@ def loss_fn(module: layer.Layer,
     # mmse_loss = jnp.mean(jnp.abs(scores_original - scores_transformed) ** 2)
               
     # mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1) ** 2)   
-    total_loss = mmse_loss + contrastive_loss
+    # total_loss = mmse_loss + contrastive_loss
 
     return contrastive_loss, updated_state
 
