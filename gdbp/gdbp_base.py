@@ -280,16 +280,16 @@ def loss_fn(module: layer.Layer,
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
     # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
               
-    # aligned_y = x[0:500]
-    # key = random.PRNGKey(0)
-    # sampled_z = latent_sample(key, aligned_y, z_transformed1_real1)
-    # prototypes = initialize_prototypes(aligned_y, 300, key)
-    # scores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
-    # scores_transformed = jnp.matmul(z_transformed1_real1, prototypes.T) / 0.1
-    # mmse_loss = jnp.mean(jnp.abs(scores_original - scores_transformed) ** 2)
+    aligned_y = x[0:500]
+    key = random.PRNGKey(0)
+    sampled_z = latent_sample(key, aligned_y, z_transformed1_real1)
+    prototypes = initialize_prototypes(aligned_y, 3000, key)
+    scores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
+    scores_transformed = jnp.matmul(z_transformed1_real1, prototypes.T) / 0.1
+    mmse_loss = jnp.mean(jnp.abs(scores_original - scores_transformed) ** 2)
               
-    # mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1) ** 2)   
-    # total_loss = mmse_loss + contrastive_loss
+    mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1) ** 2)   
+    total_loss = mmse_loss + contrastive_loss
 
     return contrastive_loss, updated_state
 
