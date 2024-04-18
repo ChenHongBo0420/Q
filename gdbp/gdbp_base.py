@@ -272,26 +272,16 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-def get_mixup_sample_rate(y_list, kernel="gaussian", bandwidth=1.0):
+def kde_jax(data, points, bandwidth):
+    weights = jnp.exp(-0.5 * ((points[:, None] - data[None, :]) / bandwidth) ** 2)
+    weights /= (bandwidth * jnp.sqrt(2 * jnp.pi))
+    return weights.mean(axis=1)
+
+def get_mixup_sample_rate(y_list, bandwidth=1.0):
     y_list = jnp.array(y_list)
-    N = y_list.shape[0]
-    mix_idx = []
-
-    # KDE expects a 2D array
-    y_list_2d = jnp.atleast_2d(y_list).T
-
-    for i in range(N):
-        data_i = jnp.atleast_2d(y_list[i]).T
-        kd = KernelDensity(kernel=kernel, bandwidth=bandwidth)
-        kd.fit(data_i)  # Fit KDE
-
-        log_density = kd.score_samples(y_list_2d)
-        density = jnp.exp(log_density)
-        density /= density.sum()  # Normalize to get probabilities
-
-        mix_idx.append(density)
-
-    return jnp.array(mix_idx)
+    density = kde_jax(y_list, y_list, bandwidth)
+    density /= density.sum()
+    return jnp.tile(density, (y_list.shape[0], 1))
   
 def mixup_data(x, y, mix_idx, alpha=1.0):
     batch_size = x.shape[0]
@@ -326,7 +316,7 @@ def loss_fn(module: layer.Layer,
               
     y_values = z_original.val.reshape(-1, 1)  
     aligned_x = x[z_original.t.start:z_original.t.stop] 
-    mix_idx = get_mixup_sample_rate(y_values, kernel="gaussian", bandwidth=0.5)
+    mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
     mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx) 
     mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
               
