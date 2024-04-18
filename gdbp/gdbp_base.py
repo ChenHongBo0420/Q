@@ -324,12 +324,11 @@ def loss_fn(module: layer.Layer,
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
               
-    y = jnp.abs(z_original.val)
+    y = z_original
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    ax = jnp.abs(aligned_x.val)
     mix_idx = get_mixup_sample_rate(y.reshape(-1, 1), kernel="gaussian", bandwidth=0.5)
-    mixed_x, mixed_y = mixup_data(ax, y, mix_idx)
-    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
+    mixed_x, mixed_y = mixup_data(aligned_x, y, mix_idx)
+    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y.val) ** 2)
               
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
