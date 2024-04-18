@@ -245,7 +245,7 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
-def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5):
+def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), shift_range1=(-100.0, 100.0), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5, p=0.5):
     # Scale transform
     if np.random.rand() < p_scale:
         scale = np.random.uniform(scale_range[0], scale_range[1])
@@ -263,7 +263,12 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         mask = np.array(mask)[:, None]  # Ensuring the mask shape matches x if needed
         mask = np.broadcast_to(mask, x.shape)
         x = x * mask
-
+      
+    if np.random.rand() < p:
+        t_shift = np.random.randint(shift_range1[0], shift_range1[1])
+        x = np.roll(x, shift=t_shift) 
+    return x
+  
     # Noise transform
     if np.random.rand() < p_noise:
         sigma = np.random.uniform(noise_range[0], noise_range[1])
