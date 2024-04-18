@@ -275,7 +275,7 @@ def apply_combined_transform(x, band_stop_range=(0.5, 30.0), band_width=2.0, sam
     if np.random.rand() < p_band_stop:
         center_freq = np.random.uniform(band_stop_range[0], band_stop_range[1])
         b, a = iirnotch(center_freq, center_freq / band_width, sampling_rate)
-        x = lfilter(b, a, np.array(x))
+        x = lfilter(b, a, x)
       
     return x
 
