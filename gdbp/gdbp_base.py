@@ -11,7 +11,8 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-from sklearn.neighbors import KernelDensity
+import distrax
+from distrax import MixtureSameFamily, Categorical, Normal
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -272,14 +273,24 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-def kde_jax(data, points, bandwidth):
-    weights = jnp.exp(-0.5 * ((points[:, None] - data[None, :]) / bandwidth) ** 2)
-    weights /= (bandwidth * jnp.sqrt(2 * jnp.pi))
-    return weights.mean(axis=1)
+def gaussian_mixture_kde(data, bandwidth):
+    """Create a Gaussian mixture model to approximate the KDE."""
+    num_components = data.shape[0]
+    mixture_distribution = Categorical(probs=jnp.ones(num_components) / num_components)
+    component_distribution = Normal(loc=data, scale=jnp.full_like(data, fill_value=bandwidth))
+    mixture_model = MixtureSameFamily(mixture_distribution, component_distribution)
+    return mixture_model
+
+def evaluate_density(mixture_model, points):
+    """Evaluate the density of the mixture model at specified points."""
+    log_probs = mixture_model.log_prob(points)
+    probs = jnp.exp(log_probs)
+    return probs
 
 def get_mixup_sample_rate(y_list, bandwidth=1.0):
     y_list = jnp.array(y_list)
-    density = kde_jax(y_list, y_list, bandwidth)
+    mixture_model = gaussian_mixture_kde(y_list, bandwidth)
+    density = evaluate_density(mixture_model, y_list)
     density /= density.sum()
     return jnp.tile(density, (y_list.shape[0], 1))
   
