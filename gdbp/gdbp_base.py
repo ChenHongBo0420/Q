@@ -324,7 +324,7 @@ def loss_fn(module: layer.Layer,
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
               
-    y = z_original
+    y = z_original.val
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mix_idx = get_mixup_sample_rate(y.reshape(-1, 1), kernel="gaussian", bandwidth=0.5)
     mixed_x, mixed_y = mixup_data(aligned_x, y, mix_idx)
