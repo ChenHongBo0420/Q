@@ -11,7 +11,7 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-
+from scipy.signal import iirnotch
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
