@@ -276,16 +276,16 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
 def gaussian_mixture_kde(data, bandwidth):
     num_components = data.shape[0]
     mixture_distribution = Categorical(probs=jnp.ones(num_components) / num_components)
-    component_distribution = Normal(loc=jnp.abs(data), scale=jnp.full(data.shape, fill_value=bandwidth))
+    component_distribution = Normal(loc=data.flatten(), scale=jnp.full(data.shape[0], fill_value=bandwidth))
     mixture_model = MixtureSameFamily(mixture_distribution, component_distribution)
     return mixture_model
 
-
 def evaluate_density(mixture_model, points):
-    """Evaluate the density of the mixture model at specified points."""
+    points = points.flatten()
     log_probs = mixture_model.log_prob(points)
     probs = jnp.exp(log_probs)
     return probs
+
 
 def get_mixup_sample_rate(y_list, bandwidth=1.0):
     y_list = jnp.array(y_list)
