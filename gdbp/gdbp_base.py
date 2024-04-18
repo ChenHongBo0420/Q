@@ -283,19 +283,19 @@ def get_mixup_sample_rate(y_list, bandwidth=1.0):
     density /= density.sum()
     return jnp.tile(density, (y_list.shape[0], 1))
   
-def mixup_data(x, y, mix_idx, alpha=1.0):
+def mixup_data(x, y, mix_idx, alpha, key):
     batch_size = x.shape[0]
     mixed_x = jnp.zeros_like(x)
     mixed_y = jnp.zeros_like(y)
+    keys = random.split(key, batch_size)  
 
     for i in range(batch_size):
-        j = jnp.argmax(random.multinomial(1, mix_idx[i]))  # Sample based on mix_idx probabilities
-        lam = random.beta(alpha, alpha)
+        j = random.categorical(keys[i], jnp.log(mix_idx[i]))
+        lam = random.beta(keys[i], alpha, alpha)
         mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
         mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
 
     return mixed_x, mixed_y
-
   
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -313,11 +313,11 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-              
+    key = random.PRNGKey(0)          
     y_values = z_original.val.reshape(-1, 1)  
     aligned_x = x[z_original.t.start:z_original.t.stop] 
     mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
-    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx) 
+    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
     mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
               
     # aligned_x = x[z_original.t.start:z_original.t.stop]
