@@ -263,7 +263,7 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
 
     if np.random.rand() < p_noise:
         sigma = np.random.uniform(noise_range[0], noise_range[1])
-        noise = jnp.random.normal(0, sigma, x.shape)
+        noise = np.random.normal(0, sigma, x.shape)
         x = x + noise
 
     if np.random.rand() < p:
