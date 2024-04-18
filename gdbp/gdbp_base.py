@@ -315,7 +315,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
     key = random.PRNGKey(0)          
     y_values = z_original.val.reshape(-1, 1)  
-    aligned_x = x[z_original.t.start:z_original.t.stop] 
+    aligned_x = x[z_original.t.start:z_original.t.stop].val 
     mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
     mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
     mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
