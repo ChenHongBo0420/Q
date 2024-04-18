@@ -247,7 +247,7 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
-def apply_combined_transform(x, band_stop_range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, p_band_stop=0.5, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), shift_range1=(-100, 100), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5, p=0.5):
+def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), shift_range1=(-100, 100), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5, p=0.5):
     if np.random.rand() < p_scale:
         scale = np.random.uniform(scale_range[0], scale_range[1])
         x = x * scale
@@ -271,12 +271,6 @@ def apply_combined_transform(x, band_stop_range=(0.5, 30.0), band_width=2.0, sam
     if np.random.rand() < p:
         t_shift = np.random.randint(shift_range1[0], shift_range1[1])
         x = jnp.roll(x, shift=t_shift)
-      
-    if np.random.rand() < p_band_stop:
-        center_freq = np.random.uniform(band_stop_range[0], band_stop_range[1])
-        b, a = iirnotch(center_freq, center_freq / band_width, sampling_rate)
-        x = lfilter(b, a, x)
-      
     return x
 
 def loss_fn(module: layer.Layer,
