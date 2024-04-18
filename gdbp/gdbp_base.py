@@ -289,8 +289,8 @@ def mixup_data(x, y, mix_idx, alpha=1.0):
     mixed_y = jnp.zeros_like(y)
 
     for i in range(batch_size):
-        j = jnp.argmax(jnp.random.multinomial(1, mix_idx[i]))  # Sample based on mix_idx probabilities
-        lam = jnp.random.beta(alpha, alpha)
+        j = jnp.argmax(random.multinomial(1, mix_idx[i]))  # Sample based on mix_idx probabilities
+        lam = random.beta(alpha, alpha)
         mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
         mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
 
