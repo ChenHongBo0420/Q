@@ -12,7 +12,7 @@ import jax
 from scipy import signal
 from flax import linen as nn
 from scipy.signal import iirnotch
-from jax.scipy.signal import lfilter
+from scipy.signal import lfilter
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
