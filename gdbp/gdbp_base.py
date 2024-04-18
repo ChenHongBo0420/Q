@@ -11,8 +11,7 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-from scipy.signal import iirnotch
-from scipy.signal import lfilter
+from sklearn.neighbors import KernelDensity
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -272,7 +271,42 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         t_shift = np.random.randint(shift_range1[0], shift_range1[1])
         x = jnp.roll(x, shift=t_shift)
     return x
+  
+def get_mixup_sample_rate(y_list, kernel="gaussian", bandwidth=1.0):
+    y_list = jnp.array(y_list)
+    N = y_list.shape[0]
+    mix_idx = []
 
+    # KDE expects a 2D array
+    y_list_2d = jnp.atleast_2d(y_list).T
+
+    for i in range(N):
+        data_i = jnp.atleast_2d(y_list[i]).T
+        kd = KernelDensity(kernel=kernel, bandwidth=bandwidth)
+        kd.fit(data_i)  # Fit KDE
+
+        log_density = kd.score_samples(y_list_2d)
+        density = jnp.exp(log_density)
+        density /= density.sum()  # Normalize to get probabilities
+
+        mix_idx.append(density)
+
+    return jnp.array(mix_idx)
+  
+def mixup_data(x, y, mix_idx, alpha=1.0):
+    batch_size = x.shape[0]
+    mixed_x = jnp.zeros_like(x)
+    mixed_y = jnp.zeros_like(y)
+
+    for i in range(batch_size):
+        j = jnp.argmax(jnp.random.multinomial(1, mix_idx[i]))  # Sample based on mix_idx probabilities
+        lam = jnp.random.beta(alpha, alpha)
+        mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
+        mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
+
+    return mixed_x, mixed_y
+
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -289,7 +323,14 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-    
+              
+    y = jnp.abs(z_original.val)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    ax = jnp.abs(aligned_x.val)
+    mix_idx = get_mixup_sample_rate(y.reshape(-1, 1), kernel="gaussian", bandwidth=0.5)
+    mixed_x, mixed_y = mixup_data(ax, y, mix_idx)
+    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
+              
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
@@ -297,9 +338,9 @@ def loss_fn(module: layer.Layer,
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
     # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
-    # total_loss = mmse_loss + contrastive_loss
+    # total_loss = mse_loss + contrastive_loss
 
-    return contrastive_loss, updated_state
+    return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
