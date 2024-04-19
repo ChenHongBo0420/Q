@@ -273,44 +273,6 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-def gaussian_mixture_kde(data, bandwidth):
-    num_components = data.shape[0]
-    mixture_distribution = Categorical(probs=jnp.ones(num_components) / num_components)
-    component_distribution = Normal(loc=data.flatten(), scale=jnp.full(data.shape[0], fill_value=bandwidth))
-    mixture_model = MixtureSameFamily(mixture_distribution, component_distribution)
-    return mixture_model
-
-def evaluate_density(mixture_model, points):
-    points = points.flatten()
-    log_probs = mixture_model.log_prob(points)
-    probs = jnp.exp(log_probs)
-    return probs
-
-
-def get_mixup_sample_rate(y_list, bandwidth=1.0):
-    y_list = jnp.array(y_list)
-    y_list = jnp.abs(y_list)
-    mixture_model = gaussian_mixture_kde(y_list, bandwidth)
-    density = evaluate_density(mixture_model, y_list)
-    density /= density.sum()
-    return jnp.tile(density, (y_list.shape[0], 1))
-
-  
-def mixup_data(x, y, mix_idx, alpha, key):
-    batch_size = x.shape[0]
-    mixed_x = jnp.zeros_like(x)
-    mixed_y = jnp.zeros_like(y)
-    keys = random.split(key, batch_size) 
-
-    for i in range(batch_size):
-        logits = jnp.log(mix_idx[i]).astype(jnp.float32)
-        j = random.categorical(keys[i], logits)
-        lam = random.beta(keys[i], alpha, alpha)
-        mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
-        mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
-
-    return mixed_x, mixed_y
-
   
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -327,25 +289,17 @@ def loss_fn(module: layer.Layer,
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-    key = random.PRNGKey(0)          
-    y_values = z_original.val.reshape(-1, 1)  
-    aligned_x = x[z_original.t.start:z_original.t.stop] 
-    mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
-    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
-    mixed_y = mixed_y.reshape(-1, 2)
-    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
-              
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
+ 
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
     # total_loss = mse_loss + contrastive_loss
 
-    return mse_loss, updated_state
+    return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
