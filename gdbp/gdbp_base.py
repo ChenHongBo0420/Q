@@ -288,7 +288,8 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
-    print("Dimensions of z_original:", z_original.shape)
+    print("Dimensions of z_original.data:", z_original.data.shape)
+
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
