@@ -283,7 +283,9 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_transform(y)
     y_transformed1 = apply_combined_transform(y)
-    print(y.shape)
+    diff_data = jnp.diff(y, axis=0)
+    diff_data = jnp.vstack([y[0], diff_data])
+    print(diff_data.shape)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
