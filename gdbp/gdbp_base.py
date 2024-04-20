@@ -285,7 +285,8 @@ def loss_fn(module: layer.Layer,
     y_transformed1 = apply_combined_transform(y)
     diff_data = jnp.diff(y, axis=0)
     diff_data = jnp.vstack([y[0], diff_data])
-    print(diff_data.shape)
+    dd, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(diff_data))
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
@@ -301,6 +302,7 @@ def loss_fn(module: layer.Layer,
     feature_2 = jnp.abs(feature_2)
     f1 = jnp.abs(f1)
     f2 = jnp.abs(f2)
+    z_original = z_original + dd
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
