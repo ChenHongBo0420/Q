@@ -302,8 +302,9 @@ def loss_fn(module: layer.Layer,
     feature_2 = jnp.abs(feature_2)
     f1 = jnp.abs(f1)
     f2 = jnp.abs(f2)
-    z_original = z_original + dd
-    z_original_real = jnp.abs(z_original.val)   
+    z_original_real = jnp.abs(z_original.val)
+    ddd = jnp.abs(dd.val) 
+    z_original = z_original + ddd
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
