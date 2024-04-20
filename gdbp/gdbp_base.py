@@ -11,8 +11,6 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-import distrax
-from distrax import MixtureSameFamily, Categorical, Normal
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
