@@ -291,12 +291,16 @@ def loss_fn(module: layer.Layer,
               
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    feature_1 = z_original.val[:, 0]
-    feature_2 = z_original.val[:, 1]
-    # feature_1 = apply_transform1(feature_1)
-    # feature_2 = apply_transform(feature_2)
-    feature_1 = jnp.abs(feature_1)
-    feature_2 = jnp.abs(feature_2)
+    # feature_1 = z_original.val[:, 0]
+    # feature_2 = z_original.val[:, 1]
+    feature_1 = y[:, 0]
+    feature_2 = y[:, 1]
+    f1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature1))  
+    f2, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature2))          
+    f1 = jnp.abs(f1)
+    f2 = jnp.abs(f2)
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
