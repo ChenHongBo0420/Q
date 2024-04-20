@@ -283,7 +283,7 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_transform(y)
     y_transformed1 = apply_combined_transform(y)
-   
+    print(y.val.shape())
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
@@ -303,10 +303,8 @@ def loss_fn(module: layer.Layer,
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
-    m1 = jnp.mean((f1 - feature_1) ** 2)
-    m2 = jnp.mean((f2 - feature_2) ** 2)
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    total_loss = mse_loss + contrastive_loss + m1 + m2
+    total_loss = mse_loss + contrastive_loss
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
