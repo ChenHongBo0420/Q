@@ -296,9 +296,9 @@ def loss_fn(module: layer.Layer,
     feature_1 = y[:, 0]
     feature_2 = y[:, 1]
     f1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature1))  
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature_1))  
     f2, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature2))          
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(feature_2))          
     f1 = jnp.abs(f1)
     f2 = jnp.abs(f2)
     z_original_real = jnp.abs(z_original.val)   
