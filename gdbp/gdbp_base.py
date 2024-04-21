@@ -283,32 +283,23 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_transform(y)
     y_transformed1 = apply_combined_transform(y)
-    diff_data = jnp.diff(y, axis=0)
-    diff_data = jnp.vstack([y[0], diff_data])
-    dd, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(diff_data))
+    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    ddd = jnp.abs(dd.val) 
-    z_original = jnp.abs(z_original.val)
-    z_original = z_original + ddd
+    # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    mse_loss = jnp.mean(jnp.abs(z_original - aligned_x) ** 2)
-              
+         
     # feature_1 = z_original.val[:, 0]
     # feature_2 = z_original.val[:, 1]
-    # feature_1 = jnp.abs(feature_1)
-    # feature_2 = jnp.abs(feature_2)
     
-    # z_original_real = jnp.abs(z_original.val)
-    # z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    # z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    z_original_real = jnp.abs(z_original.val)
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
-    # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
     # total_loss = mse_loss + contrastive_loss
               
     return mse_loss, updated_state
