@@ -302,7 +302,7 @@ def loss_fn(module: layer.Layer,
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
     # total_loss = mse_loss + contrastive_loss
               
-    return mse_loss, updated_state
+    return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
