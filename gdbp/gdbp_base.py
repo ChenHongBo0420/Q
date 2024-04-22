@@ -271,7 +271,7 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
- def batch_power_norm_loss(module: layer.Layer, signal: core.Signal, params: Dict, state: Dict):
+def batch_power_norm_loss(module: layer.Layer, signal: core.Signal, params: Dict, state: Dict):
 
     normalized_signal, updated_state = module.apply({'params': params, **state}, signal)
 
