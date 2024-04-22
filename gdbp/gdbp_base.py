@@ -271,7 +271,14 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-  
+ def batch_power_norm_loss(module: layer.Layer, signal: core.Signal, params: Dict, state: Dict):
+
+    normalized_signal, updated_state = module.apply({'params': params, **state}, signal)
+
+    power_loss = jnp.mean((jnp.abs(signal.val) ** 2) - (jnp.abs(normalized_signal.val) ** 2))
+
+    return power_loss, updated_state
+ 
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -294,15 +301,15 @@ def loss_fn(module: layer.Layer,
          
     # feature_1 = z_original.val[:, 0]
     # feature_2 = z_original.val[:, 1]
-    
+    batch_power_loss, _ = batch_power_norm_loss(module, core.Signal(y), params, state)
     z_original_real = jnp.abs(z_original.val)
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
     # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
     # total_loss = mse_loss + contrastive_loss
-              
-    return contrastive_loss, updated_state
+    total_loss = contrastive_loss + batch_power_loss
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
