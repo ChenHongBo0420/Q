@@ -270,7 +270,28 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         t_shift = np.random.randint(shift_range1[0], shift_range1[1])
         x = jnp.roll(x, shift=t_shift)
     return x
- 
+  
+def si_snr(target, estimate, eps=1e-8):
+    # 目标信号能量
+    target_energy = l2_norm(target)
+    
+    # 估计信号和目标信号的点积
+    dot_product = jnp.sum(target * estimate)
+    
+    # 投影估计信号到目标信号上
+    s_target = dot_product / (target_energy + eps) * target
+    
+    # 误差信号
+    e_noise = estimate - s_target
+    
+    # 目标和误差的能量
+    target_energy = l2_norm(s_target)
+    noise_energy = l2_norm(e_noise)
+    
+    # 计算SI-SNR
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value  # 返回负值，因为优化过程中需要最小化损失
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -288,8 +309,8 @@ def loss_fn(module: layer.Layer,
     z_transformed1, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    # aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
          
     # feature_1 = z_original.val[:, 0]
     # feature_2 = z_original.val[:, 1]
@@ -300,8 +321,9 @@ def loss_fn(module: layer.Layer,
     power_variance_loss = jnp.var(jnp.abs(z_original.val)**2)
     # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    total_loss = mse_loss + batch_power_loss + power_variance_loss
-    # total_loss = contrastive_loss + batch_power_loss + power_variance_loss
+    snr = si_snr(z_original.val, z_transformed1.val)
+    # total_loss = mse_loss + batch_power_loss + power_variance_loss
+    total_loss = contrastive_loss + batch_power_loss + power_variance_loss + snr
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
