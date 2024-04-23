@@ -271,9 +271,12 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
+def energy(x):
+    return jnp.sum(jnp.square(x))
+  
 def si_snr(target, estimate, eps=1e-8):
     # 目标信号能量
-    target_energy = l2_normalize(target)
+    target_energy = energy(target)
     
     # 估计信号和目标信号的点积
     dot_product = jnp.sum(target * estimate)
@@ -285,12 +288,13 @@ def si_snr(target, estimate, eps=1e-8):
     e_noise = estimate - s_target
     
     # 目标和误差的能量
-    target_energy = l2_normalize(s_target)
-    noise_energy = l2_normalize(e_noise)
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
     
     # 计算SI-SNR
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value  # 返回负值，因为优化过程中需要最小化损失
+
 
 def loss_fn(module: layer.Layer,
             params: Dict,
