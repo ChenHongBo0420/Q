@@ -17,132 +17,53 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0 = 0.,
-#                      mode: str = 'train'):
-#     '''
-#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
-#     specific initialization method and trainable parameters defined
-#     by trainer.
+def make_base_module(steps: int = 3,
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0 = 0.,
+                     mode: str = 'train'):
+    '''
+    make base module that derives DBP, FDBP, EDBP, GDBP depending on
+    specific initialization method and trainable parameters defined
+    by trainer.
 
-#     Args:
-#         steps: GDBP steps/layers
-#         dtaps: D-filter length
-#         ntaps: N-filter length
-#         rtaps: R-filter length
-#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-#         mode: 'train' or 'test'
+    Args:
+        steps: GDBP steps/layers
+        dtaps: D-filter length
+        ntaps: N-filter length
+        rtaps: R-filter length
+        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+        mode: 'train' or 'test'
 
-#     Returns:
-#         A layer object
-#     '''
+    Returns:
+        A layer object
+    '''
 
-#     _assert_taps(dtaps, ntaps, rtaps)
+    _assert_taps(dtaps, ntaps, rtaps)
 
-#     d_init, n_init = init_fn
+    d_init, n_init = init_fn
 
-#     if mode == 'train':
-#         # configure mimo to its training mode
-#         mimo_train = True
-#     elif mode == 'test':
-#         # mimo operates at training mode for the first 200000 symbols,
-#         # then switches to tracking mode afterwards
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
+    if mode == 'train':
+        # configure mimo to its training mode
+        mimo_train = True
+    elif mode == 'test':
+        # mimo operates at training mode for the first 200000 symbols,
+        # then switches to tracking mode afterwards
+        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+    else:
+        raise ValueError('invalid mode %s' % mode)
         
-#     base_layers = [
-#         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train)
-#     ] 
-#     base = layer.Serial(*base_layers)
-#     return base
-
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0 = 0.,
-#                      mode: str = 'train'):
-#     '''
-#     Make base module that derives DBP, FDBP, EDBP, GDBP depending on
-#     specific initialization method and trainable parameters defined
-#     by trainer.
-
-#     Args:
-#         steps: GDBP steps/layers
-#         dtaps: D-filter length
-#         ntaps: N-filter length
-#         rtaps: R-filter length
-#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-#         mode: 'train' or 'test'
-
-#     Returns:
-#         A function that performs forward pass.
-#     '''
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         mimo_train = True
-#     elif mode == 'test':
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-        
-#     base_layers = [
-#         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train)
-#     ]
-
-#     def forward_fn(x):
-#         for lyr in base_layers:
-#             x = lyr(x)
-#         return x
-    
-#     return forward_fn
-
-class Encoder(nn.Module):
-    conv1d: nn.Module
-    hidden_dim: int
-    z_dim: int
-
-    def setup(self):
-        self.conv = self.conv1d
-        self.dense_mean = nn.Dense(self.z_dim)
-        self.dense_logvar = nn.Dense(self.z_dim)
-
-    def __call__(self, x):
-        x = self.conv(x)
-        x = x.reshape((x.shape[0], -1))  # Flatten the output for the dense layers
-        z_mean = self.dense_mean(x)
-        z_logvar = self.dense_logvar(x)
-        return z_mean, z_logvar
-            
-class Decoder(nn.Module):
-    base_module: nn.Module
-
-    def __call__(self, z, x):
-        return self.base_module(jnp.concatenate([x, z], axis=-1))
-            
-def reparameterize(key, mu, logvar):
-    std = jnp.exp(0.5 * logvar)
-    eps = jax.random.normal(key, std.shape)
-    return mu + eps * std
-
+    base_layers = [
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
+    ] 
+    base = layer.Serial(*base_layers)
+    return base
 
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
@@ -150,9 +71,7 @@ def make_base_module(steps: int = 3,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0 = 0.,
-                     mode: str = 'train',
-                     hidden_dim: int = 128,
-                     z_dim: int = 20):
+                     mode: str = 'train'):
     '''
     Make base module that derives DBP, FDBP, EDBP, GDBP depending on
     specific initialization method and trainable parameters defined
@@ -165,8 +84,6 @@ def make_base_module(steps: int = 3,
         rtaps: R-filter length
         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
         mode: 'train' or 'test'
-        hidden_dim: hidden dimension for the encoder
-        z_dim: dimension of the latent space
 
     Returns:
         A function that performs forward pass.
@@ -182,10 +99,7 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-
-    conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=rtaps)
-    encoder = Encoder(conv1d=conv1d, hidden_dim=hidden_dim, z_dim=z_dim)
-
+        
     base_layers = [
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
@@ -194,21 +108,14 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
 
-    def base_module(x):
+    def forward_fn(x):
         for lyr in base_layers:
             x = lyr(x)
         return x
-
-    decoder = Decoder(base_module=base_module)
-
-    def forward_fn(x, key):
-        z_mean, z_logvar = encoder(x)
-        z = reparameterize(key, z_mean, z_logvar)
-        reconstructed_x = decoder(z, x)
-        return reconstructed_x, z_mean, z_logvar
     
     return forward_fn
-                             
+
+
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
     assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
@@ -294,26 +201,6 @@ def model_init(data: gdat.Input,
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
-def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
-    batch_size = z1.shape[0]
-
-    z1 = l2_normalize(z1, axis=1)
-    z2 = l2_normalize(z2, axis=1)
-
-    representations = jnp.vstack([z1, z2])
-
-    similarity_matrix = jnp.matmul(representations, representations.T) / temperature
-
-    similarity_matrix -= jnp.eye(2 * batch_size) * LARGE_NUM
-
-    positives = jnp.exp(similarity_matrix[:batch_size, batch_size:]) / temperature
-    negatives = jnp.sum(jnp.exp(similarity_matrix[:batch_size, :batch_size]) / temperature, axis=1) + \
-                jnp.sum(jnp.exp(similarity_matrix[:batch_size, batch_size + 1:]) / temperature, axis=1)
-
-    loss = -jnp.log(positives / (positives + negatives))
-    loss = jnp.mean(loss)
-
-    return loss
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
@@ -403,25 +290,14 @@ def energy(x):
     return jnp.sum(jnp.square(x))
   
 def si_snr(target, estimate, eps=1e-8):
-    # 目标信号能量
     target_energy = energy(target)
-    
-    # 估计信号和目标信号的点积
     dot_product = jnp.sum(target * estimate)
-    
-    # 投影估计信号到目标信号上
     s_target = dot_product / (target_energy + eps) * target
-    
-    # 误差信号
     e_noise = estimate - s_target
-    
-    # 目标和误差的能量
     target_energy = energy(s_target)
     noise_energy = energy(e_noise)
-    
-    # 计算SI-SNR
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value  # 返回负值，因为优化过程中需要最小化损失
+    return -si_snr_value  
 
 
 def loss_fn(module: layer.Layer,
