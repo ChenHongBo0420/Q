@@ -320,17 +320,11 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
          
-    # feature_1 = z_original.val[:, 0]
-    # feature_2 = z_original.val[:, 1]
     z_original_real = jnp.abs(z_original.val)
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    batch_power_loss = jnp.mean(jnp.abs(z_original.val)**2)
-    power_variance_loss = jnp.var(jnp.abs(z_original.val)**2)
-    # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    total_loss = contrastive_loss + batch_power_loss + power_variance_loss
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    total_loss = snr
     return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
