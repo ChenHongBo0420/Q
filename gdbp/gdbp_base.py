@@ -55,65 +55,23 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
         
-    base_layers = [
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
+    base = layer.Serial(
+        layer.FDBP(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train)
-    ] 
-    base = layer.Serial(*base_layers)
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        
     return base
 
-def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train'):
-    '''
-    Make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
-
-    Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
-
-    Returns:
-        A function that performs forward pass.
-    '''
-
-    _assert_taps(dtaps, ntaps, rtaps)
-
-    d_init, n_init = init_fn
-
-    if mode == 'train':
-        mimo_train = True
-    elif mode == 'test':
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
-    else:
-        raise ValueError('invalid mode %s' % mode)
-        
-    base_layers = [
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train)
-    ]
-
-    def forward_fn(x):
-        for lyr in base_layers:
-            x = lyr(x)
-        return x
-    
-    return forward_fn
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
