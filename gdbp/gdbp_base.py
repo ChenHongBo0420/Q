@@ -281,10 +281,10 @@ def loss_fn(module: layer.Layer,
     z_original_real = jnp.abs(z_original.val)   
     z_transformed_real1 = jnp.abs(z_transformed1.val) 
     # z_transformed_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr = si_snr(z_transformed_real1, z_original_real)
-    return snr, updated_state
+    # snr = si_snr(z_transformed_real1, z_original_real)
+    return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
