@@ -202,7 +202,7 @@ def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
 #         x = x * mask
 #     return x
 
-def apply_transform2(x, mask_range=(0, 30), p=0.5):
+def apply_transform2(x, mask_range=(0, 300), p=0.8):
     if np.random.rand() < p:
         total_length = x.shape[0]
         mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
@@ -267,13 +267,13 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform(y)
-    y_transformed1 = apply_combined_transform(y)
+    y_transformed = apply_transform2(y)
+    # y_transformed1 = apply_combined_transform(y)
     
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))       
 
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
