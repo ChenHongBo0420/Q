@@ -267,13 +267,13 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    y_transformed = apply_transform2(y)
-    # y_transformed1 = apply_combined_transform(y)
+    # y_transformed = apply_transform2(y)
+    y_transformed1 = apply_combined_transform(y)
     
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))       
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
 
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
