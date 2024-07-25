@@ -284,8 +284,8 @@ def loss_fn(module: layer.Layer,
     # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
     x = y - z_original
-    snr = si_snr(jnp.abs(x.val), jnp.abs(y))          
-    return snr, updated_state
+    snr1 = si_snr(jnp.abs(x.val), jnp.abs(y))          
+    return snr1, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
