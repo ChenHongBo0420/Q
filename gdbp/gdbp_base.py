@@ -275,7 +275,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     
     def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
-        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights[:batch_size])
+        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights)
         mixed_x = lam * x + (1 - lam) * x[index]
         mixed_y = lam * y + (1 - lam) * y[index]
         return mixed_x, mixed_y
