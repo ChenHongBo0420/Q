@@ -12,7 +12,7 @@ import jax
 from scipy import signal
 from flax import linen as nn
 from sklearn.neighbors import KernelDensity
-
+from jax.scipy.stats import norm
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
