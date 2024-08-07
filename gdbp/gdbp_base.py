@@ -259,24 +259,30 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value  
 
 def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
+    # 使用 JAX 计算 KDE 权重
     def kde_func(x, data, bandwidth):
         return jnp.mean(norm.pdf((x - data) / bandwidth), axis=0) / bandwidth
 
     log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
     weights = jnp.exp(log_probs)
-    weights /= jnp.sum(weights) 
+    weights /= jnp.sum(weights)  # 归一化为概率
     return weights
 
-@jit  
+@jit
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     batch_size = x.shape[0]
-    if alpha > 0:
+    
+    def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
-    else:
-        lam = 1.0  # 如果 alpha 为 0，则不进行 mixup
-    index = random.choice(rng_key, batch_size, shape=(batch_size,), p=weights)
-    mixed_x = lam * x + (1 - lam) * x[index]
-    mixed_y = lam * y + (1 - lam) * y[index]
+        index = random.choice(rng_key, batch_size, shape=(batch_size,), p=weights)
+        mixed_x = lam * x + (1 - lam) * x[index]
+        mixed_y = lam * y + (1 - lam) * y[index]
+        return mixed_x, mixed_y
+
+    def no_mixup_fn(_):
+        return x, y
+
+    mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
   
 def loss_fn(module: layer.Layer,
