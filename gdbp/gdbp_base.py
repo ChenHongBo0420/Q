@@ -260,6 +260,7 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value  
 
 
+
 def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     # 使用 JAX 计算 KDE 权重
     def kde_func(x, data, bandwidth):
@@ -273,14 +274,14 @@ def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 @jit
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     batch_size = x.shape[0]
-    
+
     def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
         # 确保权重的形状与 batch_size 匹配
         print("weights shape in mixup_fn:", weights.shape)
         assert weights.shape[0] == batch_size, f"weights shape must match batch_size, got {weights.shape[0]} and {batch_size}"
-        weights = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
-        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights)
+        weights_float = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
+        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights_float)
         mixed_x = lam * x + (1 - lam) * x[index]
         mixed_y = lam * y + (1 - lam) * y[index]
         return mixed_x, mixed_y
