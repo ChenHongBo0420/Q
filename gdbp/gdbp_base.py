@@ -263,13 +263,22 @@ def si_snr(target, estimate, eps=1e-8):
 
 def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     # 使用 JAX 计算 KDE 权重
-    data_real = jnp.real(data)  # 只使用实部计算
+    data_real = jnp.real(data)  # 处理实部
+    data_imag = jnp.imag(data)  # 处理虚部
+
     def kde_func(x, data, bandwidth):
         return jnp.mean(norm.pdf((x - data) / bandwidth), axis=0) / bandwidth
 
-    log_probs = jnp.log(jnp.array([kde_func(x, data_real, bandwidth) for x in data_real]))
-    weights = jnp.exp(log_probs)
-    weights /= jnp.sum(weights)  # 归一化为概率
+    log_probs_real = jnp.log(jnp.array([kde_func(x, data_real, bandwidth) for x in data_real]))
+    log_probs_imag = jnp.log(jnp.array([kde_func(x, data_imag, bandwidth) for x in data_imag]))
+
+    weights_real = jnp.exp(log_probs_real)
+    weights_imag = jnp.exp(log_probs_imag)
+
+    weights_real /= jnp.sum(weights_real)  # 归一化为概率
+    weights_imag /= jnp.sum(weights_imag)  # 归一化为概率
+
+    weights = (weights_real + weights_imag) / 2  # 合并实部和虚部的权重
     return weights.mean(axis=1)  # 确保返回的是 (batch_size,)
 
 @jit
@@ -278,8 +287,6 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
 
     def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
-        # 确保权重的形状与 batch_size 匹配
-        print("weights shape in mixup_fn:", weights.shape)
         assert weights.shape[0] == batch_size, f"weights shape must match batch_size, got {weights.shape[0]} and {batch_size}"
         weights_float = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
         index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights_float)
@@ -292,7 +299,6 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
 
     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
-
   
 def loss_fn(module: layer.Layer,
             params: Dict,
