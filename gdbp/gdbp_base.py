@@ -275,7 +275,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     
     def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
-        index = random.choice(rng_key, batch_size, shape=(batch_size,), p=weights)
+        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights[:batch_size])
         mixed_x = lam * x + (1 - lam) * x[index]
         mixed_y = lam * y + (1 - lam) * y[index]
         return mixed_x, mixed_y
@@ -285,6 +285,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
 
     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
+
   
 def loss_fn(module: layer.Layer,
             params: Dict,
