@@ -279,6 +279,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
         # 确保权重的形状与 batch_size 匹配
         print("weights shape in mixup_fn:", weights.shape)
         assert weights.shape[0] == batch_size, f"weights shape must match batch_size, got {weights.shape[0]} and {batch_size}"
+        weights = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
         index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights)
         mixed_x = lam * x + (1 - lam) * x[index]
         mixed_y = lam * y + (1 - lam) * y[index]
@@ -289,6 +290,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
 
     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
+
   
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -310,7 +312,7 @@ def loss_fn(module: layer.Layer,
     
     # 确保 weights 的长度与 batch_size 匹配
     batch_size = aligned_x.shape[0]
-    weights = weights[:batch_size]
+    weights = weights[:batch_size].astype(jnp.float32)  # 确保 weights 是浮点类型
     print("weights shape in loss_fn:", weights.shape)
 
     # 应用 C-Mixup 数据增强
