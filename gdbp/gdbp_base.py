@@ -268,7 +268,7 @@ def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
     weights = jnp.exp(log_probs)
     weights /= jnp.sum(weights)  # 归一化为概率
-    return weights.mean(axis=1)  # 确保返回的是 (500,) 而不是 (500, 2)
+    return weights.mean(axis=1)  # 确保返回的是 (batch_size,)
 
 @jit
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
@@ -289,7 +289,7 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
 
     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
-
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -310,11 +310,11 @@ def loss_fn(module: layer.Layer,
     
     # 确保 weights 的长度与 batch_size 匹配
     batch_size = aligned_x.shape[0]
-    weights = jnp.broadcast_to(weights, (batch_size,))
+    weights = weights[:batch_size]
     print("weights shape in loss_fn:", weights.shape)
 
     # 应用 C-Mixup 数据增强
-    y, aligned_x = c_mixup_data(rng_key, y, aligned_x, weights, alpha=0.1)
+    y, aligned_x = c_mixup_data(rng_key, y[:batch_size], aligned_x, weights, alpha=0.1)
 
     # 计算损失
     loss = jnp.mean(jnp.abs(z.val - aligned_x)**2)
