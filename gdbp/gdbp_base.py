@@ -290,14 +290,14 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
     return mixed_x, mixed_y
 
-def loss_fn(module: Layer,
+def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
-            y: Any,
-            x: Any,
+            y: Array,
+            x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict):
+            sparams: Dict,):
     ''' loss function
 
         Args:
