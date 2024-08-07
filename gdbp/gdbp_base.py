@@ -259,6 +259,7 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value  
 
+
 def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     # 使用 JAX 计算 KDE 权重
     def kde_func(x, data, bandwidth):
@@ -275,7 +276,8 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     
     def mixup_fn(_):
         lam = random.beta(rng_key, alpha, alpha)
-        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights)
+        # 选择的概率 p 的长度必须与选择对象的长度相同
+        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights[:batch_size])
         mixed_x = lam * x + (1 - lam) * x[index]
         mixed_y = lam * y + (1 - lam) * y[index]
         return mixed_x, mixed_y
