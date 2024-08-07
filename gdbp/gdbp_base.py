@@ -259,13 +259,14 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value  
 
 def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
-    data_np = jnp.array(data)
-    kd = KernelDensity(kernel=kernel, bandwidth=bandwidth)
-    kd.fit(data_np)
-    log_probs = kd.score_samples(data_np)
+    def kde_func(x, data, bandwidth):
+        return jnp.mean(norm.pdf((x - data) / bandwidth), axis=0) / bandwidth
+
+    log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
     weights = jnp.exp(log_probs)
     weights /= jnp.sum(weights) 
     return weights
+
 @jit  
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     batch_size = x.shape[0]
