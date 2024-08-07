@@ -289,7 +289,7 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_combined_transform(y)
     rng_key = random.PRNGKey(0)
-    weights = compute_kde_weights(aligned_x)
+    weights = compute_kde_weights(x)
     y, x = c_mixup_data(rng_key, y, x, weights, alpha=0.1)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
