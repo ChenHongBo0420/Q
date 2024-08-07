@@ -261,67 +261,67 @@ def si_snr(target, estimate, eps=1e-8):
 
 
 
-def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
-    # 使用 JAX 计算 KDE 权重
-    def kde_func(x, data, bandwidth):
-        return jnp.mean(norm.pdf((x - data) / bandwidth), axis=0) / bandwidth
+# def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
+#     # 使用 JAX 计算 KDE 权重
+#     def kde_func(x, data, bandwidth):
+#         return jnp.mean(norm.pdf((x - data) / bandwidth), axis=0) / bandwidth
 
-    log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
-    weights = jnp.exp(log_probs)
-    weights /= jnp.sum(weights)  # 归一化为概率
-    return weights.mean(axis=1)  # 确保返回的是 (batch_size,)
+#     log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
+#     weights = jnp.exp(log_probs)
+#     weights /= jnp.sum(weights)  # 归一化为概率
+#     return weights.mean(axis=1)  # 确保返回的是 (batch_size,)
 
-@jit
-def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
-    batch_size = x.shape[0]
+# @jit
+# def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
+#     batch_size = x.shape[0]
 
-    def mixup_fn(_):
-        lam = random.beta(rng_key, alpha, alpha)
-        # 确保权重的形状与 batch_size 匹配
-        print("weights shape in mixup_fn:", weights.shape)
-        assert weights.shape[0] == batch_size, f"weights shape must match batch_size, got {weights.shape[0]} and {batch_size}"
-        weights_float = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
-        index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights_float)
-        mixed_x = lam * x + (1 - lam) * x[index]
-        mixed_y = lam * y + (1 - lam) * y[index]
-        return mixed_x, mixed_y
+#     def mixup_fn(_):
+#         lam = random.beta(rng_key, alpha, alpha)
+#         # 确保权重的形状与 batch_size 匹配
+#         print("weights shape in mixup_fn:", weights.shape)
+#         assert weights.shape[0] == batch_size, f"weights shape must match batch_size, got {weights.shape[0]} and {batch_size}"
+#         weights_float = weights.astype(jnp.float32)  # 确保 weights 是浮点类型
+#         index = random.choice(rng_key, a=batch_size, shape=(batch_size,), p=weights_float)
+#         mixed_x = lam * x + (1 - lam) * x[index]
+#         mixed_y = lam * y + (1 - lam) * y[index]
+#         return mixed_x, mixed_y
 
-    def no_mixup_fn(_):
-        return x, y
+#     def no_mixup_fn(_):
+#         return x, y
 
-    mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
-    return mixed_x, mixed_y
+#     mixed_x, mixed_y = lax.cond(alpha > 0, mixup_fn, no_mixup_fn, operand=None)
+#     return mixed_x, mixed_y
 
   
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     
-    # 计算 KDE 权重
-    aligned_x = x[z.t.start:z.t.stop]
-    print("aligned_x shape:", aligned_x.shape)  # 打印 aligned_x 形状
-    rng_key = random.PRNGKey(0)
-    weights = compute_kde_weights(aligned_x)
+#     # 计算 KDE 权重
+#     aligned_x = x[z.t.start:z.t.stop]
+#     print("aligned_x shape:", aligned_x.shape)  # 打印 aligned_x 形状
+#     rng_key = random.PRNGKey(0)
+#     weights = compute_kde_weights(aligned_x)
     
-    # 确保 weights 的长度与 batch_size 匹配
-    batch_size = aligned_x.shape[0]
-    weights = weights[:batch_size].astype(jnp.float32)  # 确保 weights 是浮点类型
-    print("weights shape in loss_fn:", weights.shape)
+#     # 确保 weights 的长度与 batch_size 匹配
+#     batch_size = aligned_x.shape[0]
+#     weights = weights[:batch_size].astype(jnp.float32)  # 确保 weights 是浮点类型
+#     print("weights shape in loss_fn:", weights.shape)
 
-    # 应用 C-Mixup 数据增强
-    y, aligned_x = c_mixup_data(rng_key, y[:batch_size], aligned_x, weights, alpha=0.1)
+#     # 应用 C-Mixup 数据增强
+#     y, aligned_x = c_mixup_data(rng_key, y[:batch_size], aligned_x, weights, alpha=0.1)
 
-    # 计算损失
-    loss = jnp.mean(jnp.abs(z.val - aligned_x)**2)
-    return loss, updated_state
+#     # 计算损失
+#     loss = jnp.mean(jnp.abs(z.val - aligned_x)**2)
+#     return loss, updated_state
 
   
 # def loss_fn(module: layer.Layer,
@@ -336,13 +336,6 @@ def loss_fn(module: layer.Layer,
 #     z_original, updated_state = module.apply(
 #         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
 #     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     rng_key = random.PRNGKey(0)
-#     weights = compute_kde_weights(aligned_x)
-#     y1 = y[z_original.t.start:z_original.t.stop]
-#     y1, x = c_mixup_data(rng_key, y1, aligned_x, weights, alpha=0.1)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y1)) 
 #     aligned_x = x[z_original.t.start:z_original.t.stop]
 #     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))        
