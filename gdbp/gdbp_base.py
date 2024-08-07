@@ -289,8 +289,8 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_combined_transform(y)
     
-    # z_original, updated_state = module.apply(
-    #     {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))    
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))    
     rng_key = random.PRNGKey(0)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     weights = compute_kde_weights(aligned_x)
