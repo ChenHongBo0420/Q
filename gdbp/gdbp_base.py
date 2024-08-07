@@ -299,7 +299,7 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
+    z, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     
     # 计算 KDE 权重
