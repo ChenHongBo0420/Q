@@ -291,6 +291,30 @@ def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     return mixed_x, mixed_y
 
   
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     rng_key = random.PRNGKey(0)
+#     weights = compute_kde_weights(aligned_x)
+#     y1 = y[z_original.t.start:z_original.t.stop]
+#     y1, x = c_mixup_data(rng_key, y1, aligned_x, weights, alpha=0.1)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y1)) 
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))        
+#     return snr, updated_state
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -298,23 +322,35 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
+            sparams: Dict):
+    # 合并参数
     params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    
+    # 应用变换
+    z, updated_state = module.apply(
+        {
+            'params': params,
+            'aux_inputs': aux,
+            'const': const,
+            **state
+        }, core.Signal(y))
+    
+    # 计算 KDE 权重
+    aligned_x = x[z.t.start:z.t.stop]
     rng_key = random.PRNGKey(0)
     weights = compute_kde_weights(aligned_x)
-    y1 = y[z_original.t.start:z_original.t.stop]
-    y1, x = c_mixup_data(rng_key, y1, aligned_x, weights, alpha=0.1)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y1)) 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))        
-    return snr, updated_state
+    
+    # 确保 weights 的长度与 batch_size 匹配
+    batch_size = aligned_x.shape[0]
+    weights = weights[:batch_size]
 
+    # 应用 C-Mixup 数据增强
+    y, aligned_x = c_mixup_data(rng_key, y, aligned_x, weights, alpha=0.1)
+
+    # 计算损失
+    loss = jnp.mean(jnp.abs(z.val - aligned_x)**2)
+    return loss, updated_state
+              
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
