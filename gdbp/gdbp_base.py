@@ -268,7 +268,7 @@ def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     log_probs = jnp.log(jnp.array([kde_func(x, data, bandwidth) for x in data]))
     weights = jnp.exp(log_probs)
     weights /= jnp.sum(weights)  # 归一化为概率
-    return weights
+    return weights.mean(axis=1)  # 确保返回的是 (500,) 而不是 (500, 2)
 
 @jit
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
