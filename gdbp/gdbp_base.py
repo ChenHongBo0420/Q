@@ -266,7 +266,7 @@ def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
     weights = jnp.exp(log_probs)
     weights /= jnp.sum(weights) 
     return weights
-  
+@jit  
 def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
     batch_size = x.shape[0]
     if alpha > 0:
