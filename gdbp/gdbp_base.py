@@ -11,6 +11,7 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
+from sklearn.neighbors import KernelDensity
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -257,7 +258,26 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value  
 
-
+def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
+    data_np = jnp.array(data)
+    kd = KernelDensity(kernel=kernel, bandwidth=bandwidth)
+    kd.fit(data_np)
+    log_probs = kd.score_samples(data_np)
+    weights = jnp.exp(log_probs)
+    weights /= jnp.sum(weights) 
+    return weights
+  
+def c_mixup_data(rng_key, x, y, weights, alpha=0.1):
+    batch_size = x.shape[0]
+    if alpha > 0:
+        lam = random.beta(rng_key, alpha, alpha)
+    else:
+        lam = 1.0  # 如果 alpha 为 0，则不进行 mixup
+    index = random.choice(rng_key, batch_size, shape=(batch_size,), p=weights)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    mixed_y = lam * y + (1 - lam) * y[index]
+    return mixed_x, mixed_y
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -267,17 +287,17 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform2(y)
-    y_transformed1 = apply_combined_transform(y)
+    # y_transformed = apply_combined_transform(y)
     
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
-
+    # z_original, updated_state = module.apply(
+    #     {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))    
+    rng_key = random.PRNGKey(0)
     aligned_x = x[z_original.t.start:z_original.t.stop]
+    weights = compute_kde_weights(aligned_x)
+    aligned_x, y = c_mixup_data(rng_key, y, aligned_x, weights, alpha=0.1)
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-         
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))      
     z_original_real = jnp.abs(z_original.val)   
     # z_transformed_real1 = jnp.abs(z_transformed1.val) 
     # z_transformed_real1 = jax.lax.stop_gradient(z_transformed_real1)
