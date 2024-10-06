@@ -413,7 +413,7 @@ def get_train_batch(ds: gdat.Input,
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter = 10000,
+          n_iter = 1000,
           opt: optim.Optimizer = optim.sgd(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     ''' training process (1 epoch)
 
