@@ -74,6 +74,20 @@ Dict = Union[dict, flax.core.FrozenDict]
         
 #     return base
 
+class CustomParallel(layer.Module):
+    def __init__(self, serial_path, rnn_branch, concat_axis=-1, name='CustomParallel'):
+        super().__init__(name=name)
+        self.serial_path = serial_path
+        self.rnn_branch = rnn_branch
+        self.concat_axis = concat_axis
+        self.concat = layer.Concat(axis=concat_axis, name='ConcatOutputs')
+
+    def forward(self, x):
+        out_serial = self.serial_path(x)
+        out_rnn = self.rnn_branch(x)
+        combined = self.concat(out_serial, out_rnn)
+        return combined
+            
 def make_base_module(steps: int = 3,
                               dtaps: int = 261,
                               ntaps: int = 41,
@@ -134,18 +148,10 @@ def make_base_module(steps: int = 3,
                    d_init=d_init,
                    n_init=n_init),
 
-    # 定义并行容器，将串行路径和 RNN 分支并行处理
-    parallel_module = layer.Parallel(
-        serial_path,
-        rnn_branch,
-        name='ParallelBaseModule'
-    )
-
-    # 合并并行路径的输出，例如通过拼接
-    combined_output = layer.Concat(axis=-1, name='ConcatOutputs')(parallel_module)
+    parallel_module = CustomParallel(serial_path, rnn_branch, concat_axis=-1, name='ParallelBaseModule')
 
 
-    return combined_output
+    return parallel_module 
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
