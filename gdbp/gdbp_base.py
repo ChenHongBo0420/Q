@@ -93,7 +93,6 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
 
-    # 定义串行分支
     serial_branch = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
@@ -104,10 +103,11 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
+                        preslicer=conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train)
+        layer.MIMOAF(train=mimo_train),
+        name='serial_branch'  # 添加名称
     )
 
     base = layer.Serial(
