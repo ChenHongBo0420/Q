@@ -190,7 +190,8 @@ def make_base_module(steps: int = 3,
             fdbp_series,
             serial_branch
         ),
-        layer.FanInMean()
+        # layer.FanInMean()
+        layer.FanInAttention()
     )
 
     return base
