@@ -111,17 +111,18 @@ def make_base_module(steps: int = 3,
     )
 
     base = layer.Serial(
-        layer.FanOut(num=2),
-        layer.Parallel(
-            ('fdbp1', layer.FDBP1(steps=steps,
-                                  dtaps=dtaps,
-                                  ntaps=ntaps,
-                                  d_init=d_init,
-                                  n_init=n_init)),
-            ('serial_branch', serial_branch)
-        ),
-        layer.FanInSum()
-    )
+    layer.FanOut(num=2),
+    layer.Parallel(
+        layer.FDBP1(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp1'),
+        serial_branch._replace(name='serial_branch')
+    ),
+    layer.FanInSum())
+
 
     return base
 
