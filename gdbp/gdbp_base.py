@@ -78,7 +78,7 @@ def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
-                     init_fn: tuple = (delta, gauss),
+                     init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
     '''
@@ -107,7 +107,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=conv1d_slicer(rtaps),
+                        preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
