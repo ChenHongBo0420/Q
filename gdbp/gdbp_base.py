@@ -85,6 +85,7 @@ def make_base_module(steps: int = 3,
     创建一个基础模块，该模块可以根据特定的初始化方法和训练器定义的可训练参数派生出
     DBP、FDBP、EDBP、GDBP。
     '''
+
     _assert_taps(dtaps, ntaps, rtaps)
 
     d_init, n_init = init_fn
@@ -96,7 +97,7 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
 
-    # 定义串行层
+    # 定义串行分支
     serial_branch = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
@@ -115,7 +116,7 @@ def make_base_module(steps: int = 3,
 
     # 定义并行层
     base = layer.Serial(
-        layer.FanOut(num=2),
+        layer.FanOut(2),
         layer.Parallel(
             layer.FDBP1(steps=steps,
                         dtaps=dtaps,
@@ -128,6 +129,7 @@ def make_base_module(steps: int = 3,
     )
 
     return base
+
 
 
 
