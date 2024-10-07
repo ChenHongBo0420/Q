@@ -131,7 +131,7 @@ def make_base_module(steps: int = 3,
 
     # 定义并行层
     base = layer.Serial(
-        layer.FanOut(2),
+        layer.FanOut(n=2),
         layer.Parallel(
             layer.FDBP1(steps=steps,
                         dtaps=dtaps,
@@ -144,6 +144,7 @@ def make_base_module(steps: int = 3,
     )
 
     return base
+
 
 
 
