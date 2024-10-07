@@ -78,7 +78,7 @@ def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
+                     init_fn: tuple = (delta, gauss),
                      w0=0.,
                      mode: str = 'train'):
     '''
@@ -108,7 +108,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
+                        preslicer=conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
@@ -116,7 +116,7 @@ def make_base_module(steps: int = 3,
 
     # 定义并行层
     base = layer.Serial(
-        layer.FanOut(2),
+        layer.FanOut(num=2),  # 使用关键字参数传递 num
         layer.Parallel(
             layer.FDBP1(steps=steps,
                         dtaps=dtaps,
@@ -129,6 +129,7 @@ def make_base_module(steps: int = 3,
     )
 
     return base
+
 
 
 
