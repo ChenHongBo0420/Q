@@ -103,26 +103,27 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
+                        preslicer=conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='serial_branch'  # 添加名称
     )
 
+    # 定义基础模块
     base = layer.Serial(
-    layer.FanOut(num=2),
-    layer.Parallel(
-        layer.FDBP1(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init,
-                    name='fdbp1'),
-        serial_branch._replace(name='serial_branch')
-    ),
-    layer.FanInSum())
-
+        layer.FanOut(num=2),
+        layer.Parallel(
+            layer.FDBP1(steps=steps,
+                        dtaps=dtaps,
+                        ntaps=ntaps,
+                        d_init=d_init,
+                        n_init=n_init,
+                        name='fdbp1'),
+            serial_branch
+        ),
+        layer.FanInSum()
+    )
 
     return base
 
