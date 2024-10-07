@@ -123,7 +123,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=conv1d_slicer(rtaps),
+                        preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
