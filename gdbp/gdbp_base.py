@@ -73,20 +73,6 @@ Dict = Union[dict, flax.core.FrozenDict]
 #         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
         
 #     return base
-
-class CustomParallel(layer.Module):
-    def __init__(self, serial_path, rnn_branch, concat_axis=-1, name='CustomParallel'):
-        super().__init__(name=name)
-        self.serial_path = serial_path
-        self.rnn_branch = rnn_branch
-        self.concat_axis = concat_axis
-        self.concat = layer.Concat(axis=concat_axis, name='ConcatOutputs')
-
-    def forward(self, x):
-        out_serial = self.serial_path(x)
-        out_rnn = self.rnn_branch(x)
-        combined = self.concat(out_serial, out_rnn)
-        return combined
             
 def make_base_module(steps: int = 3,
                               dtaps: int = 261,
@@ -148,10 +134,14 @@ def make_base_module(steps: int = 3,
                    d_init=d_init,
                    n_init=n_init),
 
-    parallel_module = CustomParallel(serial_path, rnn_branch, concat_axis=-1, name='ParallelBaseModule')
+    parallel_module = layer.Parallel(
+        ('SerialPath', serial_path),
+        ('RNNBranch', rnn_branch),
+        name='ParallelBaseModule'
+    )
+    combined_output = layer.Concat(axis=-1, name='ConcatOutputs')(parallel_module)
 
-
-    return parallel_module 
+    return combined_output 
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
