@@ -167,19 +167,19 @@ def make_base_module(steps: int = 3,
 
     # 定义原有的串行分支
     serial_branch = layer.Serial(
-        layer.FDBP(steps=steps,
+        layer.FDBP1(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
                    d_init=d_init,
                    n_init=n_init),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
+        layer.BatchPowerNorm1(mode=mode),
+        layer.MIMOFOEAf1(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
+        layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
+        layer.MIMOAF1(train=mimo_train),
         name='serial_branch'  # 添加名称
     )
 
