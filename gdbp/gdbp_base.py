@@ -145,9 +145,6 @@ def make_base_module(steps: int = 3,
 
     return base
 
-
-
-
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
     assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
