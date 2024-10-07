@@ -148,20 +148,20 @@ def make_base_module(steps: int = 3,
 
     # 定义串联的 FDBP 层
     fdbp_series = layer.Serial(
-        layer.FDBP1(steps=steps,
+        layer.FDBP(steps=steps,
                     dtaps=dtaps,
                     ntaps=ntaps,
                     d_init=d_init,
                     n_init=n_init,
                     name='fdbp1'),
-        layer.BatchPowerNorm1(mode=mode),
-        layer.MIMOFOEAf1(name='FOEAf1',
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf1',
                         w0=w0,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d1)(name='RConv1', taps=rtaps),
-        layer.MIMOAF1(train=mimo_train),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
         name='fdbp_series'
     )
 
