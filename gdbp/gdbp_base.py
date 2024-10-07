@@ -81,10 +81,6 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
-    '''
-    创建一个基础模块，该模块可以根据特定的初始化方法和训练器定义的可训练参数派生出
-    DBP、FDBP、EDBP、GDBP。
-    '''
 
     _assert_taps(dtaps, ntaps, rtaps)
 
@@ -114,22 +110,18 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     )
 
-    # 不再将 FanOut、Parallel 和 FanInSum 包裹在 Serial 中
-    def base(scope, inputs):
-        # 使用 FanOut
-        inputs = layer.FanOut(num=2)(scope, inputs)
-        # 并行处理
-        outputs = layer.Parallel(
-            layer.FDBP1(steps=steps,
-                        dtaps=dtaps,
-                        ntaps=ntaps,
-                        d_init=d_init,
-                        n_init=n_init),
-            serial_branch
-        )(scope, inputs)
-        # 使用 FanInSum 合并输出
-        output = layer.FanInSum()(scope, outputs)
-        return output
+    base = layer.Serial(
+        layer.FanOut(num=2),
+        layer.Parallel(
+            ('fdbp1', layer.FDBP1(steps=steps,
+                                  dtaps=dtaps,
+                                  ntaps=ntaps,
+                                  d_init=d_init,
+                                  n_init=n_init)),
+            ('serial_branch', serial_branch)
+        ),
+        layer.FanInSum()
+    )
 
     return base
 
