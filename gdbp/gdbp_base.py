@@ -75,26 +75,27 @@ Dict = Union[dict, flax.core.FrozenDict]
 #     return base
             
 def make_base_module(steps: int = 3,
-                              dtaps: int = 261,
-                              ntaps: int = 41,
-                              rtaps: int = 61,
-                              init_fn: tuple = (core.delta, core.gauss),
-                              w0=0.,
-                              mode: str = 'train'):
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0=0.,
+                     mode: str = 'train'):
     '''
-    创建一个基模块，包含原有的串行路径和一个并行的 RNN 分支。
+    创建一个基础模块，该模块可以根据特定的初始化方法和训练器定义的可训练参数派生出
+    DBP、FDBP、EDBP、GDBP。
 
     Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: 包含 D-filter 和 N-filter 初始化函数的元组
-        w0: 初始权重
+        steps: GDBP的步数/层数
+        dtaps: D-filter的长度
+        ntaps: N-filter的长度
+        rtaps: R-filter的长度
+        init_fn: 一个包含D-filter和N-filter初始化器的元组
+        w0: 初始频率偏移
         mode: 'train' 或 'test'
 
     Returns:
-        一个并行的层对象
+        一个层对象
     '''
 
     _assert_taps(dtaps, ntaps, rtaps)
@@ -102,16 +103,17 @@ def make_base_module(steps: int = 3,
     d_init, n_init = init_fn
 
     if mode == 'train':
-        # 配置 MIMO 为训练模式
+        # 将mimo配置为训练模式
         mimo_train = True
     elif mode == 'test':
-        # mimo 在前200000个符号时以训练模式运行，之后切换到跟踪模式
+        # mimo在前200000个符号上以训练模式运行，
+        # 然后切换到跟踪模式
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
 
-    # 定义串行路径
-    serial_path = layer.Serial(
+    # 定义串行层
+    serial_branch = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
@@ -123,25 +125,26 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # 列向量化的 Conv1D
-        layer.MIMOAF(train=mimo_train)  # 自适应 MIMO 层
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
     )
 
-    # 定义并行的 RNN 分支
-    rnn_branch = layer.FDBP1(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
-
-    parallel_module = layer.Parallel(
-        ('SerialPath', serial_path),
-        ('RNNBranch', rnn_branch),
-        name='ParallelBaseModule'
+    # 定义并行层
+    base = layer.Serial(
+        layer.FanOut(2),
+        layer.Parallel(
+            layer.FDBP1(steps=steps,
+                        dtaps=dtaps,
+                        ntaps=ntaps,
+                        d_init=d_init,
+                        n_init=n_init),
+            serial_branch
+        ),
+        layer.FanInSum()
     )
-    combined_output = layer.Concat(axis=-1, name='ConcatOutputs')(parallel_module)
 
-    return combined_output 
+    return base
+
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
