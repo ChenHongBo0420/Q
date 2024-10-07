@@ -19,28 +19,82 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
+# def make_base_module(steps: int = 3,
+#                      dtaps: int = 261,
+#                      ntaps: int = 41,
+#                      rtaps: int = 61,
+#                      init_fn: tuple = (core.delta, core.gauss),
+#                      w0 = 0.,
+#                      mode: str = 'train'):
+#     '''
+#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
+#     specific initialization method and trainable parameters defined
+#     by trainer.
+
+#     Args:
+#         steps: GDBP steps/layers
+#         dtaps: D-filter length
+#         ntaps: N-filter length
+#         rtaps: R-filter length
+#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+#         mode: 'train' or 'test'
+
+#     Returns:
+#         A layer object
+#     '''
+
+#     _assert_taps(dtaps, ntaps, rtaps)
+
+#     d_init, n_init = init_fn
+
+#     if mode == 'train':
+#         # configure mimo to its training mode
+#         mimo_train = True
+#     elif mode == 'test':
+#         # mimo operates at training mode for the first 200000 symbols,
+#         # then switches to tracking mode afterwards
+#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
+#     else:
+#         raise ValueError('invalid mode %s' % mode)
+        
+#     base = layer.Serial(
+#         layer.FDBP(steps=steps,
+#                    dtaps=dtaps,
+#                    ntaps=ntaps,
+#                    d_init=d_init,
+#                    n_init=n_init),
+#         layer.BatchPowerNorm(mode=mode),
+#         layer.MIMOFOEAf(name='FOEAf',
+#                         w0=w0,
+#                         train=mimo_train,
+#                         preslicer=core.conv1d_slicer(rtaps),
+#                         foekwargs={}),
+#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+#         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        
+#     return base
+
 def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train'):
+                              dtaps: int = 261,
+                              ntaps: int = 41,
+                              rtaps: int = 61,
+                              init_fn: tuple = (core.delta, core.gauss),
+                              w0=0.,
+                              mode: str = 'train'):
     '''
-    make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
+    创建一个基模块，包含原有的串行路径和一个并行的 RNN 分支。
 
     Args:
         steps: GDBP steps/layers
         dtaps: D-filter length
         ntaps: N-filter length
         rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
+        init_fn: 包含 D-filter 和 N-filter 初始化函数的元组
+        w0: 初始权重
+        mode: 'train' 或 'test'
 
     Returns:
-        A layer object
+        一个并行的层对象
     '''
 
     _assert_taps(dtaps, ntaps, rtaps)
@@ -48,16 +102,16 @@ def make_base_module(steps: int = 3,
     d_init, n_init = init_fn
 
     if mode == 'train':
-        # configure mimo to its training mode
+        # 配置 MIMO 为训练模式
         mimo_train = True
     elif mode == 'test':
-        # mimo operates at training mode for the first 200000 symbols,
-        # then switches to tracking mode afterwards
+        # mimo 在前200000个符号时以训练模式运行，之后切换到跟踪模式
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-        
-    base = layer.Serial(
+
+    # 定义串行路径
+    serial_path = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
@@ -69,11 +123,29 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-    return base
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # 列向量化的 Conv1D
+        layer.MIMOAF(train=mimo_train)  # 自适应 MIMO 层
+    )
 
+    # 定义并行的 RNN 分支
+    rnn_branch = layer.FDBP1(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
+
+    # 定义并行容器，将串行路径和 RNN 分支并行处理
+    parallel_module = layer.Parallel(
+        serial_path,
+        rnn_branch,
+        name='ParallelBaseModule'
+    )
+
+    # 合并并行路径的输出，例如通过拼接
+    combined_output = layer.Concat(axis=-1, name='ConcatOutputs')(parallel_module)
+
+
+    return combined_output
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
