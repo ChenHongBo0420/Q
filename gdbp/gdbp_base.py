@@ -78,36 +78,20 @@ def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
+                     init_fn: tuple = (delta, gauss),
                      w0=0.,
                      mode: str = 'train'):
     '''
     创建一个基础模块，该模块可以根据特定的初始化方法和训练器定义的可训练参数派生出
     DBP、FDBP、EDBP、GDBP。
-
-    Args:
-        steps: GDBP的步数/层数
-        dtaps: D-filter的长度
-        ntaps: N-filter的长度
-        rtaps: R-filter的长度
-        init_fn: 一个包含D-filter和N-filter初始化器的元组
-        w0: 初始频率偏移
-        mode: 'train' 或 'test'
-
-    Returns:
-        一个层对象
     '''
-
     _assert_taps(dtaps, ntaps, rtaps)
 
     d_init, n_init = init_fn
 
     if mode == 'train':
-        # 将mimo配置为训练模式
         mimo_train = True
     elif mode == 'test':
-        # mimo在前200000个符号上以训练模式运行，
-        # 然后切换到跟踪模式
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
@@ -123,7 +107,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
+                        preslicer=conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
@@ -144,6 +128,7 @@ def make_base_module(steps: int = 3,
     )
 
     return base
+
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
