@@ -224,7 +224,7 @@ def make_base_module(steps: int = 3,
             serial_branch,
             another_branch
         ),
-        layer.FanInAttention()
+        layer.FanInMean()
     )
 
     return base
