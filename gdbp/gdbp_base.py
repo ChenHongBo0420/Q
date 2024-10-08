@@ -201,7 +201,7 @@ def make_base_module(steps: int = 3,
 
     # third three
     another_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
+        layer.FDBP2(steps=steps,
                     dtaps=dtaps,
                     ntaps=ntaps,
                     d_init=d_init,
