@@ -73,7 +73,7 @@ Dict = Union[dict, flax.core.FrozenDict]
 #         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
         
 #     return base
-            
+
 # def make_base_module(steps: int = 3,
 #                      dtaps: int = 261,
 #                      ntaps: int = 41,
@@ -93,20 +93,40 @@ Dict = Union[dict, flax.core.FrozenDict]
 #     else:
 #         raise ValueError('invalid mode %s' % mode)
 
-#     serial_branch = layer.Serial(
+#     # 定义串联的 FDBP 层
+#     fdbp_series = layer.Serial(
 #         layer.FDBP(steps=steps,
-#                    dtaps=dtaps,
-#                    ntaps=ntaps,
-#                    d_init=d_init,
-#                    n_init=n_init),
+#                     dtaps=dtaps,
+#                     ntaps=ntaps,
+#                     d_init=d_init,
+#                     n_init=n_init,
+#                     name='fdbp1'),
 #         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
+#         layer.MIMOFOEAf(name='FOEAf1',
 #                         w0=w0,
 #                         train=mimo_train,
 #                         preslicer=core.conv1d_slicer(rtaps),
 #                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+#         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
 #         layer.MIMOAF(train=mimo_train),
+#         name='fdbp_series'
+#     )
+
+#     # 定义原有的串行分支
+#     serial_branch = layer.Serial(
+#         layer.FDBP1(steps=steps,
+#                    dtaps=dtaps,
+#                    ntaps=ntaps,
+#                    d_init=d_init,
+#                    n_init=n_init),
+#         layer.BatchPowerNorm1(mode=mode),
+#         layer.MIMOFOEAf1(name='FOEAf',
+#                         w0=w0,
+#                         train=mimo_train,
+#                         preslicer=core.conv1d_slicer(rtaps),
+#                         foekwargs={}),
+#         layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
+#         layer.MIMOAF1(train=mimo_train),
 #         name='serial_branch'  # 添加名称
 #     )
 
@@ -114,15 +134,11 @@ Dict = Union[dict, flax.core.FrozenDict]
 #     base = layer.Serial(
 #         layer.FanOut(num=2),
 #         layer.Parallel(
-#             layer.FDBP1(steps=steps,
-#                         dtaps=dtaps,
-#                         ntaps=ntaps,
-#                         d_init=d_init,
-#                         n_init=n_init,
-#                         name='fdbp1'),
+#             fdbp_series,
 #             serial_branch
 #         ),
-#         layer.FanInSum()
+#         # layer.FanInMean()
+#         layer.FanInAttention()
 #     )
 
 #     return base
@@ -146,14 +162,14 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
 
-    # 定义串联的 FDBP 层
+    # first tree
     fdbp_series = layer.Serial(
         layer.FDBP(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init,
-                    name='fdbp1'),
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init,
+                   name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
         layer.MIMOFOEAf(name='FOEAf1',
                         w0=w0,
@@ -165,36 +181,54 @@ def make_base_module(steps: int = 3,
         name='fdbp_series'
     )
 
-    # 定义原有的串行分支
+    # second tree
     serial_branch = layer.Serial(
         layer.FDBP1(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
-        layer.BatchPowerNorm1(mode=mode),
-        layer.MIMOFOEAf1(name='FOEAf',
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
-        layer.MIMOAF1(train=mimo_train),
-        name='serial_branch'  # 添加名称
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='serial_branch'
     )
 
-    # 定义基础模块
+    # third three
+    another_branch = layer.Serial(
+        layer.FDBP1(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp2'),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf2',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv2', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='another_branch'
+    )
     base = layer.Serial(
-        layer.FanOut(num=2),
+        layer.FanOut(num=3),
         layer.Parallel(
             fdbp_series,
-            serial_branch
+            serial_branch,
+            another_branch
         ),
-        # layer.FanInMean()
         layer.FanInAttention()
     )
 
     return base
+
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
