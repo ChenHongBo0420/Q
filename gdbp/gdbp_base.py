@@ -207,14 +207,14 @@ def make_base_module(steps: int = 3,
                     d_init=d_init,
                     n_init=n_init,
                     name='fdbp2'),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf2',
+        layer.BatchPowerNorm1(mode=mode),
+        layer.MIMOFOEAf1(name='FOEAf2',
                         w0=w0,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv2', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
+        layer.vmap(layer.Conv1d1)(name='RConv2', taps=rtaps),
+        layer.MIMOAF1(train=mimo_train),
         name='another_branch'
     )
     base = layer.Serial(
