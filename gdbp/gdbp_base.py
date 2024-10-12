@@ -416,12 +416,6 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
-def check_finite(target, estimate):
-    if not jnp.all(jnp.isfinite(target)):
-        raise ValueError("`target` contains non-finite values (NaN or Inf).")
-    if not jnp.all(jnp.isfinite(estimate)):
-        raise ValueError("`estimate` contains non-finite values (NaN or Inf).")
-            
 def phase_consistency(target, estimate, eps=1e-8):
     """
     计算相位一致性
@@ -471,8 +465,9 @@ def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8, clip_min=1e-3, cli
     返回:
     - loss: 标量损失值
     """
-    # 检查输入是否包含无效值
-    check_finite(target, estimate)
+    # 替换无效值为0，确保所有输入都是有限值
+    target = jnp.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
+    estimate = jnp.nan_to_num(estimate, nan=0.0, posinf=0.0, neginf=0.0)
 
     # 计算 SI-SNR
     si_snr_val = si_snr(target, estimate, eps, clip_min, clip_max)  # 形状: (batch_size,)
@@ -494,7 +489,6 @@ def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8, clip_min=1e-3, cli
     loss = jnp.mean(-phase_aware_si_snr)  # 标量
 
     return loss
-
 
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
