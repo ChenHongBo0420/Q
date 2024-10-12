@@ -461,7 +461,7 @@ def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8):
     # 可以根据需求调整权重参数alpha
     phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * 10  # 乘以10以匹配dB尺度
     
-    return phase_aware_si_snr
+    return -phase_aware_si_snr
 
 
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
