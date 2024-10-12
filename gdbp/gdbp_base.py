@@ -414,7 +414,7 @@ def si_snr(target, estimate, eps=1e-8):
     target_energy = energy(s_target)
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value  
+    return -si_snr_value / 10  
 
 
 
