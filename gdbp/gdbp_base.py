@@ -414,8 +414,54 @@ def si_snr(target, estimate, eps=1e-8):
     target_energy = energy(s_target)
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return si_snr_value 
+    return -si_snr_value 
 
+def phase_consistency(target, estimate, eps=1e-8):
+    """
+    计算目标信号和估计信号之间的相位一致性。
+    这里使用余弦相似度作为相位一致性的度量。
+    """
+    # 计算信号的快速傅里叶变换（FFT）
+    target_fft = jnp.fft.fft(target)
+    estimate_fft = jnp.fft.fft(estimate)
+    
+    # 计算相位向量
+    target_phase = jnp.angle(target_fft)
+    estimate_phase = jnp.angle(estimate_fft)
+    
+    # 计算相位差
+    phase_diff = target_phase - estimate_phase
+    phase_similarity = jnp.cos(phase_diff)
+    
+    # 取平均作为相位一致性得分
+    phase_score = jnp.mean(phase_similarity, axis=-1)
+    return phase_score
+
+def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8):
+    """
+    计算相位感知SI-SNR，结合SI-SNR和相位一致性得分。
+    
+    参数:
+    - target: 目标信号，形状为 (..., T)
+    - estimate: 估计信号，形状为 (..., T)
+    - alpha: 权重参数，控制SI-SNR和相位一致性的贡献比例
+    - eps: 稳定性常数
+    """
+    # 计算SI-SNR
+    si_snr_val = si_snr(target, estimate, eps)
+    
+    # 计算相位一致性
+    phase_score = phase_consistency(target, estimate, eps)
+    
+    # 标准化相位得分到与SI-SNR相同的尺度（例如，乘以一个系数）
+    # 这里假设相位得分在 [-1, 1] 之间，调整为 [0, 1]
+    phase_score_normalized = (phase_score + 1) / 2
+    
+    # 组合SI-SNR和相位得分
+    # 可以根据需求调整权重参数alpha
+    phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * 10  # 乘以10以匹配dB尺度
+    
+    return phase_aware_si_snr
 
 
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
@@ -502,7 +548,8 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))        
+    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
+    snr = phase_aware_si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
