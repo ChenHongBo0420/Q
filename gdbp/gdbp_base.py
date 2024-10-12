@@ -424,17 +424,17 @@ def phase_consistency(target, estimate, eps=1e-8):
     # 计算信号的快速傅里叶变换（FFT）
     target_fft = jnp.fft.fft(target)
     estimate_fft = jnp.fft.fft(estimate)
-    
+
     # 计算相位向量
     target_phase = jnp.angle(target_fft)
     estimate_phase = jnp.angle(estimate_fft)
-    
+
     # 计算相位差
     phase_diff = target_phase - estimate_phase
     phase_similarity = jnp.cos(phase_diff)
-    
+
     # 取平均作为相位一致性得分
-    phase_score = jnp.mean(phase_similarity, axis=-1)
+    phase_score = jnp.mean(phase_similarity, axis=-1)  # Shape: (batch_size,)
     return phase_score
 
 def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8):
@@ -448,20 +448,21 @@ def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8):
     - eps: 稳定性常数
     """
     # 计算SI-SNR
-    si_snr_val = si_snr(target, estimate, eps)
-    
+    si_snr_val = si_snr(target, estimate, eps).squeeze(-1)  # Shape: (batch_size,)
+
     # 计算相位一致性
-    phase_score = phase_consistency(target, estimate, eps)
-    
-    # 标准化相位得分到与SI-SNR相同的尺度（例如，乘以一个系数）
-    # 这里假设相位得分在 [-1, 1] 之间，调整为 [0, 1]
-    phase_score_normalized = (phase_score + 1) / 2
-    
+    phase_score = phase_consistency(target, estimate, eps)  # Shape: (batch_size,)
+
+    # 标准化相位得分到 [0, 1]
+    phase_score_normalized = (phase_score + 1) / 2  # Shape: (batch_size,)
+
     # 组合SI-SNR和相位得分
-    # 可以根据需求调整权重参数alpha
-    phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * 10  # 乘以10以匹配dB尺度
-    
-    return -phase_aware_si_snr
+    # 这里乘以一个系数（例如10）以匹配dB尺度
+    phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * 10  # Shape: (batch_size,)
+
+    # 聚合损失为标量（例如取平均）
+    loss = jnp.mean(-phase_aware_si_snr)  # 负号用于最小化损失
+    return loss
 
 
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
