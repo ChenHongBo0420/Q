@@ -415,7 +415,13 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-
+        
+def check_finite(target, estimate):
+    if not jnp.all(jnp.isfinite(target)):
+        raise ValueError("`target` contains non-finite values (NaN or Inf).")
+    if not jnp.all(jnp.isfinite(estimate)):
+        raise ValueError("`estimate` contains non-finite values (NaN or Inf).")
+            
 def phase_consistency(target, estimate, eps=1e-8):
     """
     计算相位一致性
