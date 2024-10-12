@@ -416,7 +416,7 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
-def phase_consistency(target, estimate, eps=1e-8):
+def phase_consistency(target, estimate):
     """
     计算相位一致性
     使用余弦相似度作为相位一致性的度量
@@ -424,7 +424,6 @@ def phase_consistency(target, estimate, eps=1e-8):
     参数:
     - target: 目标信号，形状为 (batch_size, T)
     - estimate: 估计信号，形状为 (batch_size, T)
-    - eps: 稳定性常数
     
     返回:
     - phase_score: 形状为 (batch_size,)
@@ -444,12 +443,9 @@ def phase_consistency(target, estimate, eps=1e-8):
     # 平均相位相似度
     phase_score = jnp.mean(phase_similarity, axis=-1)  # 形状: (batch_size,)
 
-    # 替换可能的无效值
-    phase_score = jnp.nan_to_num(phase_score, nan=0.0, posinf=1.0, neginf=-1.0)
-
     return phase_score  # 形状: (batch_size,)
 
-def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8, clip_min=1e-3, clip_max=1e3, phase_scale=1.0):
+def phase_aware_si_snr(target, estimate, alpha=0.5, phase_scale=1.0, eps=1e-8):
     """
     计算相位感知SI-SNR，结合SI-SNR和相位一致性得分
     
@@ -457,39 +453,29 @@ def phase_aware_si_snr(target, estimate, alpha=0.5, eps=1e-8, clip_min=1e-3, cli
     - target: 目标信号，形状为 (batch_size, T)
     - estimate: 估计信号，形状为 (batch_size, T)
     - alpha: SI-SNR的权重
-    - eps: 稳定性常数
-    - clip_min: 比值下限
-    - clip_max: 比值上限
     - phase_scale: 相位一致性得分的缩放因子
+    - eps: 稳定性常数
     
     返回:
     - loss: 标量损失值
     """
-    # 替换无效值为0，确保所有输入都是有限值
-    target = jnp.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
-    estimate = jnp.nan_to_num(estimate, nan=0.0, posinf=0.0, neginf=0.0)
-
     # 计算 SI-SNR
-    si_snr_val = si_snr(target, estimate, eps, clip_min, clip_max)  # 形状: (batch_size,)
+    si_snr_val = si_snr(target, estimate, eps)  # 形状: (batch_size,)
 
     # 计算相位一致性
-    phase_score = phase_consistency(target, estimate, eps)  # 形状: (batch_size,)
+    phase_score = phase_consistency(target, estimate)  # 形状: (batch_size,)
 
     # 标准化相位得分到 [0, 1]
     phase_score_normalized = (phase_score + 1) / 2  # 形状: (batch_size,)
 
     # 组合 SI-SNR 和相位一致性得分
-    # 避免使用过大的缩放因子，使用 phase_scale 控制相位得分的贡献
     phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * phase_scale  # 形状: (batch_size,)
-
-    # 替换可能的无效值
-    phase_aware_si_snr = jnp.nan_to_num(phase_aware_si_snr, nan=-1e6, posinf=1e6, neginf=-1e6)
 
     # 计算损失为相位感知SI-SNR的负均值（优化器最小化损失）
     loss = jnp.mean(-phase_aware_si_snr)  # 标量
 
     return loss
-
+        
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
 #     data_real = jnp.real(data)  # 处理实部
