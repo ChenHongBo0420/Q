@@ -425,6 +425,17 @@ def weighted_interaction(x1, x2):
     x2_updated = x2 + weights * x1
     return x1_updated, x2_updated, weights
         
+def weighted_si_snr(target, estimate, weights, eps=1e-8):
+    # 计算加权能量
+    target_energy = jnp.sum(weights * jnp.square(target))
+    dot_product = jnp.sum(weights * target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = jnp.sum(weights * jnp.square(s_target))
+    noise_energy = jnp.sum(weights * jnp.square(e_noise))
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value        
+        
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
 #     data_real = jnp.real(data)  # 处理实部
