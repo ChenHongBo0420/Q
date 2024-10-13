@@ -423,7 +423,7 @@ def weighted_interaction(x1, x2):
     weights = x1_normalized * x2_normalized  # 生成与时间维度匹配的权重
     x1_updated = x1 + weights * x2
     x2_updated = x2 + weights * x1
-    return x1_updated, x2_updated
+    return x1_updated, x2_updated, weights
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -511,17 +511,15 @@ def loss_fn(module: layer.Layer,
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     x1 = aligned_x[:, 0]
     x2 = aligned_x[:, 1]
-    x1_updated, x2_updated = weighted_interaction(x1, x2)
-    x_updated = jnp.stack([x1_updated, x2_updated], axis=-1)
-
-    # 同样假设模型输出也是两个通道
     z1 = z_original.val[:, 0]
     z2 = z_original.val[:, 1]
-
-    # 计算每个通道的 SI-SNR，然后取平均值
-    snr1 = si_snr(jnp.abs(z1), jnp.abs(x1_updated))
-    snr2 = si_snr(jnp.abs(z2), jnp.abs(x2_updated))
-    snr = (snr1 + snr2) / 2.0
+    
+    # 使用偏振交互计算权重
+    x1_updated, x2_updated, weights = weighted_interaction(x1, x2)
+    x_updated = jnp.stack([x1_updated, x2_updated], axis=-1)
+    
+    # 计算每个通道的加权 SI-SNR
+    snr = weighted_si_snr(jnp.abs(z1), jnp.abs(x_updated), weights)
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
