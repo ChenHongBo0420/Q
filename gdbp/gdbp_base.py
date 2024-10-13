@@ -415,28 +415,14 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-        
-def weighted_si_snr(target, estimate, weights, eps=1e-8):
-    # 计算加权能量，使用复数模的平方
-    target_energy = jnp.sum(weights * jnp.abs(target) ** 2)
-    dot_product = jnp.sum(weights * jnp.real(target * jnp.conj(estimate)))
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = jnp.sum(weights * jnp.abs(s_target) ** 2)
-    noise_energy = jnp.sum(weights * jnp.abs(e_noise) ** 2)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value
 
-def weighted_interaction(x1, x2):
-    x1_real = jnp.real(x1)
-    x2_real = jnp.real(x2)
-    x1_normalized = (x1_real - jnp.mean(x1_real)) / (jnp.std(x1_real) + 1e-6)
-    x2_normalized = (x2_real - jnp.mean(x2_real)) / (jnp.std(x2_real) + 1e-6)
-    # 计算逐点的权重，确保为实数
-    weights = x1_normalized * x2_normalized
-    x1_updated = x1 + weights * x2
-    x2_updated = x2 + weights * x1
-    return x1_updated, x2_updated, weights       
+def squeeze_excite_attention(x):
+    # 注意力机制
+    avg_pool = jnp.max(x, axis=0, keepdims=True)
+    attention = jnp.tanh(avg_pool)
+    attention = jnp.tile(attention, (x.shape[0], 1))
+    x = x * attention
+    return x       
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -522,21 +508,18 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    x1 = aligned_x[:, 0]
-    x2 = aligned_x[:, 1]
-    z1 = z_original.val[:, 0]
-    z2 = z_original.val[:, 1]
+    z_attended = squeeze_excite_attention(z_original.val)
     
-    # 使用偏振交互计算权重和更新后的信号
-    x1_updated, x2_updated, weights = weighted_interaction(x1, x2)
+    # 将模型输出和目标信号展平成一维数组
+    z_flat = z_attended.reshape(-1)
+    x_flat = aligned_x.reshape(-1)
     
-    # 确保权重为非负实数
-    weights = jnp.abs(weights)
+    # 确保信号为实数类型，避免梯度计算错误
+    z_flat = jnp.real(z_flat)
+    x_flat = jnp.real(x_flat)
     
-    # 计算每个通道的加权 SI-SNR
-    snr1 = weighted_si_snr(z1, x1_updated, weights)
-    snr2 = weighted_si_snr(z2, x2_updated, weights)
-    snr = (snr1 + snr2) / 2.0
+    # 计算总的 SI-SNR
+    snr = si_snr(x_flat, z_flat)
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
