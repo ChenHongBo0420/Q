@@ -427,22 +427,14 @@ def phase_consistency(target, estimate):
     phase_score_normalized = (phase_score + 1) / 2  # shape: (batch_size,)
     return phase_score_normalized
 
-# 定义相位感知 SI-SNR 损失（添加调试输出）
+# 定义相位感知 SI-SNR 损失
 def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, clip_min=-100.0):
     si_snr_val = si_snr(target, estimate, eps)  # shape: (batch_size,)
     si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)  # shape: (batch_size,)
     phase_score = phase_consistency(target, estimate)  # shape: (batch_size,)
     loss_per_sample = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # shape: (batch_size,)
     loss = jnp.mean(loss_per_sample)  # scalar
-    
-    # 检查是否存在无效值
-    is_nan = jnp.isnan(loss)
-    is_inf = jnp.isinf(loss)
-    
-    # 如果存在无效值，则发出警告
-    if is_nan or is_inf:
-        print("Warning: Loss contains NaN or Inf values.")
-    
+    loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
     return loss
 
         
