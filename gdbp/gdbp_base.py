@@ -415,27 +415,6 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-        
-def phase_consistency(target, estimate):
-    target_fft = jnp.fft.fft(target)
-    estimate_fft = jnp.fft.fft(estimate)
-    target_phase = jnp.angle(target_fft)
-    estimate_phase = jnp.angle(estimate_fft)
-    phase_diff = target_phase - estimate_phase
-    phase_similarity = jnp.cos(phase_diff)
-    phase_score = jnp.mean(phase_similarity, axis=-1)  # shape: (batch_size,)
-    phase_score_normalized = (phase_score + 1) / 2  # shape: (batch_size,)
-    return phase_score_normalized
-
-# 定义相位感知 SI-SNR 损失
-def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, clip_min=-100.0):
-    si_snr_val = si_snr(target, estimate, eps)  # shape: (batch_size,)
-    si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)  # shape: (batch_size,)
-    phase_score = phase_consistency(target, estimate)  # shape: (batch_size,)
-    loss_per_sample = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # shape: (batch_size,)
-    loss = jnp.mean(loss_per_sample)  # scalar
-    loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
-    return loss
 
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
@@ -522,8 +501,7 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
-    snr = phase_aware_si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
