@@ -418,32 +418,43 @@ def si_snr(target, estimate, eps=1e-8):
 
 def stft(x, frame_length=512, frame_step=256, fft_length=512):
     """
-    简单实现短时傅里叶变换（STFT）。
+    短时傅里叶变换（STFT）的JAX实现。
+
+    参数:
+    - x: 输入信号，形状为 (batch_size, T)
+    - frame_length: 每帧的长度
+    - frame_step: 帧步长
+    - fft_length: FFT的长度
+
+    返回:
+    - spectrogram: 幅度谱图，形状为 (batch_size, num_frames, fft_length//2 + 1)
     """
-    # 窗口函数
+    batch_size, T = x.shape
+    num_frames = 1 + (T - frame_length) // frame_step
+
+    # 创建窗口函数
     window = jnp.hamming(frame_length)
-    
-    # 帧分割
-    def frame_split(signal):
-        batch_size, T = signal.shape
-        num_frames = 1 + (T - frame_length) // frame_step
-        frames = jax.vmap(lambda s: jnp.lib.stride_tricks.as_strided(
-            s, shape=(num_frames, frame_length), strides=(s.strides[0]*frame_step, s.strides[0])
-        ))(signal)
-        return frames  # shape: (batch_size, num_frames, frame_length)
-    
-    frames = frame_split(x)  # shape: (batch_size, num_frames, frame_length)
-    
-    # 应用窗口函数
-    frames_windowed = frames * window  # shape: (batch_size, num_frames, frame_length)
-    
+
+    # 定义提取帧的函数
+    def extract_frames(signal):
+        # 生成帧的起始索引
+        frame_indices = jnp.arange(num_frames) * frame_step
+        # 提取每一帧
+        frames = jax.vmap(lambda start: signal[start:start + frame_length])(frame_indices)
+        # 应用窗口函数
+        frames_windowed = frames * window
+        return frames_windowed  # 形状: (num_frames, frame_length)
+
+    # 对批次中的每个信号应用帧提取
+    frames = jax.vmap(extract_frames)(x)  # 形状: (batch_size, num_frames, frame_length)
+
     # 进行FFT
-    fft_result = jnp.fft.rfft(frames_windowed, n=fft_length)  # shape: (batch_size, num_frames, fft_length//2 + 1)
-    
+    fft_result = jnp.fft.rfft(frames, n=fft_length)  # 形状: (batch_size, num_frames, fft_length//2 + 1)
+
     # 计算幅度谱
     spectrogram = jnp.abs(fft_result)
-    
-    return spectrogram  # shape: (batch_size, num_frames, fft_length//2 + 1)
+
+    return spectrogram  
 
 def spectrogram_mse(target, estimate, frame_length=512, frame_step=256, fft_length=512):
     """
