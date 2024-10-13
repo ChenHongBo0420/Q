@@ -416,55 +416,60 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-def stft(x, frame_length=512, frame_step=256, fft_length=512):
+def stft(x: jnp.ndarray, frame_length: int = 512, frame_step: int = 256, fft_length: int = 512) -> jnp.ndarray:
     """
-    短时傅里叶变换（STFT）的JAX实现，包含必要的填充以确保帧数至少为1。
+    实现短时傅里叶变换（STFT）。
+
+    参数:
+    - x: 输入信号，形状为 (batch_size, T)
+    - frame_length: 每帧的长度
+    - frame_step: 帧步长
+    - fft_length: FFT的长度
+
+    返回:
+    - 幅度谱图，形状为 (batch_size, num_frames, fft_length//2 + 1)
     """
     batch_size, T = x.shape
-    # 计算帧数，确保至少为1
-    num_frames = 1 + jnp.maximum(0, (T - frame_length) // frame_step)
+    num_frames = 1 + (T - frame_length) // frame_step
 
     # 创建窗口函数
     window = jnp.hamming(frame_length)
 
-    # 定义帧提取函数
+    # 定义提取帧的函数
     def extract_frames(signal):
-        # 计算必要的填充长度
-        total_length = frame_step * num_frames + frame_length
-        pad_length = jnp.maximum(0, total_length - signal.shape[0])
-        # 在信号右侧填充零
-        signal_padded = jnp.pad(signal, (0, pad_length), mode='constant')
-        # 生成帧的起始索引
         frame_indices = jnp.arange(num_frames) * frame_step
-        # 提取每一帧
-        frames = jax.vmap(lambda start: signal_padded[start:start + frame_length])(frame_indices)
-        # 应用窗口函数
+        frames = jax.vmap(lambda start: signal[start:start + frame_length])(frame_indices)
         frames_windowed = frames * window
-        return frames_windowed  # 形状: (num_frames, frame_length)
+        return frames_windowed  # shape: (num_frames, frame_length)
 
     # 对批次中的每个信号应用帧提取
-    frames = jax.vmap(extract_frames)(x)  # 形状: (batch_size, num_frames, frame_length)
+    frames = jax.vmap(extract_frames)(x)  # shape: (batch_size, num_frames, frame_length)
 
     # 进行FFT
-    fft_result = jnp.fft.rfft(frames, n=fft_length)  # 形状: (batch_size, num_frames, fft_length//2 + 1)
+    fft_result = jnp.fft.rfft(frames, n=fft_length)  # shape: (batch_size, num_frames, fft_length//2 + 1)
 
     # 计算幅度谱
     spectrogram = jnp.abs(fft_result)
 
-    return spectrogram  # 形状: (batch_size, num_frames, fft_length//2 + 1)
+    return spectrogram  # shape: (batch_size, num_frames, fft_length//2 + 1)
+        
+def freq_si_snr(target_spectrogram: jnp.ndarray, estimate_spectrogram: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
+    """
+    计算频域SI-SNR。
 
-# 定义Spectrogram MSE
-def spectrogram_mse(target, estimate, frame_length=512, frame_step=256, fft_length=512):
+    参数:
+    - target_spectrogram: 目标谱图，形状为 (batch_size, num_frames, F)
+    - estimate_spectrogram: 估计谱图，形状为 (batch_size, num_frames, F)
+    - eps: 稳定性常数
+
+    返回:
+    - 频域SI-SNR值，形状为 (batch_size,)
     """
-    计算目标信号和估计信号的谱图均方误差（Spectrogram MSE）。
-    """
-    target_spectrogram = stft(target, frame_length, frame_step, fft_length)
-    estimate_spectrogram = stft(estimate, frame_length, frame_step, fft_length)
-    
-    # 计算均方误差
-    mse = jnp.mean((target_spectrogram - estimate_spectrogram) ** 2, axis=(1, 2))  # 形状: (batch_size,)
-    
-    return mse
+    # 将频谱展平成(batch_size, num_frames * F)
+    target_flat = target_spectrogram.reshape(target_spectrogram.shape[0], -1)
+    estimate_flat = estimate_spectrogram.reshape(estimate_spectrogram.shape[0], -1)
+    return si_snr(target_flat, estimate_flat, eps)
+
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -549,8 +554,10 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2) 
-    mse = spectrogram_mse(z_original.val, aligned_x, frame_length = 512, frame_step = 256, fft_length = 512) 
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    target_spectrogram = stft(jnp.abs(aligned_x), frame_length = 512, frame_step = 256, fft_length = 512)  
+    estimate_spectrogram = stft(jnp.abs(aligned_z), frame_length = 512, frame_step = 256, fft_length = 512)
+    mse = freq_si_snr(target_spectrogram, estimate_spectrogram, 1e-8)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     loss = snr + mse
     return loss, updated_state
