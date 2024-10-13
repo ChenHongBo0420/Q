@@ -417,80 +417,31 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
         
 def phase_consistency(target, estimate):
-    """
-    计算相位一致性
-    使用余弦相似度作为相位一致性的度量
-    
-    参数:
-    - target: 目标信号，形状为 (batch_size, T)
-    - estimate: 估计信号，形状为 (batch_size, T)
-    
-    返回:
-    - phase_score_normalized: 形状为 (batch_size,)
-    """
-    # 计算快速傅里叶变换（FFT）
     target_fft = jnp.fft.fft(target)
     estimate_fft = jnp.fft.fft(estimate)
-
-    # 提取相位信息
     target_phase = jnp.angle(target_fft)
     estimate_phase = jnp.angle(estimate_fft)
-
-    # 计算相位差
     phase_diff = target_phase - estimate_phase
-
-    # 计算余弦相似度
     phase_similarity = jnp.cos(phase_diff)
-
-    # 在时间轴上平均，得到每个样本的相位一致性得分
-    phase_score = jnp.mean(phase_similarity, axis=-1)  # 形状: (batch_size,)
-
-    # 将相位得分标准化到 [0, 1]
-    phase_score_normalized = (phase_score + 1) / 2  # 形状: (batch_size,)
-
+    phase_score = jnp.mean(phase_similarity, axis=-1)  # shape: (batch_size,)
+    phase_score_normalized = (phase_score + 1) / 2  # shape: (batch_size,)
     return phase_score_normalized
 
+# 定义相位感知 SI-SNR 损失（添加调试输出）
 def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, clip_min=-100.0):
-    """
-    计算相位感知SI-SNR损失
+    si_snr_val = si_snr(target, estimate, eps)  # shape: (batch_size,)
+    si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)  # shape: (batch_size,)
+    phase_score = phase_consistency(target, estimate)  # shape: (batch_size,)
+    loss_per_sample = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # shape: (batch_size,)
+    loss = jnp.mean(loss_per_sample)  # scalar
     
-    参数:
-    - target: 目标信号，形状为 (batch_size, T)
-    - estimate: 估计信号，形状为 (batch_size, T)
-    - alpha: SI-SNR的权重 (默认 0.7)
-    - phase_scale: 相位一致性得分的缩放因子 (默认 10.0)
-    - eps: 稳定性常数 (默认 1e-8)
-    - clip_min: si_snr_val 的最小值，防止过大负值 (默认 -100.0)
+    # 检查是否存在无效值
+    is_nan = jnp.isnan(loss)
+    is_inf = jnp.isinf(loss)
     
-    返回:
-    - loss: 标量损失值
-    """
-    # 计算 SI-SNR
-    si_snr_val = si_snr(target, estimate, eps)  # 形状: (batch_size,)
-    
-    # 对 si_snr_val 进行裁剪，防止其过小导致损失为 -inf
-    si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)
-    
-    # 打印 si_snr_val 和 si_snr_val_clipped 的统计信息
-    print("si_snr_val:", si_snr_val)
-    print("si_snr_val_clipped:", si_snr_val_clipped)
-    
-    # 计算相位一致性得分
-    phase_score = phase_consistency(target, estimate)  # 形状: (batch_size,)
-    
-    # 打印 phase_score 的统计信息
-    print("phase_score:", phase_score)
-    
-    # 组合 SI-SNR 和相位一致性得分
-    # alpha 控制 SI-SNR 的权重，(1 - alpha) 控制相位一致性的权重
-    # (1 - phase_score) 表示希望 phase_score 越高，loss 越低
-    loss_per_sample = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # 形状: (batch_size,)
-    
-    # 打印 loss_per_sample 的统计信息
-    print("loss_per_sample:", loss_per_sample)
-    
-    # 计算损失为所有样本损失的平均值
-    loss = jnp.mean(loss_per_sample)  # 标量
+    # 如果存在无效值，则发出警告
+    if is_nan or is_inf:
+        print("Warning: Loss contains NaN or Inf values.")
     
     return loss
 
