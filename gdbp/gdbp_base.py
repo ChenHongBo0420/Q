@@ -530,7 +530,7 @@ def loss_fn(module: layer.Layer,
     x_updated = jnp.stack([x1_updated, x2_updated], axis=-1)
     
     # 计算每个通道的加权 SI-SNR
-    snr = weighted_si_snr(jnp.abs(z1), jnp.abs(x_updated), weights)
+    snr = weighted_si_snr(jnp.abs(z_original.val), jnp.abs(x_updated), weights)
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
