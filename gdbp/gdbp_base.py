@@ -416,6 +416,46 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
+def stft(x, frame_length=512, frame_step=256, fft_length=512):
+    """
+    简单实现短时傅里叶变换（STFT）。
+    """
+    # 窗口函数
+    window = jnp.hamming(frame_length)
+    
+    # 帧分割
+    def frame_split(signal):
+        batch_size, T = signal.shape
+        num_frames = 1 + (T - frame_length) // frame_step
+        frames = jax.vmap(lambda s: jnp.lib.stride_tricks.as_strided(
+            s, shape=(num_frames, frame_length), strides=(s.strides[0]*frame_step, s.strides[0])
+        ))(signal)
+        return frames  # shape: (batch_size, num_frames, frame_length)
+    
+    frames = frame_split(x)  # shape: (batch_size, num_frames, frame_length)
+    
+    # 应用窗口函数
+    frames_windowed = frames * window  # shape: (batch_size, num_frames, frame_length)
+    
+    # 进行FFT
+    fft_result = jnp.fft.rfft(frames_windowed, n=fft_length)  # shape: (batch_size, num_frames, fft_length//2 + 1)
+    
+    # 计算幅度谱
+    spectrogram = jnp.abs(fft_result)
+    
+    return spectrogram  # shape: (batch_size, num_frames, fft_length//2 + 1)
+
+def spectrogram_mse(target, estimate, frame_length=512, frame_step=256, fft_length=512):
+    """
+    计算目标信号和估计信号的谱图均方误差。
+    """
+    target_spectrogram = stft(target, frame_length, frame_step, fft_length)
+    estimate_spectrogram = stft(estimate, frame_length, frame_step, fft_length)
+    
+    # 计算均方误差
+    mse = jnp.mean((target_spectrogram - estimate_spectrogram) ** 2, axis=(1, 2))  # shape: (batch_size,)
+    
+    return mse
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -500,9 +540,11 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)   
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2) 
+    mse = spectrogram_mse(z_original.val, aligned_x, frame_length = 512, frame_step = 256, fft_length = 512) 
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
-    return snr, updated_state
+    loss = snr + mse
+    return loss, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
