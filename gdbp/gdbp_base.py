@@ -416,25 +416,27 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
-def weighted_interaction(x1, x2):
-    x1_normalized = (x1 - jnp.mean(x1)) / (jnp.std(x1) + 1e-6)
-    x2_normalized = (x2 - jnp.mean(x2)) / (jnp.std(x2) + 1e-6)
-    # 计算逐点的权重
-    weights = x1_normalized * x2_normalized  # 生成与时间维度匹配的权重
-    x1_updated = x1 + weights * x2
-    x2_updated = x2 + weights * x1
-    return x1_updated, x2_updated, weights
-        
 def weighted_si_snr(target, estimate, weights, eps=1e-8):
-    # 计算加权能量
-    target_energy = jnp.sum(weights * jnp.square(target))
-    dot_product = jnp.sum(weights * target * estimate)
+    # 计算加权能量，使用复数模的平方
+    target_energy = jnp.sum(weights * jnp.abs(target) ** 2)
+    dot_product = jnp.sum(weights * jnp.real(target * jnp.conj(estimate)))
     s_target = dot_product / (target_energy + eps) * target
     e_noise = estimate - s_target
-    target_energy = jnp.sum(weights * jnp.square(s_target))
-    noise_energy = jnp.sum(weights * jnp.square(e_noise))
+    target_energy = jnp.sum(weights * jnp.abs(s_target) ** 2)
+    noise_energy = jnp.sum(weights * jnp.abs(e_noise) ** 2)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value        
+    return -si_snr_value
+
+def weighted_interaction(x1, x2):
+    x1_real = jnp.real(x1)
+    x2_real = jnp.real(x2)
+    x1_normalized = (x1_real - jnp.mean(x1_real)) / (jnp.std(x1_real) + 1e-6)
+    x2_normalized = (x2_real - jnp.mean(x2_real)) / (jnp.std(x2_real) + 1e-6)
+    # 计算逐点的权重，确保为实数
+    weights = x1_normalized * x2_normalized
+    x1_updated = x1 + weights * x2
+    x2_updated = x2 + weights * x1
+    return x1_updated, x2_updated, weights       
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -525,13 +527,15 @@ def loss_fn(module: layer.Layer,
     z1 = z_original.val[:, 0]
     z2 = z_original.val[:, 1]
     
-    # 使用偏振交互计算权重
+    # 使用偏振交互计算权重和更新后的信号
     x1_updated, x2_updated, weights = weighted_interaction(x1, x2)
-    x_updated = jnp.stack([x1_updated, x2_updated], axis=-1)
+    
+    # 确保权重为非负实数
+    weights = jnp.abs(weights)
     
     # 计算每个通道的加权 SI-SNR
-    snr1 = weighted_si_snr(jnp.abs(z1), jnp.abs(x1_updated), weights)
-    snr2 = weighted_si_snr(jnp.abs(z2), jnp.abs(x2_updated), weights)
+    snr1 = weighted_si_snr(z1, x1_updated, weights)
+    snr2 = weighted_si_snr(z2, x2_updated, weights)
     snr = (snr1 + snr2) / 2.0
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
