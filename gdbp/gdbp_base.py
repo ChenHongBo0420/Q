@@ -450,7 +450,6 @@ def phase_consistency(target, estimate):
 
     return phase_score_normalized
 
-# 定义相位感知 SI-SNR 损失
 def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, clip_min=-100.0):
     """
     计算相位感知SI-SNR损失
@@ -472,18 +471,29 @@ def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, 
     # 对 si_snr_val 进行裁剪，防止其过小导致损失为 -inf
     si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)
     
+    # 打印 si_snr_val 和 si_snr_val_clipped 的统计信息
+    print("si_snr_val:", si_snr_val)
+    print("si_snr_val_clipped:", si_snr_val_clipped)
+    
     # 计算相位一致性得分
     phase_score = phase_consistency(target, estimate)  # 形状: (batch_size,)
+    
+    # 打印 phase_score 的统计信息
+    print("phase_score:", phase_score)
     
     # 组合 SI-SNR 和相位一致性得分
     # alpha 控制 SI-SNR 的权重，(1 - alpha) 控制相位一致性的权重
     # (1 - phase_score) 表示希望 phase_score 越高，loss 越低
     loss_per_sample = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # 形状: (batch_size,)
     
+    # 打印 loss_per_sample 的统计信息
+    print("loss_per_sample:", loss_per_sample)
+    
     # 计算损失为所有样本损失的平均值
     loss = jnp.mean(loss_per_sample)  # 标量
     
     return loss
+
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
