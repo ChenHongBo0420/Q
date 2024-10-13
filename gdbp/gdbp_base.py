@@ -423,7 +423,7 @@ def weighted_interaction(x1, x2):
     weights = x1_normalized * x2_normalized  # 生成与时间维度匹配的权重
     x1_updated = x1 + weights * x2
     x2_updated = x2 + weights * x1
-    return x1_updated, x2_updated, weights
+    return x1_updated, x2_updated
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
