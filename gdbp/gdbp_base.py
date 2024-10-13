@@ -418,29 +418,26 @@ def si_snr(target, estimate, eps=1e-8):
 
 def stft(x, frame_length=512, frame_step=256, fft_length=512):
     """
-    短时傅里叶变换（STFT）的JAX实现。
-
-    参数:
-    - x: 输入信号，形状为 (batch_size, T)
-    - frame_length: 每帧的长度
-    - frame_step: 帧步长
-    - fft_length: FFT的长度
-
-    返回:
-    - spectrogram: 幅度谱图，形状为 (batch_size, num_frames, fft_length//2 + 1)
+    短时傅里叶变换（STFT）的JAX实现，包含必要的填充以确保帧数至少为1。
     """
     batch_size, T = x.shape
-    num_frames = 1 + (T - frame_length) // frame_step
+    # 计算帧数，确保至少为1
+    num_frames = 1 + jnp.maximum(0, (T - frame_length) // frame_step)
 
     # 创建窗口函数
     window = jnp.hamming(frame_length)
 
-    # 定义提取帧的函数
+    # 定义帧提取函数
     def extract_frames(signal):
+        # 计算必要的填充长度
+        total_length = frame_step * num_frames + frame_length
+        pad_length = jnp.maximum(0, total_length - signal.shape[0])
+        # 在信号右侧填充零
+        signal_padded = jnp.pad(signal, (0, pad_length), mode='constant')
         # 生成帧的起始索引
         frame_indices = jnp.arange(num_frames) * frame_step
         # 提取每一帧
-        frames = jax.vmap(lambda start: signal[start:start + frame_length])(frame_indices)
+        frames = jax.vmap(lambda start: signal_padded[start:start + frame_length])(frame_indices)
         # 应用窗口函数
         frames_windowed = frames * window
         return frames_windowed  # 形状: (num_frames, frame_length)
@@ -454,17 +451,18 @@ def stft(x, frame_length=512, frame_step=256, fft_length=512):
     # 计算幅度谱
     spectrogram = jnp.abs(fft_result)
 
-    return spectrogram  
+    return spectrogram  # 形状: (batch_size, num_frames, fft_length//2 + 1)
 
+# 定义Spectrogram MSE
 def spectrogram_mse(target, estimate, frame_length=512, frame_step=256, fft_length=512):
     """
-    计算目标信号和估计信号的谱图均方误差。
+    计算目标信号和估计信号的谱图均方误差（Spectrogram MSE）。
     """
     target_spectrogram = stft(target, frame_length, frame_step, fft_length)
     estimate_spectrogram = stft(estimate, frame_length, frame_step, fft_length)
     
     # 计算均方误差
-    mse = jnp.mean((target_spectrogram - estimate_spectrogram) ** 2, axis=(1, 2))  # shape: (batch_size,)
+    mse = jnp.mean((target_spectrogram - estimate_spectrogram) ** 2, axis=(1, 2))  # 形状: (batch_size,)
     
     return mse
         
