@@ -417,63 +417,23 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
         
 def phase_consistency(target, estimate):
-    """
-    计算相位一致性
-    使用余弦相似度作为相位一致性的度量
-    
-    参数:
-    - target: 目标信号，形状为 (batch_size, T)
-    - estimate: 估计信号，形状为 (batch_size, T)
-    
-    返回:
-    - phase_score: 形状为 (batch_size,)
-    """
-    # 计算快速傅里叶变换（FFT）
     target_fft = jnp.fft.fft(target)
     estimate_fft = jnp.fft.fft(estimate)
-
-    # 计算相位
     target_phase = jnp.angle(target_fft)
     estimate_phase = jnp.angle(estimate_fft)
-
-    # 计算相位差并计算余弦相似度
     phase_diff = target_phase - estimate_phase
     phase_similarity = jnp.cos(phase_diff)
-
-    # 平均相位相似度
     phase_score = jnp.mean(phase_similarity, axis=-1)  # 形状: (batch_size,)
+    phase_score_normalized = (phase_score + 1) / 2  # 标准化到 [0,1]
+    return phase_score_normalized
 
-    return phase_score  # 形状: (batch_size,)
-
-def phase_aware_si_snr(target, estimate, alpha=0.5, phase_scale=1.0, eps=1e-8):
-    """
-    计算相位感知SI-SNR，结合SI-SNR和相位一致性得分
-    
-    参数:
-    - target: 目标信号，形状为 (batch_size, T)
-    - estimate: 估计信号，形状为 (batch_size, T)
-    - alpha: SI-SNR的权重
-    - phase_scale: 相位一致性得分的缩放因子
-    - eps: 稳定性常数
-    
-    返回:
-    - loss: 标量损失值
-    """
-    # 计算 SI-SNR
+# 定义相位感知 SI-SNR 损失
+def phase_aware_si_snr(target, estimate, alpha=0.7, phase_scale=10.0, eps=1e-8, clip_min=-100.0):
     si_snr_val = si_snr(target, estimate, eps)  # 形状: (batch_size,)
-
-    # 计算相位一致性
+    si_snr_val_clipped = jnp.clip(si_snr_val, a_min=clip_min)
     phase_score = phase_consistency(target, estimate)  # 形状: (batch_size,)
-
-    # 标准化相位得分到 [0, 1]
-    phase_score_normalized = (phase_score + 1) / 2  # 形状: (batch_size,)
-
-    # 组合 SI-SNR 和相位一致性得分
-    phase_aware_si_snr = alpha * si_snr_val + (1 - alpha) * phase_score_normalized * phase_scale  # 形状: (batch_size,)
-
-    # 计算损失为相位感知SI-SNR的负均值（优化器最小化损失）
-    loss = jnp.mean(-phase_aware_si_snr)  # 标量
-
+    loss = alpha * si_snr_val_clipped + (1 - alpha) * (1 - phase_score) * phase_scale  # 形状: (batch_size,)
+    loss = jnp.mean(loss)  # 标量
     return loss
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
