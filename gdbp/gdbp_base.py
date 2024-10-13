@@ -416,60 +416,6 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-def stft(x: jnp.ndarray, frame_length: int = 512, frame_step: int = 256, fft_length: int = 512) -> jnp.ndarray:
-    """
-    实现短时傅里叶变换（STFT）。
-
-    参数:
-    - x: 输入信号，形状为 (batch_size, T)
-    - frame_length: 每帧的长度
-    - frame_step: 帧步长
-    - fft_length: FFT的长度
-
-    返回:
-    - 幅度谱图，形状为 (batch_size, num_frames, fft_length//2 + 1)
-    """
-    batch_size, T = x.shape
-    num_frames = 1 + (T - frame_length) // frame_step
-
-    # 创建窗口函数
-    window = jnp.hamming(frame_length)
-
-    # 定义提取帧的函数
-    def extract_frames(signal):
-        frame_indices = jnp.arange(num_frames) * frame_step
-        frames = jax.vmap(lambda start: signal[start:start + frame_length])(frame_indices)
-        frames_windowed = frames * window
-        return frames_windowed  # shape: (num_frames, frame_length)
-
-    # 对批次中的每个信号应用帧提取
-    frames = jax.vmap(extract_frames)(x)  # shape: (batch_size, num_frames, frame_length)
-
-    # 进行FFT
-    fft_result = jnp.fft.rfft(frames, n=fft_length)  # shape: (batch_size, num_frames, fft_length//2 + 1)
-
-    # 计算幅度谱
-    spectrogram = jnp.abs(fft_result)
-
-    return spectrogram  # shape: (batch_size, num_frames, fft_length//2 + 1)
-        
-def freq_si_snr(target_spectrogram: jnp.ndarray, estimate_spectrogram: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
-    """
-    计算频域SI-SNR。
-
-    参数:
-    - target_spectrogram: 目标谱图，形状为 (batch_size, num_frames, F)
-    - estimate_spectrogram: 估计谱图，形状为 (batch_size, num_frames, F)
-    - eps: 稳定性常数
-
-    返回:
-    - 频域SI-SNR值，形状为 (batch_size,)
-    """
-    # 将频谱展平成(batch_size, num_frames * F)
-    target_flat = target_spectrogram.reshape(target_spectrogram.shape[0], -1)
-    estimate_flat = estimate_spectrogram.reshape(estimate_spectrogram.shape[0], -1)
-    return si_snr(target_flat, estimate_flat, eps)
-
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -555,12 +501,8 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    target_spectrogram = stft(jnp.abs(aligned_x), frame_length = 512, frame_step = 256, fft_length = 512)  
-    estimate_spectrogram = stft(jnp.abs(aligned_z), frame_length = 512, frame_step = 256, fft_length = 512)
-    mse = freq_si_snr(target_spectrogram, estimate_spectrogram, 1e-8)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
-    loss = snr + mse
-    return loss, updated_state
+    return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
