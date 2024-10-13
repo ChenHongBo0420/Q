@@ -419,10 +419,11 @@ def si_snr(target, estimate, eps=1e-8):
 def weighted_interaction(x1, x2):
     x1_normalized = (x1 - jnp.mean(x1)) / (jnp.std(x1) + 1e-6)
     x2_normalized = (x2 - jnp.mean(x2)) / (jnp.std(x2) + 1e-6)
-    weight = jnp.mean(x1_normalized * x2_normalized)
-    x1_updated = x1 + weight * x2
-    x2_updated = x2 + weight * x1
-    return x1_updated, x2_updated
+    # 计算逐点的权重
+    weights = x1_normalized * x2_normalized  # 生成与时间维度匹配的权重
+    x1_updated = x1 + weights * x2
+    x2_updated = x2 + weights * x1
+    return x1_updated, x2_updated, weights
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -521,7 +522,7 @@ def loss_fn(module: layer.Layer,
     snr1 = si_snr(jnp.abs(z1), jnp.abs(x1_updated))
     snr2 = si_snr(jnp.abs(z2), jnp.abs(x2_updated))
     snr = (snr1 + snr2) / 2.0
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
+    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
