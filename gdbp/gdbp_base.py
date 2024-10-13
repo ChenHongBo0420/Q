@@ -415,14 +415,6 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-
-def squeeze_excite_attention(x):
-    # 注意力机制
-    avg_pool = jnp.max(x, axis=0, keepdims=True)
-    attention = jnp.tanh(avg_pool)
-    attention = jnp.tile(attention, (x.shape[0], 1))
-    x = x * attention
-    return x       
         
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
@@ -508,19 +500,7 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    z_attended = squeeze_excite_attention(z_original.val)
-    
-    # 将模型输出和目标信号展平成一维数组
-    z_flat = z_attended.reshape(-1)
-    x_flat = aligned_x.reshape(-1)
-    
-    # 确保信号为实数类型，避免梯度计算错误
-    z_flat = jnp.real(z_flat)
-    x_flat = jnp.real(x_flat)
-    
-    # 计算总的 SI-SNR
-    snr = si_snr(x_flat, z_flat)
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  
     return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
