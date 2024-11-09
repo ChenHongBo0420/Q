@@ -442,10 +442,11 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    concatenated_output, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+
+    # 获取与模型输出对齐的真实信号
+    aligned_x = x[concatenated_output.t.start:concatenated_output.t.stop]
     output_dbp, output_nn = jnp.split(concatenated_output.val, indices_or_sections=2, axis=-1)
 
     # 计算DBP分支的损失（例如，使用SNR损失）
