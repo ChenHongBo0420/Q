@@ -415,6 +415,10 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
+def energy1(x):
+    """计算信号的能量，适用于复数信号。"""
+    return jnp.sum(jnp.abs(x) ** 2)
+        
 def compute_derivatives(estimate, dz, dt):
     Q_z = (jnp.roll(estimate, shift=-1, axis=0) - jnp.roll(estimate, shift=1, axis=0)) / (2 * dz)
     
@@ -426,7 +430,7 @@ def physics_loss(estimate, beta2=-21.0, gamma=1.3, dz=1.0, dt=20e-3):
         
     Q_z, Q_tt = compute_derivatives(estimate, dz, dt)
     residual = 1j * Q_z - beta2 * Q_tt + gamma * (jnp.abs(estimate) ** 2) * estimate
-    loss_phy = energy(residual)
+    loss_phy = energy1(residual)
     
     return loss_phy
         
