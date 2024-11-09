@@ -415,25 +415,6 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
-def energy1(x):
-    """计算信号的能量，适用于复数信号。"""
-    return jnp.sum(jnp.abs(x) ** 2)
-        
-def compute_derivatives(estimate, dz, dt):
-    Q_z = (jnp.roll(estimate, shift=-1, axis=0) - jnp.roll(estimate, shift=1, axis=0)) / (2 * dz)
-    
-    Q_tt = (jnp.roll(estimate, shift=-1, axis=1) - 2 * estimate + jnp.roll(estimate, shift=1, axis=1)) / (dt ** 2)
-    
-    return Q_z, Q_tt
-
-def physics_loss(estimate, beta2=-21.0, gamma=1.3, dz=1.0, dt=20e-3):
-        
-    Q_z, Q_tt = compute_derivatives(estimate, dz, dt)
-    residual = 1j * Q_z - beta2 * Q_tt + gamma * (jnp.abs(estimate) ** 2) * estimate
-    loss_phy = energy1(residual)
-    
-    return loss_phy
-        
 # def compute_kde_weights(data, kernel="gaussian", bandwidth=0.1):
 #     # 使用 JAX 计算 KDE 权重
 #     data_real = jnp.real(data)  # 处理实部
@@ -519,8 +500,6 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    loss_phy = physics_loss(jnp.abs(z_original.val))
-    snr = snr + 0.1 * loss_phy
     return snr, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
