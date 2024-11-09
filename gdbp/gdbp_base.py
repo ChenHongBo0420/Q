@@ -454,7 +454,7 @@ def loss_fn(module: layer.Layer,
 
     # 计算神经网络分支的损失（例如，残差的均方误差）
     residual = output_nn.squeeze()  # 假设残差为一维
-    residual_loss = si_snr(residual - (aligned_x - output_dbp.squeeze()))
+    residual_loss = si_snr((residual - (aligned_x - output_dbp.squeeze())), jnp.abs(aligned_x))
 
     # 总损失为两个损失的加权和
     alpha = 1.0  # 根据需要调整权重
