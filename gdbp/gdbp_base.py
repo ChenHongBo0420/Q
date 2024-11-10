@@ -19,129 +19,129 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 ## One ##
-def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train'):
-    '''
-    make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
-
-    Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
-
-    Returns:
-        A layer object
-    '''
-
-    _assert_taps(dtaps, ntaps, rtaps)
-
-    d_init, n_init = init_fn
-
-    if mode == 'train':
-        # configure mimo to its training mode
-        mimo_train = True
-    elif mode == 'test':
-        # mimo operates at training mode for the first 200000 symbols,
-        # then switches to tracking mode afterwards
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
-    else:
-        raise ValueError('invalid mode %s' % mode)
-        
-    base = layer.Serial(
-        layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-    return base
-
-## Two ##
 # def make_base_module(steps: int = 3,
 #                      dtaps: int = 261,
 #                      ntaps: int = 41,
 #                      rtaps: int = 61,
 #                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0=0.,
+#                      w0 = 0.,
 #                      mode: str = 'train'):
+#     '''
+#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
+#     specific initialization method and trainable parameters defined
+#     by trainer.
+
+#     Args:
+#         steps: GDBP steps/layers
+#         dtaps: D-filter length
+#         ntaps: N-filter length
+#         rtaps: R-filter length
+#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+#         mode: 'train' or 'test'
+
+#     Returns:
+#         A layer object
+#     '''
 
 #     _assert_taps(dtaps, ntaps, rtaps)
 
 #     d_init, n_init = init_fn
 
 #     if mode == 'train':
+#         # configure mimo to its training mode
 #         mimo_train = True
 #     elif mode == 'test':
+#         # mimo operates at training mode for the first 200000 symbols,
+#         # then switches to tracking mode afterwards
 #         mimo_train = cxopt.piecewise_constant([200000], [True, False])
 #     else:
 #         raise ValueError('invalid mode %s' % mode)
-
-#     # 定义串联的 FDBP 层
-#     fdbp_series = layer.Serial(
+        
+#     base = layer.Serial(
 #         layer.FDBP(steps=steps,
-#                     dtaps=dtaps,
-#                     ntaps=ntaps,
-#                     d_init=d_init,
-#                     n_init=n_init,
-#                     name='fdbp1'),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf1',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train),
-#         name='fdbp_series'
-#     )
-
-#     # 定义原有的串行分支
-#     serial_branch = layer.Serial(
-#         layer.FDBP1(steps=steps,
 #                    dtaps=dtaps,
 #                    ntaps=ntaps,
 #                    d_init=d_init,
 #                    n_init=n_init),
-#         layer.BatchPowerNorm1(mode=mode),
-#         layer.MIMOFOEAf1(name='FOEAf',
+#         layer.BatchPowerNorm(mode=mode),
+#         layer.MIMOFOEAf(name='FOEAf',
 #                         w0=w0,
 #                         train=mimo_train,
 #                         preslicer=core.conv1d_slicer(rtaps),
 #                         foekwargs={}),
-#         layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
-#         layer.MIMOAF1(train=mimo_train),
-#         name='serial_branch'  # 添加名称
-#     )
-
-#     # 定义基础模块
-#     base = layer.Serial(
-#         layer.FanOut(num=2),
-#         layer.Parallel(
-#             fdbp_series,
-#             serial_branch
-#         ),
-#         layer.FanInConcat()
-#     )
-
+#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+#         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        
 #     return base
+
+## Two ##
+def make_base_module(steps: int = 3,
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0=0.,
+                     mode: str = 'train'):
+
+    _assert_taps(dtaps, ntaps, rtaps)
+
+    d_init, n_init = init_fn
+
+    if mode == 'train':
+        mimo_train = True
+    elif mode == 'test':
+        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+    else:
+        raise ValueError('invalid mode %s' % mode)
+
+    # 定义串联的 FDBP 层
+    fdbp_series = layer.Serial(
+        layer.FDBP(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp1'),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf1',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='fdbp_series'
+    )
+
+    # 定义原有的串行分支
+    serial_branch = layer.Serial(
+        layer.FDBP1(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
+        layer.BatchPowerNorm1(mode=mode),
+        layer.MIMOFOEAf1(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
+        layer.MIMOAF1(train=mimo_train),
+        name='serial_branch'  # 添加名称
+    )
+
+    # 定义基础模块
+    base = layer.Serial(
+        layer.FanOut(num=2),
+        layer.Parallel(
+            fdbp_series,
+            serial_branch
+        ),
+        layer.FanInConcat()
+    )
+
+    return base
 
 ## Three ##
 # def make_base_module(steps: int = 3,
@@ -416,25 +416,6 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
   
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    residual_loss = si_snr(jnp.abs(z_original.val - (aligned_x - z_original.val)), jnp.abs(aligned_x))
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = snr + residual_loss
-    return snr, updated_state
-
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state: Dict,
@@ -444,25 +425,42 @@ def loss_fn(module: layer.Layer,
 #             const: Dict,
 #             sparams: Dict,):
 #     params = util.dict_merge(params, sparams)
-#     concatenated_output, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return snr, updated_state
 
-#     # 获取与模型输出对齐的真实信号
-#     aligned_x = x[concatenated_output.t.start:concatenated_output.t.stop]
-#     output_dbp, output_nn = jnp.split(concatenated_output.val, indices_or_sections=2, axis=-1)
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    concatenated_output, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
 
-#     # 计算DBP分支的损失（例如，使用SNR损失）
-#     snr_loss = si_snr(jnp.abs(output_dbp.squeeze()), jnp.abs(aligned_x))
+    # 获取与模型输出对齐的真实信号
+    aligned_x = x[concatenated_output.t.start:concatenated_output.t.stop]
+    output_dbp, output_nn = jnp.split(concatenated_output.val, indices_or_sections=2, axis=-1)
 
-#     # 计算神经网络分支的损失（例如，残差的均方误差）
-#     residual = output_dbp.squeeze()  # 假设残差为一维
-#     residual_loss = si_snr(jnp.abs(residual - (aligned_x - output_dbp.squeeze())), jnp.abs(aligned_x))
-#     # 总损失为两个损失的加权和
-#     alpha = 1.0  # 根据需要调整权重
-#     beta = 1.0
-#     total_loss = alpha * snr_loss + beta * residual_loss
+    # 计算DBP分支的损失（例如，使用SNR损失）
+    snr_loss = si_snr(jnp.abs(output_dbp.squeeze()), jnp.abs(aligned_x))
 
-#     return total_loss, updated_state    
+    # 计算神经网络分支的损失（例如，残差的均方误差）
+    residual = output_dbp.squeeze()  # 假设残差为一维
+    residual_loss = si_snr(jnp.abs(residual - (aligned_x - output_dbp.squeeze())), jnp.abs(aligned_x))
+    # 总损失为两个损失的加权和
+    alpha = 1.0  # 根据需要调整权重
+    beta = 1.0
+    total_loss = alpha * snr_loss + beta * residual_loss
+
+    return total_loss, updated_state    
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
