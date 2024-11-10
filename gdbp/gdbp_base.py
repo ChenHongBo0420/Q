@@ -432,6 +432,7 @@ def loss_fn(module: layer.Layer,
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     residual_loss = si_snr(jnp.abs(z_original - (aligned_x - z_original)), jnp.abs(aligned_x))
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = snr + residual_loss
     return snr, updated_state
 
 # def loss_fn(module: layer.Layer,
