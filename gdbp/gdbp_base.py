@@ -644,33 +644,35 @@ def test(model: Model,
     if params is None:
         params = model.initvar[0]
 
-    # 在进入 JAX 函数之前，提取输入信号的必要信息
+    # 准备输入信号
     input_signal = core.Signal(data.y)
-    input_val = input_signal.val
-    input_t = input_signal.t  # 应该是 (start, stop)
 
-    # 调用 JAX 的 apply 函数
-    z = jit(model.module.apply, backend='cpu')({
+    # 调用 apply 函数，并正确解包返回值
+    z_val, z_t = jit(model.module.apply, backend='cpu')({
         'params': util.dict_merge(params, sparams),
         'aux_inputs': aux,
         'const': const,
         **state
     }, input_signal)
 
-    # 拆分拼接的输出
-    output_dbp, output_nn = jnp.split(z.val, indices_or_sections=2, axis=-1)
+    # 如果 z_t 是一个包含 (start, stop) 的元组
+    z_t_start, z_t_stop = z_t
 
-    # 选择要用于计算 Q 值的输出，例如融合后的输出
+    # 拆分拼接的输出
+    output_dbp, output_nn = jnp.split(z_val, indices_or_sections=2, axis=-1)
+
+    # 确保输出是二维数组，并进行压缩
     output_dbp = output_dbp.squeeze()
     output_nn = output_nn.squeeze()
 
     # 对齐原始信号
-    z_t_start, z_t_stop = z.t  # 提取起始和结束索引
     aligned_x = data.x[z_t_start:z_t_stop]
 
-    # 确保输出和原始信号形状一致
-    output_dbp = output_dbp[:aligned_x.shape[0]]
-    output_nn = output_nn[:aligned_x.shape[0]]
+    # 确保所有信号长度一致
+    min_length = min(output_dbp.shape[0], output_nn.shape[0], aligned_x.shape[0])
+    output_dbp = output_dbp[:min_length]
+    output_nn = output_nn[:min_length]
+    aligned_x = aligned_x[:min_length]
 
     # 集成学习：加权平均
     weight_dbp = 0.6
@@ -682,4 +684,4 @@ def test(model: Model,
                        aligned_x,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-    return metric, z
+    return metric, z_val
