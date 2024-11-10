@@ -693,3 +693,4 @@ def test(model: Model,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z_val_array  # 返回实际的 ndarray 值
+
