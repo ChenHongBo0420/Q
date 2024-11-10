@@ -635,62 +635,49 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
+         eval_range: tuple=(300000, -20000),
          metric_fn=comm.qamqot):
-    ''' Testing function with ensemble learning '''
+    ''' testing, a simple forward pass '''
 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
-    # 准备输入信号
-    input_signal = core.Signal(data.y)
-
-    # 调用 apply 函数，并正确解包返回值
-    z = jit(model.module.apply, backend='cpu')({
-        'params': util.dict_merge(params, sparams),
-        'aux_inputs': aux,
-        'const': const,
-        **state
-    }, input_signal)
-
-    # 解包 z，获取信号值和时间索引
-    z_val, z_t = z  # z 是一个元组，包含 (Signal, t)
-    z_t_start, z_t_stop = z_t  # 假设 z_t 是一个 (start, stop) 的元组
-
-    # 确保 z_val 是一个 Signal 对象
-    if isinstance(z_val, core.Signal):
-        # 获取实际的 ndarray 值
-        z_val_array = z_val.val
-    else:
-        raise TypeError(f"Expected z_val to be a Signal object, but got {type(z_val)}")
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
 
     # 拆分拼接的输出
-    output_dbp, output_nn = jnp.split(z_val_array, indices_or_sections=2, axis=-1)
+    output_dbp, output_nn = jnp.split(z.val, indices_or_sections=2, axis=-1)
 
-    # 确保输出是二维数组，并进行压缩
+    # 确保输出形状一致，并进行压缩
     output_dbp = output_dbp.squeeze()
     output_nn = output_nn.squeeze()
 
-    # 对齐原始信号
-    aligned_x = data.x[z_t_start:z_t_stop]
-
-    # 确保所有信号长度一致
-    min_length = min(output_dbp.shape[0], output_nn.shape[0], aligned_x.shape[0])
-    output_dbp = output_dbp[:min_length]
-    output_nn = output_nn[:min_length]
-    aligned_x = aligned_x[:min_length]
-
-    # 集成学习：加权平均
+    # 定义权重，根据需要调整
     weight_dbp = 0.6
     weight_nn = 0.4
+
+    # 通过加权平均进行融合
     output = weight_dbp * output_dbp + weight_nn * output_nn
+
+    # 对齐原始信号
+    aligned_x = data.x[z.t.start:z.t.stop]
+
+    # 确保输出和原始信号形状一致
+    min_length = min(output.shape[0], aligned_x.shape[0])
+    output = output[:min_length]
+    aligned_x = aligned_x[:min_length]
 
     # 计算指标
     metric = metric_fn(output,
                        aligned_x,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-    return metric, z_val_array  # 返回实际的 ndarray 值
+    return metric, z
 
