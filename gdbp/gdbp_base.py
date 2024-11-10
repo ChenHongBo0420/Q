@@ -660,8 +660,8 @@ def test(model: Model,
     output_nn = output_nn.squeeze()
 
     # 定义权重，根据需要调整
-    weight_dbp = 0.6
-    weight_nn = 0.4
+    weight_dbp = 0.8
+    weight_nn = 0.2
 
     # 通过加权平均进行融合
     output = weight_dbp * output_dbp + weight_nn * output_nn
