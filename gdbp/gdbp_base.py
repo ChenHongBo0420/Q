@@ -648,18 +648,26 @@ def test(model: Model,
     input_signal = core.Signal(data.y)
 
     # 调用 apply 函数，并正确解包返回值
-    z_val, z_t = jit(model.module.apply, backend='cpu')({
+    z = jit(model.module.apply, backend='cpu')({
         'params': util.dict_merge(params, sparams),
         'aux_inputs': aux,
         'const': const,
         **state
     }, input_signal)
 
-    # 如果 z_t 是一个包含 (start, stop) 的元组
-    z_t_start, z_t_stop = z_t
+    # 解包 z，获取信号值和时间索引
+    z_val, z_t = z  # z 是一个元组，包含 (Signal, t)
+    z_t_start, z_t_stop = z_t  # 假设 z_t 是一个 (start, stop) 的元组
+
+    # 确保 z_val 是一个 Signal 对象
+    if isinstance(z_val, core.Signal):
+        # 获取实际的 ndarray 值
+        z_val_array = z_val.val
+    else:
+        raise TypeError(f"Expected z_val to be a Signal object, but got {type(z_val)}")
 
     # 拆分拼接的输出
-    output_dbp, output_nn = jnp.split(z_val, indices_or_sections=2, axis=-1)
+    output_dbp, output_nn = jnp.split(z_val_array, indices_or_sections=2, axis=-1)
 
     # 确保输出是二维数组，并进行压缩
     output_dbp = output_dbp.squeeze()
@@ -684,4 +692,4 @@ def test(model: Model,
                        aligned_x,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-    return metric, z_val
+    return metric, z_val_array  # 返回实际的 ndarray 值
