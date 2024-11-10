@@ -416,23 +416,6 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
   
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
-
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -442,25 +425,43 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    concatenated_output, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    residual_loss = si_snr(jnp.abs(z_original - (aligned_x - z_original)), jnp.abs(aligned_x))
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
 
-    # 获取与模型输出对齐的真实信号
-    aligned_x = x[concatenated_output.t.start:concatenated_output.t.stop]
-    output_dbp, output_nn = jnp.split(concatenated_output.val, indices_or_sections=2, axis=-1)
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     concatenated_output, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
 
-    # 计算DBP分支的损失（例如，使用SNR损失）
-    snr_loss = si_snr(jnp.abs(output_dbp.squeeze()), jnp.abs(aligned_x))
+#     # 获取与模型输出对齐的真实信号
+#     aligned_x = x[concatenated_output.t.start:concatenated_output.t.stop]
+#     output_dbp, output_nn = jnp.split(concatenated_output.val, indices_or_sections=2, axis=-1)
 
-    # 计算神经网络分支的损失（例如，残差的均方误差）
-    residual = output_dbp.squeeze()  # 假设残差为一维
-    residual_loss = si_snr(jnp.abs(residual - (aligned_x - output_dbp.squeeze())), jnp.abs(aligned_x))
-    # 总损失为两个损失的加权和
-    alpha = 1.0  # 根据需要调整权重
-    beta = 1.0
-    total_loss = alpha * snr_loss + beta * residual_loss
+#     # 计算DBP分支的损失（例如，使用SNR损失）
+#     snr_loss = si_snr(jnp.abs(output_dbp.squeeze()), jnp.abs(aligned_x))
 
-    return total_loss, updated_state    
+#     # 计算神经网络分支的损失（例如，残差的均方误差）
+#     residual = output_dbp.squeeze()  # 假设残差为一维
+#     residual_loss = si_snr(jnp.abs(residual - (aligned_x - output_dbp.squeeze())), jnp.abs(aligned_x))
+#     # 总损失为两个损失的加权和
+#     alpha = 1.0  # 根据需要调整权重
+#     beta = 1.0
+#     total_loss = alpha * snr_loss + beta * residual_loss
+
+#     return total_loss, updated_state    
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
