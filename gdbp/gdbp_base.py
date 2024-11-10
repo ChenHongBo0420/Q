@@ -644,29 +644,37 @@ def test(model: Model,
     if params is None:
         params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
+    # 在进入 JAX 函数之前，提取输入信号的必要信息
+    input_signal = core.Signal(data.y)
+    input_val = input_signal.val
+    input_t = input_signal.t  # 应该是 (start, stop)
+
+    # 调用 JAX 的 apply 函数
+    z = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux,
+        'const': const,
+        **state
+    }, input_signal)
 
     # 拆分拼接的输出
     output_dbp, output_nn = jnp.split(z.val, indices_or_sections=2, axis=-1)
 
+    # 选择要用于计算 Q 值的输出，例如融合后的输出
+    output_dbp = output_dbp.squeeze()
+    output_nn = output_nn.squeeze()
+
     # 对齐原始信号
-    aligned_x = data.x[z.t_start:z.t_stop]
+    z_t_start, z_t_stop = z.t  # 提取起始和结束索引
+    aligned_x = data.x[z_t_start:z_t_stop]
 
-    # 确保输出形状一致
-    output_dbp = output_dbp.squeeze()[:aligned_x.shape[0]]
-    output_nn = output_nn.squeeze()[:aligned_x.shape[0]]
+    # 确保输出和原始信号形状一致
+    output_dbp = output_dbp[:aligned_x.shape[0]]
+    output_nn = output_nn[:aligned_x.shape[0]]
 
-    # 定义权重，可以根据模型性能调整
+    # 集成学习：加权平均
     weight_dbp = 0.6
     weight_nn = 0.4
-
-    # 加权平均融合
     output = weight_dbp * output_dbp + weight_nn * output_nn
 
     # 计算指标
