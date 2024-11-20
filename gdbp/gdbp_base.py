@@ -138,7 +138,7 @@ def make_base_module(steps: int = 3,
             fdbp_series,
             serial_branch
         ),
-        layer.FanInConcat()
+        layer.FanInMean()
     )
 
     return base
@@ -557,41 +557,41 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
 
 
-# def test(model: Model,
-#          params: Dict,
-#          data: gdat.Input,
-#          eval_range: tuple=(300000, -20000),
-#          metric_fn=comm.qamqot):
-#     ''' testing, a simple forward pass
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#         data: dataset
-#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-#             BER, Q, SER and more metrics.
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
 
-#         Returns:
-#             evaluated matrics and equalized symbols
-#     '''
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
 
-#     state, aux, const, sparams = model.initvar[1:]
-#     aux = core.dict_replace(aux, {'truth': data.x})
-#     if params is None:
-#       params = model.initvar[0]
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+      params = model.initvar[0]
 
-#     z, _ = jit(model.module.apply,
-#                backend='cpu')({
-#                    'params': util.dict_merge(params, sparams),
-#                    'aux_inputs': aux,
-#                    'const': const,
-#                    **state
-#                }, core.Signal(data.y))
-#     metric = metric_fn(z.val,
-#                        data.x[z.t.start:z.t.stop],
-#                        scale=np.sqrt(10),
-#                        eval_range=eval_range)
-#     return metric, z
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
 
 # def test(model: Model,
 #          params: Dict,
@@ -631,53 +631,3 @@ def train(model: Model,
 #                        scale=np.sqrt(10),
 #                        eval_range=eval_range)
 #     return metric, z
-
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass '''
-
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-        params = model.initvar[0]
-
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-
-    # 拆分拼接的输出
-    output_dbp, output_nn = jnp.split(z.val, indices_or_sections=2, axis=-1)
-
-    # 确保输出形状一致，并进行压缩
-    output_dbp = output_dbp.squeeze()
-    output_nn = output_nn.squeeze()
-
-    # 定义权重，根据需要调整
-    weight_dbp = 0.8
-    weight_nn = 0.2
-
-    # 通过加权平均进行融合
-    output = weight_dbp * output_dbp + weight_nn * output_nn
-
-    # 对齐原始信号
-    aligned_x = data.x[z.t.start:z.t.stop]
-
-    # 确保输出和原始信号形状一致
-    min_length = min(output.shape[0], aligned_x.shape[0])
-    output = output[:min_length]
-    aligned_x = aligned_x[:min_length]
-
-    # 计算指标
-    metric = metric_fn(output,
-                       aligned_x,
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
-
