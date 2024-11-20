@@ -429,9 +429,9 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+    return mse_loss, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
