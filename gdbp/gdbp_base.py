@@ -554,7 +554,7 @@ def loss_fn(module: layer.Layer,
     gmi_loss_val = gmi_loss_16qam(
         pred_symbol, 
         true_symbol,
-        sigma         = noise_std,
+        sigma         = 0.1,
         constellation = CONSTELLATION,
         bit_labels    = BIT_LABELS
     )
