@@ -414,35 +414,30 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-import jax
-import jax.numpy as jnp
+def assert_finite(x, name=""):
+    """
+    检查张量 x 中是否有 NaN 或 Inf；若有，抛出 AssertionError 并打印提示。
+    在调试时可以在关键运算后插入此函数，帮助及时发现数值爆炸。
+    """
+    if not jnp.all(jnp.isfinite(x)):
+        x_np = np.array(x)  # 拷贝到 CPU
+        nan_mask = np.isnan(x_np)
+        inf_mask = np.isinf(x_np)
+        raise AssertionError(
+            f"[assert_finite] {name} has invalid values! "
+            f"NaN count={nan_mask.sum()}, Inf count={inf_mask.sum()}.\n"
+            f"Sample data={x_np}"
+        )
 
-def safe_logsumexp(values: jnp.ndarray,
-                   mask: jnp.ndarray,
-                   eps: float = 1e-9) -> jnp.ndarray:
-    """
-    针对已做掩码的子集，对其做 log-sum-exp，避免直接 exp() 加和造成上溢/下溢。
-    
-    :param values: shape (16,). 通常是 e_k = -dist_k^2/(2*sigma^2)
-    :param mask:   shape (16,). 布尔掩码, 表示只累加部分星座点
-    :param eps:    防止 log(0)
-    :return:       标量，对应 log( sum( exp(values) )) with mask applied
-    """
-    neg_inf = jnp.array(-1e20, dtype=values.dtype)
-    # 对不需要的分量设为 -∞
-    masked_vals = jnp.where(mask, values, neg_inf)
-    max_val = jnp.max(masked_vals)
-    # 如果全是 -∞，max_val 即 -∞；给它一个保护
-    max_val = jnp.where(jnp.isfinite(max_val), max_val, 0.0)
-    # log-sum-exp
-    return max_val + jnp.log(jnp.sum(jnp.exp(masked_vals - max_val) + eps))
+##############################################################################
+# 1. 构建 16QAM 星座 与 比特标签
+##############################################################################
 
 def two_bits_to_level(b0, b1):
     """
-    b0, b1 ∈ {0,1}，返回 Gray-code 下的一维电平 ∈ {-3, -1, +1, +3}.
-    约定: 00->-3, 01->-1, 11->+1, 10->+3 (常见 Gray-code 次序)
+    Gray-code: (b0,b1) -> { -3, -1, +1, +3 }
+    约定: 00->-3, 01->-1, 11->+1, 10->+3
     """
-    # (b0,b1) => index => level
     idx = (b0 << 1) ^ b1  # XOR 确保 Gray 次序
     # idx ∈ {0,1,3,2}
     levels = jnp.array([-3, -1, +3, +1], dtype=jnp.float32)
@@ -450,13 +445,13 @@ def two_bits_to_level(b0, b1):
 
 def make_16qam_constellation():
     """
-    枚举 4bits => 16个星座点 (I, Q)，以及对应的比特标签 BIT_LABELS。
-    我们定义 bit 顺序为 [b0, b1, b2, b3], 其中:
-      - Q轴 = two_bits_to_level(b0,b1)
-      - I轴 = two_bits_to_level(b2,b3)
+    4比特 => 16个点 (I,Q), bit顺序 [b0, b1, b2, b3]:
+      Q轴 = two_bits_to_level(b0,b1)
+      I轴 = two_bits_to_level(b2,b3)
+    返回 CONSTELLATION(16,2), BIT_LABELS(16,4).
     """
-    all_bits = []
     all_points = []
+    all_bits   = []
     for b0 in [0,1]:
         for b1 in [0,1]:
             for b2 in [0,1]:
@@ -465,116 +460,181 @@ def make_16qam_constellation():
                     Q = two_bits_to_level(b0, b1)
                     all_points.append((I, Q))
                     all_bits.append([b0, b1, b2, b3])
-
-    CONSTELLATION = jnp.array(all_points, dtype=jnp.float32)  # shape (16,2)
-    BIT_LABELS     = jnp.array(all_bits,   dtype=jnp.int32)   # shape (16,4)
-
+    CONSTELLATION = jnp.array(all_points, dtype=jnp.float32)
+    BIT_LABELS    = jnp.array(all_bits,   dtype=jnp.int32)
     return CONSTELLATION, BIT_LABELS
 
-# 生成 16QAM 星座表 (在全局使用)
 CONSTELLATION, BIT_LABELS = make_16qam_constellation()
+
+##############################################################################
+# 2. 安全的 log-sum-exp
+##############################################################################
+
+def safe_logsumexp(values: jnp.ndarray,
+                   mask: jnp.ndarray,
+                   eps: float = 1e-9) -> jnp.ndarray:
+    """
+    对已做掩码的子集 values[mask] 做 log-sum-exp, 避免指数上/下溢.
+    values.shape = (16,), mask.shape = (16,).
+    """
+    neg_inf = jnp.array(-1e20, dtype=values.dtype)
+    # 对 mask=0 的分量设成 -∞
+    masked_vals = jnp.where(mask, values, neg_inf)
+
+    max_val = jnp.max(masked_vals)
+    # 如果全是 -∞, max_val 是 -∞, 再保护一下
+    max_val = jnp.where(jnp.isfinite(max_val), max_val, 0.0)
+    
+    out = max_val + jnp.log(jnp.sum(jnp.exp(masked_vals - max_val) + eps))
+    return out
+
+##############################################################################
+# 3. 计算单符号 LLR
+##############################################################################
 
 def compute_llrs_16qam_one_symbol(r: jnp.ndarray,
                                   sigma: float,
                                   constellation: jnp.ndarray,
                                   bit_labels: jnp.ndarray,
-                                  eps: float = 1e-9) -> jnp.ndarray:
+                                  eps: float = 1e-9,
+                                  llr_clip: float = 20.0) -> jnp.ndarray:
     """
-    对单个实维符号 r (shape (2,): [I, Q])，计算 16QAM 的 4 比特 LLR (shape (4,)).
-    
-    注：如果实际系统是复符号 c = rI + j*rQ，可以先把 c 拆成 (rI, rQ) = (2,).
+    对单个符号 r(2,) => (I,Q), 计算 16QAM 下的 4比特 LLR(4,).
+    使用带掩码的 log-sum-exp, 并在输出 LLR 做截断以避免极端数值.
     """
-    # 1) 计算与 16个星座点的距离^2 => shape (16,)
-    diff = constellation - r[None, :]  # (16,2) - (1,2) => (16,2)
+    # r.shape = (2,)
+    # constellation.shape = (16,2)
+    # 1) dist^2 => (16,)
+    diff = constellation - r[None, :]
     dist_sq = jnp.sum(diff * diff, axis=-1)
+    assert_finite(dist_sq, "dist_sq in compute_llrs_16qam_one_symbol")
 
-    # 2) e_k = -dist_sq / (2 sigma^2)
-    e = -dist_sq / (2.0 * sigma**2 + eps)
+    # 2) e_k = - dist^2 / (2*sigma^2)
+    # 不直接 exp, 在后面 log-sum-exp 中做
+    e = -dist_sq / (2 * sigma**2 + eps)
+    assert_finite(e, "e (exponent) in compute_llrs_16qam_one_symbol")
 
-    # 3) 对每个 bit i in {0..3}，做 masked log-sum-exp
     llrs = []
     for i in range(4):
         mask_0 = (bit_labels[:, i] == 0)
         mask_1 = ~mask_0
 
-        ls0 = safe_logsumexp(e, mask_0, eps)  # log( sum_{b_i=0} exp(e_k) )
-        ls1 = safe_logsumexp(e, mask_1, eps)  # log( sum_{b_i=1} exp(e_k) )
-
+        # log( sum_{b_i=0} exp(e_k) )
+        ls0 = safe_logsumexp(e, mask_0, eps)
+        ls1 = safe_logsumexp(e, mask_1, eps)
         llr_i = ls0 - ls1
+        # clamp LLR
+        llr_i = jnp.clip(llr_i, -llr_clip, llr_clip)
         llrs.append(llr_i)
 
-    return jnp.stack(llrs, axis=0)  # (4,)
+    llrs = jnp.stack(llrs, axis=0)  # (4,)
+    assert_finite(llrs, "LLRs (final) in compute_llrs_16qam_one_symbol")
+
+    return llrs
+
+##############################################################################
+# 4. 对单个子载波符号计算 -GMI
+##############################################################################
 
 def subcarrier_loss_16qam(r_sc: jnp.ndarray,
                           x_sc: jnp.ndarray,
                           constellation: jnp.ndarray,
                           bit_labels: jnp.ndarray,
                           sigma: float = 0.1,
-                          eps: float = 1e-9) -> jnp.ndarray:
+                          eps: float = 1e-9,
+                          llr_clip: float = 20.0) -> jnp.ndarray:
     """
-    针对单个子载波(符号) (r_sc, x_sc) 计算 -GMI。二者皆 shape=(2,)。
-
-    1) 找到 x_sc 在星座中的下标 idx_x => b_vec(4bits)
-    2) 用 compute_llrs_16qam_one_symbol(r_sc, ...) 得到 LLR(4,)
-    3) 对真实比特 alpha_i ∈ {+1, -1} 做 "log2(1+exp(-alpha_i * LLR_i))"
-    4) 累加得到 -GMI
+    r_sc, x_sc: shape=(2,). 单个符号(子载波).
+    1) 找到 x_sc 在星座内的下标 => 真实 bits
+    2) 算 r_sc 的 LLR => (4,)
+    3) bit-level loss => 累加 => -GMI
     """
-    # 首先计算 r_sc 与 16 个点的距离(可选, 仅在 debug 时需要)
+    # dist to r_sc (可选 debug查看)
     diff_r = constellation - r_sc[None, :]
-    dist_r = jnp.sum(diff_r**2, axis=-1)  # (16,)
+    dist_r = jnp.sum(diff_r**2, axis=-1)
+    assert_finite(dist_r, "dist_r in subcarrier_loss_16qam")
 
-    # 计算 x_sc 在星座中的下标 (如果 x_sc 也是理想点)
+    # 找 x_sc 对应星座 idx
     diff_x = constellation - x_sc[None, :]
     dist_x = jnp.sum(diff_x**2, axis=-1)
-    idx_x = jnp.argmin(dist_x)  # x_sc 对应的星座下标
+    idx_x = jnp.argmin(dist_x)  # x_sc 应该是理想点之一
+    assert_finite(dist_x, "dist_x in subcarrier_loss_16qam")
 
-    # 真实比特 => shape (4,)
+    # 真实比特 => (4,)
     b_vec = bit_labels[idx_x]
 
-    # 计算接收符号 r_sc 的 LLR => (4,)
-    llrs = compute_llrs_16qam_one_symbol(r_sc, sigma, constellation, bit_labels, eps)
+    # 计算 r_sc 的 LLR
+    llrs = compute_llrs_16qam_one_symbol(r_sc, sigma,
+                                         constellation, bit_labels,
+                                         eps=eps, llr_clip=llr_clip)
 
-    # bit-level 损失: -GMI_i ~ log2(1 + exp(- alpha_i * LLR_i))
+    # bit-level 损失: log2(1 + exp(-alpha * llr))
     alpha = 2.0 * b_vec.astype(jnp.float32) - 1.0  # ∈ {+1, -1}
+    # 注意 clip 后的 llr 也要检查
+    assert_finite(llrs, "llrs after compute_llrs_16qam_one_symbol")
+
     bit_losses = jnp.log1p(jnp.exp(-alpha * llrs)) / jnp.log(2.0)
-    return jnp.sum(bit_losses)  # 4 bits 累加
+    assert_finite(bit_losses, "bit_losses in subcarrier_loss_16qam")
+
+    return jnp.sum(bit_losses)  # 4 bits 累加 => 单个符号 -GMI
+
+##############################################################################
+# 5. 对一帧(含 n_sub 符号)计算平均 -GMI
+##############################################################################
 
 def loss_per_sample_16qam(r: jnp.ndarray,
                           x: jnp.ndarray,
                           constellation: jnp.ndarray,
                           bit_labels: jnp.ndarray,
-                          sigma: float = 0.1) -> jnp.ndarray:
+                          sigma: float = 0.1,
+                          llr_clip: float = 20.0) -> jnp.ndarray:
     """
-    处理单个样本，但样本内含 n_sub 个子载波/符号:
-    r.shape = (n_sub, 2), x.shape = (n_sub,2).
+    r.shape = (n_sub,2), x.shape = (n_sub,2).
+    逐个符号 subcarrier_loss_16qam => 取平均
     """
-    # 对 n_sub 逐符号计算 -GMI
-    def per_subcarrier(r_sc, x_sc):
-        return subcarrier_loss_16qam(r_sc, x_sc, constellation, bit_labels, sigma)
+    # debug check
+    assert_finite(r, "r in loss_per_sample_16qam")
+    assert_finite(x, "x in loss_per_sample_16qam")
 
-    losses = jax.vmap(per_subcarrier, in_axes=(0,0))(r, x)  # => (n_sub,)
+    def per_sub(r_sc, x_sc):
+        return subcarrier_loss_16qam(r_sc, x_sc,
+                                     constellation, bit_labels,
+                                     sigma=sigma, llr_clip=llr_clip)
+
+    losses = jax.vmap(per_sub, in_axes=(0,0))(r, x)  # shape (n_sub,)
+    assert_finite(losses, "losses in loss_per_sample_16qam")
     return jnp.mean(losses)
 
+##############################################################################
+# 6. 最外层：对批次 (B) 做 vmap
+##############################################################################
+
 def gmi_loss_16qam(pred_batch: jnp.ndarray,
-                   true_batch: jnp.ndarray,
-                   constellation: jnp.ndarray = CONSTELLATION,
-                   bit_labels: jnp.ndarray   = BIT_LABELS,
-                   sigma: float = 0.1) -> jnp.ndarray:
+                         true_batch: jnp.ndarray,
+                         constellation: jnp.ndarray = CONSTELLATION,
+                         bit_labels: jnp.ndarray   = BIT_LABELS,
+                         sigma: float = 0.1,
+                         llr_clip: float = 20.0) -> jnp.ndarray:
     """
-    最外层封装，对批次维度做 vmap:
-    - pred_batch.shape = (B, n_sub, 2)
-    - true_batch.shape = (B, n_sub, 2)
-
-    返回标量 (batch 平均的 -GMI)
+    对批次维度 (B, n_sub, 2) 做 vmap 计算平均 -GMI.
     """
-    # vmap 到 loss_per_sample_16qam
-    batch_losses = jax.vmap(
-        loss_per_sample_16qam,
-        in_axes=(0,0,None,None,None)
-    )(pred_batch, true_batch, constellation, bit_labels, sigma)
-    return jnp.mean(batch_losses)
+    # debug check
+    assert_finite(pred_batch, "pred_batch in gmi_loss_16qam_debug")
+    assert_finite(true_batch, "true_batch in gmi_loss_16qam_debug")
 
+    def per_sample(r, x):
+        return loss_per_sample_16qam(r, x,
+                                     constellation, bit_labels,
+                                     sigma=sigma, llr_clip=llr_clip)
 
+    # batch_losses.shape = (B,)
+    batch_losses = jax.vmap(per_sample, in_axes=(0,0))(pred_batch, true_batch)
+    assert_finite(batch_losses, "batch_losses in gmi_loss_16qam_debug")
+
+    final_loss = jnp.mean(batch_losses)
+    assert_finite(final_loss, "final_loss in gmi_loss_16qam_debug")
+    return final_loss
+                           
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
