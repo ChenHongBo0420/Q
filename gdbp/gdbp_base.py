@@ -414,6 +414,123 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
+import jax
+import jax.numpy as jnp
+
+# 为了方便，看一个小的辅助函数，把2比特映射到 Gray-code PAM 的电平 {-3, -1, +1, +3}
+def two_bits_to_level(b0, b1):
+    """
+    b0, b1 ∈ {0,1}，返回 Gray-code 下的一维电平 ∈ {-3, -1, +1, +3}.
+    约定: 00->-3, 01->-1, 11->+1, 10->+3 (常见 Gray-code 次序)
+    """
+    # 可以做一个查表:
+    # (b0,b1) => index => level
+    idx = (b0 << 1) ^ b1  # XOR 确保 Gray 次序
+    # idx ∈ {0,1,3,2}
+    levels = jnp.array([-3, -1, +3, +1], dtype=jnp.float32)
+    return levels[idx]
+
+# 枚举 4bits => 16个星座点
+def make_16qam_constellation():
+    # 4比特: b0,b1(用于Q轴), b2,b3(用于I轴)
+    # 我们定义 bit 顺序为 [b0, b1, b2, b3], 其中:
+    #   Q轴 = two_bits_to_level(b0,b1)
+    #   I轴 = two_bits_to_level(b2,b3)
+    # 这样 BFS 编码即可:
+    all_bits = []
+    all_points = []
+
+    for b0 in [0,1]:
+        for b1 in [0,1]:
+            for b2 in [0,1]:
+                for b3 in [0,1]:
+                    I = two_bits_to_level(b2, b3)
+                    Q = two_bits_to_level(b0, b1)
+                    all_points.append((I, Q))
+                    all_bits.append([b0, b1, b2, b3])
+
+    CONSTELLATION = jnp.array(all_points, dtype=jnp.float32)  # shape (16,2)
+    BIT_LABELS     = jnp.array(all_bits,   dtype=jnp.int32)   # shape (16,4)
+
+    return CONSTELLATION, BIT_LABELS
+
+CONSTELLATION, BIT_LABELS = make_16qam_constellation()
+def compute_llrs_16qam_one_symbol(r: jnp.ndarray,
+                                  sigma: float,
+                                  constellation: jnp.ndarray,
+                                  bit_labels: jnp.ndarray,
+                                  eps: float = 1e-9) -> jnp.ndarray:
+    """
+    对单个复符号 r (已拆成 [I, Q])，计算 16QAM 的 4 比特 LLR.
+    constellation: (16,2)
+    bit_labels:    (16,4)
+    """
+    # 1) 计算 与 16个星座点的距离^2
+    #    shape => (16,)
+    diff = constellation - r[None, :]        # shape: (16,2)
+    dist_sq = jnp.sum(diff * diff, axis=-1)  # (16,)
+
+    # 2) 计算似然 p(r|s_k) ~ exp( -dist^2 / (2 sigma^2) )
+    #    shape => (16,)
+    llh = jnp.exp(- dist_sq / (2.0 * sigma**2 + eps))
+
+    # 3) 对每个 bit i in {0..3}, 分别做 "sum over b_i=0" & "sum over b_i=1"
+    #    LLR_i = log(sum_{b_i=0} llh) - log(sum_{b_i=1} llh)
+    #    shape => (4,)
+    llrs = []
+    for i in range(4):
+        mask_0 = (bit_labels[:, i] == 0)
+        mask_1 = ~mask_0
+        sum_0 = jnp.sum(llh * mask_0)
+        sum_1 = jnp.sum(llh * mask_1)
+        llr_i = jnp.log(sum_0 + eps) - jnp.log(sum_1 + eps)
+        llrs.append(llr_i)
+
+    return jnp.stack(llrs, axis=0)  # (4,)
+def gmi_loss_16qam(pred: jnp.ndarray,
+                   true_symb: jnp.ndarray,
+                   sigma: float,
+                   constellation: jnp.ndarray,
+                   bit_labels: jnp.ndarray,
+                   eps: float=1e-9) -> jnp.ndarray:
+    """
+    计算一批 16QAM 符号的平均 -GMI 。
+    :param pred:         shape (batch,2)，估计到的符号 [I, Q]
+    :param true_symb:    shape (batch,2)，实际发送符号 [I, Q] (需能与 constellation 对应)
+    :param sigma:        噪声std
+    :param constellation, bit_labels: 
+                         16QAM的星座表 & 比特映射 (见上面生成)
+    :return:             标量 (平均 -GMI)
+    """
+    def loss_per_sample(r, x):
+        """
+        r: 预测符号 [I, Q]
+        x: 真符号   [I, Q]
+        """
+        # 1) 找到 x 在 constellation 中的下标 (或者最接近的点)
+        #    这里假设训练集中 x 就是“理想星座点”之一，直接查找索引即可；
+        #    若有浮点误差，可改成找距离最近的点 index。
+        diff = constellation - x[None,:]  # shape (16,2)
+        dist = jnp.sum(diff * diff, axis=-1)
+        idx = jnp.argmin(dist)            # x 对应的星座下标
+
+        # 2) 找到对应的 4 bits
+        b_vec = bit_labels[idx]  # shape (4,) in {0,1}
+
+        # 3) 计算接收符号 r 的 4 比特 LLR
+        llr_vec = compute_llrs_16qam_one_symbol(r, sigma, constellation, bit_labels, eps)
+
+        # 4) bit-level 损失: -GMI_i ~ log2(1 + exp(-alpha_i * LLR_i))
+        #    其中 alpha_i = +1 if b_i=1 else -1
+        alpha = (2.0*b_vec.astype(jnp.float32) - 1.0)  # in {+1, -1}
+        # 在自然对数下先计算，再除以 log(2)
+        bit_losses = jnp.log1p(jnp.exp(-alpha * llr_vec)) / jnp.log(2.0)
+        # 对 4 bits 求和
+        return jnp.sum(bit_losses, axis=0)
+
+    # vmap 在 batch 上并行处理
+    loss_batch = jax.vmap(loss_per_sample, in_axes=(0,0))(pred, true_symb)  # shape (batch,)
+    return jnp.mean(loss_batch)
 
   
 def loss_fn(module: layer.Layer,
@@ -431,7 +548,17 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+    pred_symbol = jnp.stack([jnp.real(z_original.val), jnp.imag(z_original.val)], axis=-1)
+    true_symbol = jnp.stack([jnp.real(aligned_x),       jnp.imag(aligned_x)],       axis=-1)
+
+    gmi_loss_val = gmi_loss_16qam(
+        pred_symbol, 
+        true_symbol,
+        sigma         = noise_std,
+        constellation = CONSTELLATION,
+        bit_labels    = BIT_LABELS
+    )
+    return gmi_loss_val, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
