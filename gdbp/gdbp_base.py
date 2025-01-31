@@ -487,50 +487,71 @@ def compute_llrs_16qam_one_symbol(r: jnp.ndarray,
         llrs.append(llr_i)
 
     return jnp.stack(llrs, axis=0)  # (4,)
-def gmi_loss_16qam(pred: jnp.ndarray,
-                   true_symb: jnp.ndarray,
-                   sigma: float,
-                   constellation: jnp.ndarray,
-                   bit_labels: jnp.ndarray,
-                   eps: float=1e-9) -> jnp.ndarray:
+def subcarrier_loss_16qam(r_sc, x_sc,
+                          constellation, bit_labels,
+                          sigma=0.1, eps=1e-9):
     """
-    计算一批 16QAM 符号的平均 -GMI 。
-    :param pred:         shape (batch,2)，估计到的符号 [I, Q]
-    :param true_symb:    shape (batch,2)，实际发送符号 [I, Q] (需能与 constellation 对应)
-    :param sigma:        噪声std
-    :param constellation, bit_labels: 
-                         16QAM的星座表 & 比特映射 (见上面生成)
-    :return:             标量 (平均 -GMI)
+    处理单个符号 (r_sc, x_sc), shape=(2,).
+    计算 -GMI.
     """
-    def loss_per_sample(r, x):
-        """
-        r: 预测符号 [I, Q]
-        x: 真符号   [I, Q]
-        """
-        # 1) 找到 x 在 constellation 中的下标 (或者最接近的点)
-        #    这里假设训练集中 x 就是“理想星座点”之一，直接查找索引即可；
-        #    若有浮点误差，可改成找距离最近的点 index。
-        diff = constellation - x[None,:]  # shape (16,2)
-        dist = jnp.sum(diff * diff, axis=-1)
-        idx = jnp.argmin(dist)            # x 对应的星座下标
+    # 1) 计算与 16 个星座点距离
+    diff = constellation - r_sc[None, :]   # (16,2) - (1,2) => (16,2)
+    dist = jnp.sum(diff**2, axis=-1)      # (16,)
 
-        # 2) 找到对应的 4 bits
-        b_vec = bit_labels[idx]  # shape (4,) in {0,1}
+    # 2) 似然
+    llh = jnp.exp(-dist / (2*sigma**2 + eps))  # (16,)
 
-        # 3) 计算接收符号 r 的 4 比特 LLR
-        llr_vec = compute_llrs_16qam_one_symbol(r, sigma, constellation, bit_labels, eps)
+    # 3) 找到 x_sc 对应的星座索引 (如果 x_sc 就是理想星座点)
+    diff_x = constellation - x_sc[None, :]
+    dist_x = jnp.sum(diff_x**2, axis=-1)
+    idx_x = jnp.argmin(dist_x)
+    # 真实比特
+    b_vec = bit_labels[idx_x]  # shape=(4,)
 
-        # 4) bit-level 损失: -GMI_i ~ log2(1 + exp(-alpha_i * LLR_i))
-        #    其中 alpha_i = +1 if b_i=1 else -1
-        alpha = (2.0*b_vec.astype(jnp.float32) - 1.0)  # in {+1, -1}
-        # 在自然对数下先计算，再除以 log(2)
-        bit_losses = jnp.log1p(jnp.exp(-alpha * llr_vec)) / jnp.log(2.0)
-        # 对 4 bits 求和
-        return jnp.sum(bit_losses, axis=0)
+    # 4) 分别对 4 bits 算 LLR
+    llrs = []
+    for i in range(4):
+        mask_0 = (bit_labels[:, i] == 0)
+        sum_0 = jnp.sum(llh * mask_0)
+        sum_1 = jnp.sum(llh * (~mask_0))
+        llr_i = jnp.log(sum_0 + eps) - jnp.log(sum_1 + eps)
+        llrs.append(llr_i)
+    llrs = jnp.stack(llrs)  # (4,)
 
-    # vmap 在 batch 上并行处理
-    loss_batch = jax.vmap(loss_per_sample, in_axes=(0,0))(pred, true_symb)  # shape (batch,)
-    return jnp.mean(loss_batch)
+    # 5) bit-level 损失: -GMI_i ~ log2(1 + exp(- alpha_i * llr_i))
+    alpha = (2*b_vec.astype(jnp.float32) - 1)  # ∈ {+1, -1}
+    bit_losses = jnp.log1p(jnp.exp(-alpha*llrs)) / jnp.log(2.)
+    return jnp.sum(bit_losses)  # 4 bits 累加
+
+def loss_per_sample_16qam(r, x,
+                          constellation, bit_labels,
+                          sigma=0.1):
+    """
+    处理一帧内的多个子载波/符号:
+    r.shape = (n_sub, 2), x.shape = (n_sub,2)
+    """
+    # 对每个子载波做 subcarrier_loss_16qam
+    def per_subcarrier(r_sc, x_sc):
+        return subcarrier_loss_16qam(r_sc, x_sc, constellation, bit_labels, sigma)
+
+    losses = jax.vmap(per_subcarrier, in_axes=(0,0))(r, x)  # (n_sub,)
+    return jnp.mean(losses)
+
+# 然后在最外层, 若你的 batch_size>1, 再 vmap 一次
+def gmi_loss_16qam(pred_batch, true_batch,
+                   constellation, bit_labels,
+                   sigma=0.1):
+    """
+    pred_batch.shape = (B, n_sub, 2)
+    true_batch.shape = (B, n_sub, 2)
+    对 batch 内每条语句做 vmap => (B,)
+    """
+    return jnp.mean(
+        jax.vmap(loss_per_sample_16qam, in_axes=(0,0,None,None,None))(
+            pred_batch, true_batch, constellation, bit_labels, sigma
+        )
+    )
+
 
   
 def loss_fn(module: layer.Layer,
