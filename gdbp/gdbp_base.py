@@ -414,7 +414,43 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-                           
+        
+def physics_loss(psi, time_grid, beta2, gamma):
+    """
+    psi: 神经网络预测的信号，形状为 (..., N)，其中 N 是时间采样点数，复数类型
+    time_grid: 对应的时间轴，1D 数组，长度为 N，要求均匀采样
+    beta2: 色散参数
+    gamma: 非线性系数
+    """
+    # 假设 time_grid 均匀，计算采样间隔
+    dt = time_grid[1] - time_grid[0]
+    # 使用中心差分法近似第二阶导数，边缘处可以简单复制边缘值（或采用其他策略）
+    psi_shift_left = jnp.roll(psi, shift=1, axis=-1)
+    psi_shift_right = jnp.roll(psi, shift=-1, axis=-1)
+    psi_tt = (psi_shift_right - 2 * psi + psi_shift_left) / (dt ** 2)
+    
+    # NLSE 残差（这里忽略 z 方向，只考虑时域约束）
+    residual = (beta2 / 2) * psi_tt + gamma * jnp.abs(psi) ** 2 * psi
+    return jnp.mean(jnp.square(jnp.abs(residual)))
+
+
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return snr, updated_state
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -423,15 +459,35 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,):
+    # 原有参数合并
     params = util.dict_merge(params, sparams)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
+    # 根据 SigTime 信息切片对齐
     aligned_x = x[z_original.t.start:z_original.t.stop]
+    
+    # 数据损失：均方误差
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
-
+    # SI-SNR 损失
+    snr_loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    
+    # 提取物理参数和权重，确保在 const 中设置了 'beta2', 'gamma', 'lambda_phys'
+    beta2 = const.get("beta2", 1.0)
+    gamma = const.get("gamma", 1.0)
+    lambda_phys = const.get("lambda_phys", 0.1)
+    
+    # 提取时间轴，要求 aux 中包含 'time_grid'（1D 数组）
+    time_grid = aux.get("time_grid", None)
+    if time_grid is None:
+        raise ValueError("aux must contain 'time_grid' for physics loss computation")
+    
+    # 计算物理损失，要求 z_original.val 的最后一个维度与 time_grid 长度相符
+    phys_loss = physics_loss(z_original.val, time_grid, beta2, gamma)
+    
+    # 总损失：数据损失和物理损失加权和
+    total_loss = snr_loss + mse_loss + lambda_phys * phys_loss
+    
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
