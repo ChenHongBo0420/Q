@@ -569,6 +569,7 @@ import jax.numpy as jnp
 
 def train(model: Model,
           data: gdat.Input,
+          n_iter: int = None,
           opt_maxiter: int = 50):
     """
     使用 LBFGS（近似牛顿法）进行全批量训练的版本，
