@@ -563,57 +563,57 @@ def get_train_batch(ds: gdat.Input,
 #                        eval_range=eval_range)
 #     return metric, z
 
-from jaxopt import LBFGS
-import jax
-import jax.numpy as jnp
-
 def train(model: Model,
           data: gdat.Input,
-          n_iter: int = None,
-          opt_maxiter: int = 50):
-    """
-    使用 LBFGS（近似牛顿法）进行全批量训练的版本，
-    替换原来的 SGD 优化器，从而利用二阶信息加速收敛。
-    
-    Args:
-        model: Model namedtuple return by `model_init`
-        data: dataset, 包含 data.y (接收信号) 和 data.x (发送信号)
-        opt_maxiter: LBFGS 的最大迭代次数
-        
-    Returns:
-        优化后的参数和模块状态。
-    """
-    # 获取初始变量：params, module_state, aux, const, sparams
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = newton(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
     params, module_state, aux, const, sparams = model.initvar
-    # 更新 aux 字典，使其包含真实发送信号（用于计算损失时参考）
-    aux = core.dict_replace(aux, {'truth': data.x})
-    
-    # 定义全批量损失函数，返回标量损失
-    def loss_fn_newton(params):
-        merged_params = util.dict_merge(params, sparams)
-        # 前向传播：计算模型输出 z
-        z, new_state = model.module.apply(
-            {'params': merged_params, 'aux_inputs': aux, 'const': const, **module_state},
-            core.Signal(data.y))
-        # 对齐目标信号：根据 z.t 的时间信息切片目标 data.x
-        aligned_x = data.x[z.t.start:z.t.stop]
-        # 采用均方误差（MSE）作为损失
-        loss = jnp.mean(jnp.abs(z.val - aligned_x) ** 2)
-        return loss
+    opt_state = opt.init_fn(params)
 
-    # 创建 LBFGS 优化器（全批量方式）
-    solver = LBFGS(fun=loss_fn_newton, maxiter=opt_maxiter)
-    sol = solver.run(init_params=params)
-    
-    # 返回优化后的参数和模块状态（module_state 这里不进行更新）
-    return sol.params, module_state
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-# 测试函数保持不变
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
+
+
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
          eval_range: tuple=(300000, -20000),
          metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
