@@ -567,7 +567,7 @@ from jaxopt import LBFGS
 import jax
 import jax.numpy as jnp
 
-def train_newton(model: Model,
+def train(model: Model,
                  data: gdat.Input,
                  opt_maxiter: int = 50):
     """
