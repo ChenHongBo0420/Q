@@ -498,7 +498,7 @@ def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+          opt: optim.Optimizer = optim.adamw(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     ''' training process (1 epoch)
 
         Args:
