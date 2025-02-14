@@ -568,45 +568,43 @@ import jax
 import jax.numpy as jnp
 
 def train(model: Model,
-                 data: gdat.Input,
-                 opt_maxiter: int = 50):
+          data: gdat.Input,
+          opt_maxiter: int = 50):
     """
     使用 LBFGS（近似牛顿法）进行全批量训练的版本，
     替换原来的 SGD 优化器，从而利用二阶信息加速收敛。
     
     Args:
-        model: 由 model_init 返回的 Model 对象，包含 initvar 和 module。
-        data: 训练数据，包含 data.y (接收信号) 和 data.x (发送信号)。
-        opt_maxiter: LBFGS 的最大迭代次数。
+        model: Model namedtuple return by `model_init`
+        data: dataset, 包含 data.y (接收信号) 和 data.x (发送信号)
+        opt_maxiter: LBFGS 的最大迭代次数
         
     Returns:
         优化后的参数和模块状态。
     """
     # 获取初始变量：params, module_state, aux, const, sparams
     params, module_state, aux, const, sparams = model.initvar
-    # 更新 aux 字典，使其包含真实发送信号
+    # 更新 aux 字典，使其包含真实发送信号（用于计算损失时参考）
     aux = core.dict_replace(aux, {'truth': data.x})
     
-    # 定义损失函数。这里使用之前定义的 loss_fn，
-    # 我们将损失函数仅返回一个标量损失，不返回 module_state（可选）。
-    # 这里我们选择只用数据误差（均方误差）作为目标，
-    # 你也可以根据需要添加物理约束。
+    # 定义全批量损失函数，返回标量损失
     def loss_fn_newton(params):
         merged_params = util.dict_merge(params, sparams)
+        # 前向传播：计算模型输出 z
         z, new_state = model.module.apply(
             {'params': merged_params, 'aux_inputs': aux, 'const': const, **module_state},
             core.Signal(data.y))
+        # 对齐目标信号：根据 z.t 的时间信息切片目标 data.x
         aligned_x = data.x[z.t.start:z.t.stop]
+        # 采用均方误差（MSE）作为损失
         loss = jnp.mean(jnp.abs(z.val - aligned_x) ** 2)
-        return loss  # 注意：LBFGS 要求返回一个标量
-    
-    # 创建 LBFGS 优化器
+        return loss
+
+    # 创建 LBFGS 优化器（全批量方式）
     solver = LBFGS(fun=loss_fn_newton, maxiter=opt_maxiter)
-    
-    # 使用全批量数据进行优化
     sol = solver.run(init_params=params)
     
-    # 返回优化后的参数和模块状态（module_state 保持不变）
+    # 返回优化后的参数和模块状态（module_state 这里不进行更新）
     return sol.params, module_state
 
 # 测试函数保持不变
