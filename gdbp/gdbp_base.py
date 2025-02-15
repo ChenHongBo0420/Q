@@ -442,7 +442,7 @@ def loss_fn(module: layer.Layer,
             dt: float = 1.0,         # 时间采样间隔，根据实际采样率设置
             beta2: float = 0.02,     # 色散参数示例值
             gamma_phys: float = 1.0,  # 非线性系数示例值
-            lambda_phys: float = 0.01 # 物理损失权重
+            lambda_phys: float = 0.1 # 物理损失权重
            ):
     """
     PINN 版损失函数：在保持原有 SNR 监督损失的基础上，
