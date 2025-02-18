@@ -120,6 +120,7 @@ def make_base_module(steps: int = 3,
                    ntaps=ntaps,
                    d_init=d_init,
                    n_init=n_init),
+        layer.TwoLayerRNN(),
         layer.BatchPowerNorm1(mode=mode),
         layer.MIMOFOEAf1(name='FOEAf',
                         w0=w0,
@@ -128,7 +129,6 @@ def make_base_module(steps: int = 3,
                         foekwargs={}),
         layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
         layer.MIMOAF1(train=mimo_train),
-        layer.TwoLayerRNN(),
         name='serial_branch'  # 添加名称
     )
 
