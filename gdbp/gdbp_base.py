@@ -128,7 +128,7 @@ def make_base_module(steps: int = 3,
                         foekwargs={}),
         layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
         layer.MIMOAF1(train=mimo_train),
-        layer.TwoLayerRNN(train=mimo_train),
+        layer.TwoLayerRNN(),
         name='serial_branch'  # 添加名称
     )
 
