@@ -115,7 +115,6 @@ def make_base_module(steps: int = 3,
 
     # 定义原有的串行分支
     serial_branch = layer.Serial(
-        layer.TwoLayerRNN(),
         layer.FDBP1(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
