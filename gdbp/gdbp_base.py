@@ -415,22 +415,6 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -438,54 +422,15 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,
-            dt: float = 1.0,         # 时间采样间隔，根据实际采样率设置
-            beta2: float = 0.02,     # 色散参数示例值
-            gamma_phys: float = 1.0,  # 非线性系数示例值
-            lambda_phys: float = 0.1 # 物理损失权重
-           ):
-    """
-    PINN 版损失函数：在保持原有 SNR 监督损失的基础上，
-    加入物理约束项，以确保恢复信号符合 NLSE 的物理规律。
-
-    Args:
-        module: 模型模块
-        params, state, aux, const, sparams: 模型参数和辅助变量
-        y: 接收信号（作为输入）
-        x: 真实发送信号（目标）
-        dt: 时间采样间隔
-        beta2: 色散参数（示例值）
-        gamma_phys: 非线性参数（示例值）
-        lambda_phys: 物理损失权重
-
-    Returns:
-        总损失（SNR 损失 + 物理损失）以及更新后的模块状态
-    """
-    # 合并参数
+            sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    # 得到模型输出
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
-    # 对齐目标信号：根据 z_original.t 信息截取真实信号
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    
-    # 保持原有的监督损失（SNR 损失），不做修改
-    snr_loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    
-    # -------------------------------
-    # 物理约束部分（PINN 物理残差正则项）
-    psi = z_original.val  # 恢复后的信号
-    # 用中心差分近似时间二阶导数（假设时间轴为 axis=0，边界可忽略或做适当处理）
-    psi_tt = (jnp.roll(psi, -1, axis=0) - 2 * psi + jnp.roll(psi, 1, axis=0)) / (dt ** 2)
-    # 简化的 NLSE 残差（忽略 z 导数项），形式为：
-    # R(psi) = (beta2/2) * psi_tt + gamma_phys * |psi|^2 * psi
-    residual = (beta2 / 2.0) * psi_tt + gamma_phys * jnp.square(jnp.abs(psi)) * psi
-    phys_loss = jnp.mean(jnp.square(jnp.abs(residual)))
-    
-    # 总损失为 SNR 损失加上物理损失（乘以权重）
-    total_loss = snr_loss + lambda_phys * phys_loss
-    return total_loss, updated_state
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
