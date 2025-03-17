@@ -415,6 +415,71 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return snr, updated_state
+                    
+def compute_linear_snr(target, estimate, eps=1e-8):
+    """计算线性域下的 SNR，与 si_snr 类似，但不取对数"""
+    target_energy = energy(target)
+    dot_product = jnp.sum(target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    snr_linear = (target_energy + eps) / (noise_energy + eps)
+    return snr_linear
+
+def q_loss(target, estimate, eps=1e-8):
+    """
+    Q loss 利用 Q 函数直接近似误码率。
+    假设 BPSK 调制，误码概率为 Q(sqrt(snr_linear))，
+    其中 Q(x)=0.5*erfc(x/sqrt(2))。注意此处 snr_linear 是能量比。
+    """
+    # 计算线性 SNR
+    snr_linear = compute_linear_snr(target, estimate, eps)
+    # BPSK 下的误码概率 Pe = Q(sqrt(snr_linear)) = 0.5 * erfc(sqrt(snr_linear)/sqrt(2))
+    pe = 0.5 * jax.scipy.special.erfc(jnp.sqrt(snr_linear) / jnp.sqrt(2))
+    # 作为损失直接返回（最小化误码概率）
+    return pe
+
+def gmi_loss(target, estimate, eps=1e-8):
+    """
+    GMI loss 从信息论角度出发，近似衡量在 AWGN 信道下系统可达的传输率。
+    这里给出 BPSK 的一个简单实现：
+      - 假设 target 的取值为 -1 或 +1
+      - 采用高斯似然： q(y|x) ∝ exp( -(y-x)^2/(2σ^2) )
+      - 对于接收信号 estimate，计算真实符号与错误符号的似然，
+        然后计算对数似然比，取负作为损失。
+    """
+    # 这里简单地用估计误差来近似有效噪声方差
+    noise = estimate - target
+    sigma2 = jnp.mean(jnp.square(noise)) + eps
+
+    # 真实符号的似然值
+    likelihood_true = jnp.exp(-jnp.square(estimate - target) / (2 * sigma2))
+    # 错误符号为 -target（BPSK 对称性）
+    likelihood_other = jnp.exp(-jnp.square(estimate + target) / (2 * sigma2))
+    # 假设符号先验均为 1/2，分母即为两者的加权和
+    denom = 0.5 * (likelihood_true + likelihood_other)
+    # 计算每个样本对应的 log-likelihood（以 2 为底）
+    inst_log = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
+    # 取平均并取负，作为需要最小化的损失
+    return -jnp.mean(inst_log)
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -422,16 +487,33 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
+            sparams: Dict,
+            loss_type: str = 'si_snr'):
+    """
+    扩展后的 loss_fn 可以根据 loss_type 参数选择不同的损失函数：
+      - 'si_snr'  : 使用 SI-SNR loss
+      - 'q_loss'  : 使用 Q loss
+      - 'gmi_loss': 使用 GMI loss
+
+    这里仍然假设信号对齐方式由 z_original.t.start 与 z_original.t.stop 给出，
+    并对信号取绝对值以保证数值为正（例如在幅值域计算）。
+    """
     params = util.dict_merge(params, sparams)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
+    # 对齐参考信号
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
-
+    
+    # 根据 loss_type 选择损失函数
+    if loss_type == 'si_snr':
+         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    elif loss_type == 'q_loss':
+         loss = q_loss(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    elif loss_type == 'gmi_loss':
+         loss = gmi_loss(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    else:
+         raise ValueError("Unknown loss type: " + loss_type)
+    return loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
