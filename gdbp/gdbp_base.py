@@ -488,7 +488,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'si_snr'):
+            loss_type: str = 'q_loss'):
     """
     扩展后的 loss_fn 可以根据 loss_type 参数选择不同的损失函数：
       - 'si_snr'  : 使用 SI-SNR loss
