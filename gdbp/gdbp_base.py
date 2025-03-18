@@ -489,7 +489,7 @@ def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray,
     # 计算每个样本的对数似然比（以2为底）
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
     # 返回负互信息作为 loss（最小化 loss 等价于最大化 MI）
-    return -jnp.mean(log_ratio)
+    return jnp.mean(log_ratio)
 
 # 定义支持 SI-SNR 和 GMI loss 的 loss_fn
 def loss_fn(module: layer.Layer,
@@ -500,11 +500,12 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'gmi_loss'):
+            loss_type: str = 'combined'):
     """
-    扩展后的 loss_fn 支持两种损失函数：
+    扩展后的 loss_fn 支持三种损失函数：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
       - 'gmi_loss': 针对16QAM的 GMI loss（基于高斯似然计算互信息）
+      - 'combined': SI-SNR loss + 0.1 * GMI loss
     
     注意：假设网络输出和目标信号均为复数信号（或 [real, imag] 格式）。
     """
@@ -520,10 +521,13 @@ def loss_fn(module: layer.Layer,
         loss = si_snr(z_original.val, aligned_x)
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
+    elif loss_type == 'combined':
+        loss = si_snr(z_original.val, aligned_x) + 0.1 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
         raise ValueError("Unknown loss type: " + loss_type)
     
     return loss, updated_state
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
