@@ -402,10 +402,9 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-# def energy(x):
-#     return jnp.sum(jnp.square(x))
 def energy(x):
-    return jnp.sum(jnp.abs(x)**2)
+    return jnp.sum(jnp.square(x))
+
 
 def si_snr(target, estimate, eps=1e-8):
     target_energy = energy(target)
@@ -435,63 +434,66 @@ def si_snr(target, estimate, eps=1e-8):
 #     return snr, updated_state
                     
 
+import jax
+import jax.numpy as jnp
+
 def get_16qam_constellation() -> jnp.ndarray:
     """
-    定义16QAM的星座点。这里取未归一化的[-3, -1, 1, 3]网格，
-    然后归一化到单位平均能量。
+    定义16QAM的星座点，返回形状 (16, 2) 的实数数组，
+    每个星座点为 [real, imag] 表示。
+    使用未归一化的 [-3, -1, 1, 3] 网格，然后归一化到单位平均能量。
     """
-    re = jnp.array([-3, -1, 1, 3])
-    im = jnp.array([-3, -1, 1, 3])
-    points = jnp.array([r + 1j * i for r in re for i in im])
-    norm_factor = jnp.sqrt(jnp.mean(jnp.abs(points)**2))
+    re = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
+    im = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
+    # 每个点为 [r, i]
+    points = jnp.array([[r, i] for r in re for i in im])
+    # 归一化到单位平均能量（能量= r^2 + i^2）
+    norm_factor = jnp.sqrt(jnp.mean(jnp.sum(points**2, axis=-1)))
     return points / norm_factor
-
-def to_complex(x: jnp.ndarray) -> jnp.ndarray:
-    """
-    如果输入的最后一个维度为2，则将其视为 [real, imag] 格式并转换为复数数组；
-    否则直接返回。
-    """
-    if x.shape[-1] == 2:
-        return x[..., 0] + 1j * x[..., 1]
-    return x
 
 def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray, 
                    constellation: jnp.ndarray = None, eps: float = 1e-8) -> jnp.ndarray:
     """
-    针对16QAM的GMI loss实现：
-      - 先估计噪声方差 sigma^2（简单采用估计误差的平均能量）
-      - 对于每个样本，计算网络输出 estimate 与所有星座点之间的高斯似然，
-        假设似然函数 q(y|x) ∝ exp(-|y-x|^2/sigma^2)
-      - 假设星座点均匀先验（1/16），分母取所有星座点的平均似然
-      - 将 target 映射到星座中最近的点，计算其 likelihood 与分母的比值，
-        并取以2为底的对数
-    为使训练目标为最小化 loss（即最大化互信息），这里返回负的平均对数似然比。
+    针对16QAM的GMI loss实现（全部使用实数计算）：
+      - 假设 target 和 estimate 均为形状 (batch, 2) 的实数数组，
+        表示信号的 [real, imag] 部分。
+      - 先估计噪声方差 sigma^2：利用误差 (estimate - target) 的平均欧氏距离平方。
+      - 对于每个样本，计算网络输出 estimate 与所有星座点之间的欧氏距离平方，
+        并计算高斯似然： q(y|x) ∝ exp(-||y - x||² / sigma²)。
+      - 假设星座点先验均匀（1/16），分母取所有星座点似然的平均值。
+      - 将 target 映射到星座中最近的点（欧氏距离最小），
+        计算该点的 likelihood 与分母的比值，并取以2为底的对数。
+    返回所有样本对数似然比的平均值作为 GMI 指标（训练时可取负值使其成为loss）。
     """
     if constellation is None:
-        constellation = get_16qam_constellation()
+        constellation = get_16qam_constellation()  # shape (16, 2)
     
-    # 将输入转换为复数形式（假设输入可能为 [real, imag] 格式）
-    target = to_complex(target)
-    estimate = to_complex(estimate)
-    
-    noise = estimate - target
-    sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
+    # target, estimate: shape (batch, 2)
+    noise = estimate - target  # (batch, 2)
+    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
 
-    # 对于每个样本计算与所有星座点的高斯似然，结果 shape 为 (batch, 16)
-    likelihoods = jnp.exp(-jnp.abs(estimate[:, None] - constellation[None, :])**2 / sigma2)
-    # 分母：所有星座点似然的平均值（对应均匀先验）
-    denom = jnp.mean(likelihoods, axis=-1)
-    
+    # 计算 estimate 与每个星座点的欧氏距离平方
+    # 结果 shape: (batch, 16)
+    diff = estimate[:, None, :] - constellation[None, :, :]
+    dist_sq = jnp.sum(diff**2, axis=-1)
+    likelihoods = jnp.exp(-dist_sq / sigma2)  # (batch, 16)
+
+    # 分母：所有星座点似然的平均值（均匀先验）
+    denom = jnp.mean(likelihoods, axis=-1)  # (batch,)
+
     # 将 target 映射到星座中最近的点
     def get_index(t):
-        distances = jnp.abs(constellation - t)
+        distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
-    indices = jax.vmap(get_index)(target)
-    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
-    # 计算每个样本的对数似然比（以2为底）
+    indices = jax.vmap(get_index)(target)  # (batch,)
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
+
+    # 计算以2为底的对数似然比
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
-    # 返回负互信息作为 loss（最小化 loss 等价于最大化 MI）
+
+    # 返回平均对数似然比（若训练中需要最小化 loss，可取负值）
     return jnp.mean(log_ratio)
+
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -501,7 +503,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'si_snr'):
+            loss_type: str = 'combined'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
