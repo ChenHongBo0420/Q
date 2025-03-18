@@ -527,7 +527,7 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     # 计算每个样本的对数似然比（以2为底）
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
     # GMI 为每个样本的互信息，取负平均作为损失
-    return -jnp.mean(log_ratio)
+    return jnp.mean(log_ratio)
 
 def loss_fn(module: layer.Layer,
             params: Dict,
