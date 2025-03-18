@@ -519,13 +519,13 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     return -jnp.mean(log_ratio)
 
 def loss_fn(module: layer.Layer,
-            params: dict,
-            state: dict,
+            params: Dict,
+            state: Dict,
             y: Array,
             x: Array,
-            aux: dict,
-            const: dict,
-            sparams: dict,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,
             loss_type: str = 'q_loss'):
     """
     扩展后的loss_fn支持多种损失函数：
