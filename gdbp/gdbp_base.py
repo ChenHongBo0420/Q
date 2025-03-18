@@ -486,6 +486,12 @@ def get_16qam_constellation():
     points = jnp.array([r + 1j * i for r in re for i in im])
     norm_factor = jnp.sqrt(jnp.mean(jnp.abs(points)**2))
     return points / norm_factor
+        
+def to_complex(x):
+    # 如果最后一个维度为2，视为 [real, imag] 格式
+    if x.shape[-1] == 2:
+        return x[..., 0] + 1j * x[..., 1]
+    return x
 
 def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     """
