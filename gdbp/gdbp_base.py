@@ -432,93 +432,75 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
                     
-import jax
-import jax.numpy as jnp
-import jax.scipy.special
-
-def energy_complex(x):
-    """适用于复数信号的能量计算：∑|x|^2"""
+def energy_complex(x: jnp.ndarray) -> jnp.ndarray:
+    """计算复数信号的能量：∑|x|^2"""
     return jnp.sum(jnp.abs(x)**2)
 
-def compute_linear_snr_complex(target, estimate, eps=1e-8):
+def si_snr(target: jnp.ndarray, estimate: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
     """
-    计算复数信号下的线性SNR，简单采用目标能量与估计误差能量的比值。
-    假设target为正确星座符号，estimate为网络输出。
-    """
-    noise = estimate - target
-    return energy_complex(target) / (energy_complex(noise) + eps)
-
-def si_snr(target, estimate, eps=1e-8):
-    """
-    SI-SNR的计算，注意这里为保持与原代码一致，计算时对信号取了复数共轭处理，
-    用于保证内积计算的正确性。
+    计算复数信号的尺度不变信噪比（SI-SNR）。
+    使用复共轭来保证内积计算正确。
+    返回负的 SI-SNR（loss 越小越好，即最大化 SI-SNR）。
     """
     target_energy = jnp.sum(jnp.abs(target)**2)
+    # 内积采用复共轭，取实部
     dot_product = jnp.real(jnp.sum(target * jnp.conjugate(estimate)))
     s_target = dot_product / (target_energy + eps) * target
     e_noise = estimate - s_target
     target_energy_proj = jnp.sum(jnp.abs(s_target)**2)
     noise_energy = jnp.sum(jnp.abs(e_noise)**2)
     si_snr_value = 10 * jnp.log10((target_energy_proj + eps) / (noise_energy + eps))
+    # 取负，使得训练时最小化损失等价于最大化 SI-SNR
     return -si_snr_value
 
-def q_loss_16qam(target, estimate, eps=1e-8):
-    """
-    针对16QAM的Q loss实现。
-    先计算有效SNR，然后利用近似公式：
-      SER ≈ 3 Q(√((4/5)·SNR)) - (9/4)[Q(√((4/5)·SNR))]^2
-    其中 Q(x)=0.5*erfc(x/√2)
-    """
-    snr_linear = compute_linear_snr_complex(target, estimate, eps)
-    arg = jnp.sqrt((4/5) * snr_linear)
-    Q_val = 0.5 * jax.scipy.special.erfc(arg / jnp.sqrt(2))
-    ser = 3 * Q_val - (9/4) * (Q_val**2)
-    return ser
-
-def get_16qam_constellation():
+def get_16qam_constellation() -> jnp.ndarray:
     """
     定义16QAM的星座点。这里取未归一化的[-3, -1, 1, 3]网格，
-    并归一化到单位平均能量。
+    然后归一化到单位平均能量。
     """
     re = jnp.array([-3, -1, 1, 3])
     im = jnp.array([-3, -1, 1, 3])
-    # 构建复数星座
     points = jnp.array([r + 1j * i for r in re for i in im])
     norm_factor = jnp.sqrt(jnp.mean(jnp.abs(points)**2))
     return points / norm_factor
-        
-def to_complex(x):
-    # 如果最后一个维度为2，视为 [real, imag] 格式
+
+def to_complex(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    如果输入的最后一个维度为2，则将其视为 [real, imag] 格式并转换为复数数组；
+    否则直接返回。
+    """
     if x.shape[-1] == 2:
         return x[..., 0] + 1j * x[..., 1]
     return x
 
-def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
+def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray, 
+                   constellation: jnp.ndarray = None, eps: float = 1e-8) -> jnp.ndarray:
     """
     针对16QAM的GMI loss实现：
-      - 首先估计噪声方差 sigma^2（这里简单采用误差的平均能量）
-      - 对于每个样本，计算网络输出estimate与各星座点的高斯似然，
+      - 先估计噪声方差 sigma^2（简单采用估计误差的平均能量）
+      - 对于每个样本，计算网络输出 estimate 与所有星座点之间的高斯似然，
         假设似然函数 q(y|x) ∝ exp(-|y-x|^2/sigma^2)
-      - 将先验假设为均匀分布（即1/16），计算分母为所有星座点的平均似然
-      - 将目标符号target映射到星座中的对应点（假设target已落在星座上或足够接近）
-      - 计算 log likelihood ratio，然后取负平均作为损失
+      - 假设星座点均匀先验（1/16），分母取所有星座点的平均似然
+      - 将 target 映射到星座中最近的点，计算其 likelihood 与分母的比值，
+        并取以2为底的对数
+    为使训练目标为最小化 loss（即最大化互信息），这里返回负的平均对数似然比。
     """
     if constellation is None:
         constellation = get_16qam_constellation()
     
-    # 将 target 和 estimate 转换为复数数组
+    # 将输入转换为复数形式（假设输入可能为 [real, imag] 格式）
     target = to_complex(target)
     estimate = to_complex(estimate)
     
     noise = estimate - target
     sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
 
-    # likelihoods: 对于每个样本，计算与所有星座点的高斯似然，shape (batch, 16)
+    # 对于每个样本计算与所有星座点的高斯似然，结果 shape 为 (batch, 16)
     likelihoods = jnp.exp(-jnp.abs(estimate[:, None] - constellation[None, :])**2 / sigma2)
-    # 假设先验均为1/16，这里分母取所有星座点的平均似然
+    # 分母：所有星座点似然的平均值（对应均匀先验）
     denom = jnp.mean(likelihoods, axis=-1)
     
-    # 将 target 映射到星座中的索引
+    # 将 target 映射到星座中最近的点
     def get_index(t):
         distances = jnp.abs(constellation - t)
         return jnp.argmin(distances)
@@ -526,43 +508,42 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
     # 计算每个样本的对数似然比（以2为底）
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
-    # GMI 为每个样本的互信息，取负平均作为损失
-    return jnp.mean(log_ratio)
-###### Q not good ####  SNR better than GMI
+    # 返回负互信息作为 loss（最小化 loss 等价于最大化 MI）
+    return -jnp.mean(log_ratio)
+
+# 定义支持 SI-SNR 和 GMI loss 的 loss_fn
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
-            y: Array,
-            x: Array,
+            y: Any,
+            x: Any,
             aux: Dict,
             const: Dict,
             sparams: Dict,
             loss_type: str = 'si_snr'):
     """
-    扩展后的loss_fn支持多种损失函数：
-      - 'si_snr'  : SI-SNR loss（与原实现类似，但内部处理复数时考虑了共轭）
-      - 'q_loss'  : 针对16QAM的 Q loss
-      - 'gmi_loss': 针对16QAM的 GMI loss
-
-    注意：对于16QAM，我们假设网络输出和目标信号均为复数信号，
-    因此在调用Q loss和GMI loss时不再取绝对值。
+    扩展后的 loss_fn 支持两种损失函数：
+      - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
+      - 'gmi_loss': 针对16QAM的 GMI loss（基于高斯似然计算互信息）
+    
+    注意：假设网络输出和目标信号均为复数信号（或 [real, imag] 格式）。
     """
+    # 合并参数
     params = util.dict_merge(params, sparams)
+    # 应用模块，得到输出信号及更新后的状态
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     # 对齐目标信号
     aligned_x = x[z_original.t.start:z_original.t.stop]
     
     if loss_type == 'si_snr':
-         loss = si_snr(z_original.val, aligned_x)
-    elif loss_type == 'q_loss':
-         loss = q_loss_16qam(z_original.val, aligned_x)
+        loss = si_snr(z_original.val, aligned_x)
     elif loss_type == 'gmi_loss':
-         loss = gmi_loss_16qam(z_original.val, aligned_x)
+        loss = gmi_loss_16qam(z_original.val, aligned_x)
     else:
-         raise ValueError("Unknown loss type: " + loss_type)
+        raise ValueError("Unknown loss type: " + loss_type)
+    
     return loss, updated_state
-
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
