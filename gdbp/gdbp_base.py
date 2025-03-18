@@ -528,7 +528,7 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
     # GMI 为每个样本的互信息，取负平均作为损失
     return jnp.mean(log_ratio)
-
+###### Q not good ####  SNR better than GMI
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -537,7 +537,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'gmi_loss'):
+            loss_type: str = 'si_snr'):
     """
     扩展后的loss_fn支持多种损失函数：
       - 'si_snr'  : SI-SNR loss（与原实现类似，但内部处理复数时考虑了共轭）
