@@ -402,18 +402,18 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-# def energy(x):
-#     return jnp.sum(jnp.square(x))
+def energy(x):
+    return jnp.sum(jnp.square(x))
   
-# def si_snr(target, estimate, eps=1e-8):
-#     target_energy = energy(target)
-#     dot_product = jnp.sum(target * estimate)
-#     s_target = dot_product / (target_energy + eps) * target
-#     e_noise = estimate - s_target
-#     target_energy = energy(s_target)
-#     noise_energy = energy(e_noise)
-#     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-#     return -si_snr_value 
+def si_snr(target, estimate, eps=1e-8):
+    target_energy = energy(target)
+    dot_product = jnp.sum(target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value 
 
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
@@ -432,26 +432,6 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
                     
-def energy_complex(x: jnp.ndarray) -> jnp.ndarray:
-    """计算复数信号的能量：∑|x|^2"""
-    return jnp.sum(jnp.abs(x)**2)
-
-def si_snr(target: jnp.ndarray, estimate: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
-    """
-    计算复数信号的尺度不变信噪比（SI-SNR）。
-    使用复共轭来保证内积计算正确。
-    返回负的 SI-SNR（loss 越小越好，即最大化 SI-SNR）。
-    """
-    target_energy = jnp.sum(jnp.abs(target)**2)
-    # 内积采用复共轭，取实部
-    dot_product = jnp.real(jnp.sum(target * jnp.conjugate(estimate)))
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy_proj = jnp.sum(jnp.abs(s_target)**2)
-    noise_energy = jnp.sum(jnp.abs(e_noise)**2)
-    si_snr_value = 10 * jnp.log10((target_energy_proj + eps) / (noise_energy + eps))
-    # 取负，使得训练时最小化损失等价于最大化 SI-SNR
-    return -si_snr_value
 
 def get_16qam_constellation() -> jnp.ndarray:
     """
@@ -489,8 +469,8 @@ def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray,
         constellation = get_16qam_constellation()
     
     # 将输入转换为复数形式（假设输入可能为 [real, imag] 格式）
-    target = to_complex(target)
-    estimate = to_complex(estimate)
+    # target = to_complex(target)
+    # estimate = to_complex(estimate)
     
     noise = estimate - target
     sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
@@ -520,7 +500,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'si_snr'):
+            loss_type: str = 'gmi_loss'):
     """
     扩展后的 loss_fn 支持两种损失函数：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
