@@ -451,33 +451,29 @@ def get_16qam_constellation() -> jnp.ndarray:
 
 def to_real(x: jnp.ndarray) -> jnp.ndarray:
     """
-    将输入 x 转换为实数表示。如果 x 为复数，则转换为形状 (..., 2) 的实数数组 (real, imag)；
-    如果 x 已为实数，但存在多余维度（除批次和最后的 [real, imag] 外），则根据中间维度的乘积进行调整：
-      - 如果中间维度乘积为 1，则 squeeze 出这些单例维度；
-      - 如果中间维度乘积为 2，则直接 reshape 为 (batch, 2)；
-      - 如果中间维度乘积为 4，则 reshape 成 (batch, 2, 2) 并取均值（axis=1），得到 (batch, 2)；
-      - 否则尝试 flatten 后检查最后维度是否为 2，否则报错。
+    将输入 x 转换为实数表示，输出形状为 (batch, 2)。
+    规则如下：
+      - 如果 x 为复数数组，则转换为 [real, imag] 表示；
+      - 如果 x 已为实数，但最后一维不是2，则将除 batch 和最后一维外的所有维度 flatten，
+        然后对每个样本取平均，得到形状 (batch,2)。
     """
     if jnp.iscomplexobj(x):
         x = jnp.stack([jnp.real(x), jnp.imag(x)], axis=-1)
-    # x 形状为 (batch, ..., 2) —— 其中 ... 为除批次和最后一维外的维度
+    # 假设 x 形状为 (batch, ..., 2)
     batch = x.shape[0]
-    extra_shape = x.shape[1:-1]
-    prod = 1
-    for d in extra_shape:
-        prod *= d
-    if prod == 1:
-        # squeeze 所有中间单例维度
-        x = jnp.squeeze(x, axis=tuple(i for i in range(1, x.ndim-1) if x.shape[i] == 1))
-    elif prod == 2:
-        # 直接 reshape 为 (batch, 2)
-        x = jnp.reshape(x, (batch, 2))
-    elif prod == 4:
-        # reshape 为 (batch, 2, 2) 后沿 axis=1 求均值
-        x = jnp.reshape(x, (batch, 2, 2))
-        x = jnp.mean(x, axis=1)
+    # 如果中间维度的乘积大于 1，则 reshape 为 (batch, extra, 2) 后取平均
+    if x.ndim > 2:
+        extra = 1
+        for d in x.shape[1:-1]:
+            extra *= d
+        if extra > 1:
+            x = jnp.reshape(x, (batch, -1, 2))
+            x = jnp.mean(x, axis=1)
+        else:
+            x = jnp.reshape(x, (batch, 2))
     else:
-        x = jnp.reshape(x, (batch, -1))
+        # 如果 x 维度已经是 (batch,2) 则直接返回
+        x = jnp.reshape(x, (batch, 2))
     if x.shape[-1] != 2:
         raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
     return x
@@ -486,41 +482,42 @@ def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray,
                    constellation: jnp.ndarray = None, eps: float = 1e-8) -> jnp.ndarray:
     """
     针对16QAM的GMI loss实现（全部在实数域中计算）：
-      - 假设 target 和 estimate 均为信号，可能为复数或者形状中含有多余维度，
+      - 假设 target 和 estimate 均为信号，可能为复数或者存在多余中间维度，
         先调用 to_real() 转换为形状 (batch, 2) 的实数数组；
-      - 计算噪声： noise = estimate - target，其欧氏距离平方均值近似 sigma²；
-      - 对每个样本，计算 estimate 与所有星座点之间的欧氏距离平方，并以此计算高斯似然：
-            q(y|x) ∝ exp( -||y - x||² / sigma² )
-      - 假设星座点先验均匀（1/16），取所有星座点似然的平均值作为分母；
-      - 将 target 映射到星座中最近的点（使用欧氏距离），取对应似然，
-            计算其与分母的比值并取以2为底的对数；
-    返回所有样本对数似然比的平均值（作为 GMI 指标，如果用于训练可以取负值）。
+      - 计算噪声： noise = estimate - target，其欧氏距离平方的均值近似为 sigma²；
+      - 对于每个样本，计算 estimate 与所有星座点（形状 (16,2)）之间的欧氏距离平方，
+        并计算高斯似然： q(y|x) ∝ exp( -||y - x||² / sigma² )；
+      - 假设星座点先验均匀（1/16），分母取所有星座点似然的平均值；
+      - 将 target 映射到星座中最近的点（使用欧氏距离），取对应的似然，
+        并计算其与分母的比值，取以2为底的对数；
+    返回所有样本对数似然比的平均值。
     """
     if constellation is None:
-        constellation = get_16qam_constellation()  # shape (16, 2)
+        constellation = get_16qam_constellation()  # shape (16,2)
     
-    # 将 target 和 estimate 转换为实数表示，形状为 (batch, 2)
+    # 转换为 (batch,2) 实数表示
     target = to_real(target)
     estimate = to_real(estimate)
     
-    # 计算噪声和噪声方差 sigma²
-    noise = estimate - target  # (batch, 2)
+    # 计算噪声及其方差 sigma²
+    noise = estimate - target  # shape (batch,2)
     sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
 
-    # 计算 estimate 与所有星座点的欧氏距离平方
-    diff = estimate[:, None, :] - constellation[None, :, :]  # 形状 (batch, 16, 2)
-    dist_sq = jnp.sum(diff**2, axis=-1)  # 形状 (batch, 16)
-    likelihoods = jnp.exp(-dist_sq / sigma2)  # 形状 (batch, 16)
+    # 计算 estimate 与所有星座点之间的欧氏距离平方
+    # 结果 shape: (batch, 16)
+    diff = estimate[:, None, :] - constellation[None, :, :]
+    dist_sq = jnp.sum(diff**2, axis=-1)
+    likelihoods = jnp.exp(-dist_sq / sigma2)  # shape (batch, 16)
 
     # 分母：所有星座点似然的平均值（均匀先验）
-    denom = jnp.mean(likelihoods, axis=-1)  # (batch,)
+    denom = jnp.mean(likelihoods, axis=-1)  # shape (batch,)
 
     # 将 target 映射到星座中最近的点（欧氏距离最小）
     def get_index(t):
         distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
-    indices = jax.vmap(get_index)(target)  # (batch,)
-    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
+    indices = jax.vmap(get_index)(target)  # shape (batch,)
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # shape (batch,)
 
     # 计算以2为底的对数似然比
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
