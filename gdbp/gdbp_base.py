@@ -402,9 +402,11 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
+# def energy(x):
+#     return jnp.sum(jnp.square(x))
 def energy(x):
-    return jnp.sum(jnp.square(x))
-  
+    return jnp.sum(jnp.abs(x)**2)
+
 def si_snr(target, estimate, eps=1e-8):
     target_energy = energy(target)
     dot_product = jnp.sum(target * estimate)
@@ -499,7 +501,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'combined'):
+            loss_type: str = 'si_snr'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
