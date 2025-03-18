@@ -499,15 +499,20 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     """
     if constellation is None:
         constellation = get_16qam_constellation()
-    # 估计噪声方差（平均每个样本的能量）
+    
+    # 将 target 和 estimate 转换为复数数组
+    target = to_complex(target)
+    estimate = to_complex(estimate)
+    
     noise = estimate - target
     sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
+
     # likelihoods: 对于每个样本，计算与所有星座点的高斯似然，shape (batch, 16)
     likelihoods = jnp.exp(-jnp.abs(estimate[:, None] - constellation[None, :])**2 / sigma2)
     # 假设先验均为1/16，这里分母取所有星座点的平均似然
     denom = jnp.mean(likelihoods, axis=-1)
     
-    # 将target映射到星座中的索引
+    # 将 target 映射到星座中的索引
     def get_index(t):
         distances = jnp.abs(constellation - t)
         return jnp.argmin(distances)
@@ -515,7 +520,7 @@ def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
     likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
     # 计算每个样本的对数似然比（以2为底）
     log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
-    # GMI为每个样本的互信息，取负平均作为损失
+    # GMI 为每个样本的互信息，取负平均作为损失
     return -jnp.mean(log_ratio)
 
 def loss_fn(module: layer.Layer,
