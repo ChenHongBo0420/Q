@@ -469,8 +469,8 @@ def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray,
         constellation = get_16qam_constellation()
     
     # 将输入转换为复数形式（假设输入可能为 [real, imag] 格式）
-    # target = to_complex(target)
-    # estimate = to_complex(estimate)
+    target = to_complex(target)
+    estimate = to_complex(estimate)
     
     noise = estimate - target
     sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
