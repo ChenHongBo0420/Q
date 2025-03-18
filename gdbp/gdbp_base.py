@@ -402,18 +402,18 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-def energy(x):
-    return jnp.sum(jnp.square(x))
+# def energy(x):
+#     return jnp.sum(jnp.square(x))
   
-def si_snr(target, estimate, eps=1e-8):
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
+# def si_snr(target, estimate, eps=1e-8):
+#     target_energy = energy(target)
+#     dot_product = jnp.sum(target * estimate)
+#     s_target = dot_product / (target_energy + eps) * target
+#     e_noise = estimate - s_target
+#     target_energy = energy(s_target)
+#     noise_energy = energy(e_noise)
+#     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+#     return -si_snr_value 
 
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
@@ -432,88 +432,126 @@ def si_snr(target, estimate, eps=1e-8):
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
                     
-def compute_linear_snr(target, estimate, eps=1e-8):
-    """计算线性域下的 SNR，与 si_snr 类似，但不取对数"""
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
+import jax
+import jax.numpy as jnp
+import jax.scipy.special
+
+def energy_complex(x):
+    """适用于复数信号的能量计算：∑|x|^2"""
+    return jnp.sum(jnp.abs(x)**2)
+
+def compute_linear_snr_complex(target, estimate, eps=1e-8):
+    """
+    计算复数信号下的线性SNR，简单采用目标能量与估计误差能量的比值。
+    假设target为正确星座符号，estimate为网络输出。
+    """
+    noise = estimate - target
+    return energy_complex(target) / (energy_complex(noise) + eps)
+
+def si_snr(target, estimate, eps=1e-8):
+    """
+    SI-SNR的计算，注意这里为保持与原代码一致，计算时对信号取了复数共轭处理，
+    用于保证内积计算的正确性。
+    """
+    target_energy = jnp.sum(jnp.abs(target)**2)
+    dot_product = jnp.real(jnp.sum(target * jnp.conjugate(estimate)))
     s_target = dot_product / (target_energy + eps) * target
     e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    snr_linear = (target_energy + eps) / (noise_energy + eps)
-    return snr_linear
+    target_energy_proj = jnp.sum(jnp.abs(s_target)**2)
+    noise_energy = jnp.sum(jnp.abs(e_noise)**2)
+    si_snr_value = 10 * jnp.log10((target_energy_proj + eps) / (noise_energy + eps))
+    return -si_snr_value
 
-def q_loss(target, estimate, eps=1e-8):
+def q_loss_16qam(target, estimate, eps=1e-8):
     """
-    Q loss 利用 Q 函数直接近似误码率。
-    假设 BPSK 调制，误码概率为 Q(sqrt(snr_linear))，
-    其中 Q(x)=0.5*erfc(x/sqrt(2))。注意此处 snr_linear 是能量比。
+    针对16QAM的Q loss实现。
+    先计算有效SNR，然后利用近似公式：
+      SER ≈ 3 Q(√((4/5)·SNR)) - (9/4)[Q(√((4/5)·SNR))]^2
+    其中 Q(x)=0.5*erfc(x/√2)
     """
-    # 计算线性 SNR
-    snr_linear = compute_linear_snr(target, estimate, eps)
-    # BPSK 下的误码概率 Pe = Q(sqrt(snr_linear)) = 0.5 * erfc(sqrt(snr_linear)/sqrt(2))
-    pe = 0.5 * jax.scipy.special.erfc(jnp.sqrt(snr_linear) / jnp.sqrt(2))
-    # 作为损失直接返回（最小化误码概率）
-    return pe
+    snr_linear = compute_linear_snr_complex(target, estimate, eps)
+    arg = jnp.sqrt((4/5) * snr_linear)
+    Q_val = 0.5 * jax.scipy.special.erfc(arg / jnp.sqrt(2))
+    ser = 3 * Q_val - (9/4) * (Q_val**2)
+    return ser
 
-def gmi_loss(target, estimate, eps=1e-8):
+def get_16qam_constellation():
     """
-    GMI loss 从信息论角度出发，近似衡量在 AWGN 信道下系统可达的传输率。
-    这里给出 BPSK 的一个简单实现：
-      - 假设 target 的取值为 -1 或 +1
-      - 采用高斯似然： q(y|x) ∝ exp( -(y-x)^2/(2σ^2) )
-      - 对于接收信号 estimate，计算真实符号与错误符号的似然，
-        然后计算对数似然比，取负作为损失。
+    定义16QAM的星座点。这里取未归一化的[-3, -1, 1, 3]网格，
+    并归一化到单位平均能量。
     """
-    # 这里简单地用估计误差来近似有效噪声方差
+    re = jnp.array([-3, -1, 1, 3])
+    im = jnp.array([-3, -1, 1, 3])
+    # 构建复数星座
+    points = jnp.array([r + 1j * i for r in re for i in im])
+    norm_factor = jnp.sqrt(jnp.mean(jnp.abs(points)**2))
+    return points / norm_factor
+
+def gmi_loss_16qam(target, estimate, constellation=None, eps=1e-8):
+    """
+    针对16QAM的GMI loss实现：
+      - 首先估计噪声方差 sigma^2（这里简单采用误差的平均能量）
+      - 对于每个样本，计算网络输出estimate与各星座点的高斯似然，
+        假设似然函数 q(y|x) ∝ exp(-|y-x|^2/sigma^2)
+      - 将先验假设为均匀分布（即1/16），计算分母为所有星座点的平均似然
+      - 将目标符号target映射到星座中的对应点（假设target已落在星座上或足够接近）
+      - 计算 log likelihood ratio，然后取负平均作为损失
+    """
+    if constellation is None:
+        constellation = get_16qam_constellation()
+    # 估计噪声方差（平均每个样本的能量）
     noise = estimate - target
-    sigma2 = jnp.mean(jnp.square(noise)) + eps
-
-    # 真实符号的似然值
-    likelihood_true = jnp.exp(-jnp.square(estimate - target) / (2 * sigma2))
-    # 错误符号为 -target（BPSK 对称性）
-    likelihood_other = jnp.exp(-jnp.square(estimate + target) / (2 * sigma2))
-    # 假设符号先验均为 1/2，分母即为两者的加权和
-    denom = 0.5 * (likelihood_true + likelihood_other)
-    # 计算每个样本对应的 log-likelihood（以 2 为底）
-    inst_log = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
-    # 取平均并取负，作为需要最小化的损失
-    return -jnp.mean(inst_log)
+    sigma2 = jnp.mean(jnp.abs(noise)**2) + eps
+    # likelihoods: 对于每个样本，计算与所有星座点的高斯似然，shape (batch, 16)
+    likelihoods = jnp.exp(-jnp.abs(estimate[:, None] - constellation[None, :])**2 / sigma2)
+    # 假设先验均为1/16，这里分母取所有星座点的平均似然
+    denom = jnp.mean(likelihoods, axis=-1)
+    
+    # 将target映射到星座中的索引
+    def get_index(t):
+        distances = jnp.abs(constellation - t)
+        return jnp.argmin(distances)
+    indices = jax.vmap(get_index)(target)
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
+    # 计算每个样本的对数似然比（以2为底）
+    log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
+    # GMI为每个样本的互信息，取负平均作为损失
+    return -jnp.mean(log_ratio)
 
 def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
+            params: dict,
+            state: dict,
             y: Array,
             x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,
-            loss_type: str = 'gmi_loss'):
+            aux: dict,
+            const: dict,
+            sparams: dict,
+            loss_type: str = 'q_loss'):
     """
-    扩展后的 loss_fn 可以根据 loss_type 参数选择不同的损失函数：
-      - 'si_snr'  : 使用 SI-SNR loss
-      - 'q_loss'  : 使用 Q loss
-      - 'gmi_loss': 使用 GMI loss
+    扩展后的loss_fn支持多种损失函数：
+      - 'si_snr'  : SI-SNR loss（与原实现类似，但内部处理复数时考虑了共轭）
+      - 'q_loss'  : 针对16QAM的 Q loss
+      - 'gmi_loss': 针对16QAM的 GMI loss
 
-    这里仍然假设信号对齐方式由 z_original.t.start 与 z_original.t.stop 给出，
-    并对信号取绝对值以保证数值为正（例如在幅值域计算）。
+    注意：对于16QAM，我们假设网络输出和目标信号均为复数信号，
+    因此在调用Q loss和GMI loss时不再取绝对值。
     """
     params = util.dict_merge(params, sparams)
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # 对齐参考信号
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+    # 对齐目标信号
     aligned_x = x[z_original.t.start:z_original.t.stop]
     
-    # 根据 loss_type 选择损失函数
     if loss_type == 'si_snr':
-         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+         loss = si_snr(z_original.val, aligned_x)
     elif loss_type == 'q_loss':
-         loss = q_loss(jnp.abs(z_original.val), jnp.abs(aligned_x))
+         loss = q_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'gmi_loss':
-         loss = gmi_loss(jnp.abs(z_original.val), jnp.abs(aligned_x))
+         loss = gmi_loss_16qam(z_original.val, aligned_x)
     else:
          raise ValueError("Unknown loss type: " + loss_type)
     return loss, updated_state
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
