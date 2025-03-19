@@ -559,7 +559,7 @@ def loss_fn(module: layer.Layer,
         raise ValueError("Unknown loss type: " + loss_type)
     
     # 显式取实部，确保返回实数值以便梯度计算
-    return jnp.real(loss), updated_state
+    return loss, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
