@@ -691,8 +691,8 @@ def train(
     model: Model,
     data: gdat.Input,
     batch_size: int = 500,
-    stage1_steps: int = 1000,  # 分阶段1：训练多少步
-    stage2_steps: int = 1000,  # 分阶段2：训练多少步
+    stage1_steps: int = 1500,  # 分阶段1：训练多少步
+    stage2_steps: int = 1500,  # 分阶段2：训练多少步
     opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))
 ):
     """
