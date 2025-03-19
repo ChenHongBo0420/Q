@@ -528,7 +528,7 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     gmi = jnp.mean(log_ratio)
 #     return gmi
 
-def gmi_loss_16qam_xent(
+def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
