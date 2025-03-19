@@ -536,7 +536,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'combined'):
+            loss_type: str = 'si_snr'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
@@ -563,6 +563,7 @@ def loss_fn(module: layer.Layer,
         raise ValueError("Unknown loss type: " + loss_type)
     
     # 显式取实部，确保返回实数值以便梯度计算
+    print(loss.dtype)
     return loss, updated_state
 
 
