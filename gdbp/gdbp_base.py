@@ -603,7 +603,7 @@ def loss_fn(module: layer.Layer,
 #     opt_state = opt.update_fn(i, grads, opt_state)
 #     return loss, opt_state, module_state
 
-@partial(jit, backend='cpu', static_argnums=(0, 2))  # 注意 static_argnums 要包含 loss_type
+@partial(jit, backend='cpu', static_argnums=(0, 1, 10))  # 注意 static_argnums 要包含 loss_type
 def update_step_with_loss_type(module: layer.Layer,
                                opt: cxopt.Optimizer,
                                i: int,
@@ -756,38 +756,87 @@ def train(
     # 5) 返回最终结果（或 yield）
     yield loss, opt.params_fn(opt_state), module_state
 
+# def test(model: Model,
+#          params: Dict,
+#          data: gdat.Input,
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+#     ''' testing, a simple forward pass
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#         data: dataset
+#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+#             BER, Q, SER and more metrics.
+
+#         Returns:
+#             evaluated matrics and equalized symbols
+#     '''
+
+#     state, aux, const, sparams = model.initvar[1:]
+#     aux = core.dict_replace(aux, {'truth': data.x})
+#     if params is None:
+#       params = model.initvar[0]
+
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(data.y))
+#     metric = metric_fn(z.val,
+#                        data.x[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
+#                        eval_range=eval_range)
+#     return metric, z
+
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
+         eval_range: tuple = (300000, -20000),
+         metric_fn = comm.qamqot):
+    """
+    修正版 test，用于保证一定使用用户传入的最新 params，
+    而不是默默回退到初始参数。
+    
+    Args:
+        model: Model namedtuple return by `model_init`
+        params: 训练好的可学习参数 (不再默认允许 None)
         data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+        eval_range: interval which QoT is evaluated in,
+            assure proper eval of steady-state performance
+        metric_fn: metric function, comm.snrstat 或 comm.qamqot 等
+    
+    Returns:
+        (metric, z): metric 为评估结果，z 为测试时得到的信号。
+    """
+    # 解包初始化时的其它状态
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
 
+    # 如果用户没传最新 params，就直接报错
+    if params is None:
+        raise ValueError("请务必将训练后的 params 传给 test(...)，否则无法使用最新参数进行测试。")
+
+    # 与静态参数合并（sparams 通常是非可训练的部分）
+    merged_params = util.dict_merge(params, sparams)
+
+    # 做一次前向传播
     z, _ = jit(model.module.apply,
                backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
+                   'params': merged_params,
                    'aux_inputs': aux,
                    'const': const,
                    **state
-               }, core.Signal(data.y))
+               },
+               core.Signal(data.y))
+
+    # 使用 metric_fn 计算性能（QAM QoT 或 SNR等）
     metric = metric_fn(z.val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
+
     return metric, z
