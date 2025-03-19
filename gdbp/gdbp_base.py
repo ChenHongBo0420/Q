@@ -717,7 +717,7 @@ def train(model: Model,
         y, x = batch_gen[i]
 
         # 2) 切换loss
-        if i < 2000:
+        if i < 500:
             loss_type = 'combined'
         else:
             loss_type = 'si_snr'
