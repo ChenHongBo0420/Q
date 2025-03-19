@@ -480,97 +480,97 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
         raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
     return x
 
-# def gmi_loss_16qam(
-#     target: jnp.ndarray,
-#     estimate: jnp.ndarray,
-#     constellation: jnp.ndarray = None,
-#     eps: float = 1e-8,
-# ) -> jnp.ndarray:
-#     """
-#     针对16QAM的GMI计算，并返回“负”的平均GMI，方便当作loss使用。
-#     """
-#     if constellation is None:
-#         constellation = get_16qam_constellation()  # shape (16, 2)
-
-#     # 转 (batch, 2) 实数
-#     target = to_real(target)     # (batch, 2)
-#     estimate = to_real(estimate) # (batch, 2)
-
-#     # 估计平均噪声功率 sigma^2
-#     noise = estimate - target  # shape (batch,2)
-#     sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps  # 一个标量
-
-#     # 计算与星座点的欧氏距离及似然
-#     # diff: (batch, 16, 2)
-#     diff = estimate[:, None, :] - constellation[None, :, :]
-#     dist_sq = jnp.sum(diff**2, axis=-1)           # (batch, 16)
-#     likelihoods = jnp.exp(-dist_sq / sigma2)      # (batch, 16)
-
-#     # 分母：对所有星座点似然做加权（先验1/16），可以写成 sum(...) / 16
-#     denom = jnp.sum(likelihoods, axis=-1) + eps   # (batch,)
-
-#     # 找到 target 对应（或最近）的那一个星座点
-#     def get_index(t):
-#         distances = jnp.sum((constellation - t)**2, axis=-1)
-#         return jnp.argmin(distances)
-#     indices = jax.vmap(get_index)(target)  # (batch,)
-
-#     # 取“正确”点的似然
-#     likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
-
-#     # 对数似然比: log2( (1/16)*likelihood_true / (1/16)*sum(likelihoods) )
-#     # 省略 1/16 后，只差常数项，对优化无影响
-#     ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
-#     # 注意 jnp.log2(x) 可以写成 jnp.log(x) / jnp.log(2)
-#     log_ratio = jnp.log(ratio) / jnp.log(2.0)
-
-#     # GMI = 平均 (batch 维度)，最后取负号做 loss
-#     gmi = jnp.mean(log_ratio)
-#     return gmi
-
-def stable_log2(x, min_val=1e-12, max_val=1e5):
-    # 避免 log(0) 或 log(极大)
-    x = jnp.clip(x, min_val, max_val)
-    return jnp.log(x) / jnp.log(2.)
-
 def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
     eps: float = 1e-8,
-    clip_min: float = 1e-12,
-    clip_max: float = 1e5,
-):
+) -> jnp.ndarray:
+    """
+    针对16QAM的GMI计算，并返回“负”的平均GMI，方便当作loss使用。
+    """
     if constellation is None:
-        constellation = get_16qam_constellation()
+        constellation = get_16qam_constellation()  # shape (16, 2)
 
-    target = to_real(target)
-    estimate = to_real(estimate)
+    # 转 (batch, 2) 实数
+    target = to_real(target)     # (batch, 2)
+    estimate = to_real(estimate) # (batch, 2)
 
-    noise = estimate - target
-    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+    # 估计平均噪声功率 sigma^2
+    noise = estimate - target  # shape (batch,2)
+    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps  # 一个标量
 
+    # 计算与星座点的欧氏距离及似然
+    # diff: (batch, 16, 2)
     diff = estimate[:, None, :] - constellation[None, :, :]
-    dist_sq = jnp.sum(diff**2, axis=-1)
-    # -- 做 exp 之前不一定clip, 但做完之后clip
-    raw_likelihoods = jnp.exp(-dist_sq / sigma2)
-    likelihoods = jnp.clip(raw_likelihoods, clip_min, clip_max)
+    dist_sq = jnp.sum(diff**2, axis=-1)           # (batch, 16)
+    likelihoods = jnp.exp(-dist_sq / sigma2)      # (batch, 16)
 
-    denom = jnp.sum(likelihoods, axis=-1) + eps
+    # 分母：对所有星座点似然做加权（先验1/16），可以写成 sum(...) / 16
+    denom = jnp.sum(likelihoods, axis=-1) + eps   # (batch,)
 
+    # 找到 target 对应（或最近）的那一个星座点
     def get_index(t):
         distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
-    indices = jax.vmap(get_index)(target)
-    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
+    indices = jax.vmap(get_index)(target)  # (batch,)
 
-    # ratio
+    # 取“正确”点的似然
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
+
+    # 对数似然比: log2( (1/16)*likelihood_true / (1/16)*sum(likelihoods) )
+    # 省略 1/16 后，只差常数项，对优化无影响
     ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
-    ratio = jnp.clip(ratio, clip_min, clip_max)  # 再clip一次
-    log_ratio = stable_log2(ratio, min_val=clip_min, max_val=clip_max)
+    # 注意 jnp.log2(x) 可以写成 jnp.log(x) / jnp.log(2)
+    log_ratio = jnp.log(ratio) / jnp.log(2.0)
 
+    # GMI = 平均 (batch 维度)，最后取负号做 loss
     gmi = jnp.mean(log_ratio)
     return gmi
+
+# def stable_log2(x, min_val=1e-12, max_val=1e5):
+#     # 避免 log(0) 或 log(极大)
+#     x = jnp.clip(x, min_val, max_val)
+#     return jnp.log(x) / jnp.log(2.)
+
+# def gmi_loss_16qam(
+#     target: jnp.ndarray,
+#     estimate: jnp.ndarray,
+#     constellation: jnp.ndarray = None,
+#     eps: float = 1e-8,
+#     clip_min: float = 1e-12,
+#     clip_max: float = 1e5,
+# ):
+#     if constellation is None:
+#         constellation = get_16qam_constellation()
+
+#     target = to_real(target)
+#     estimate = to_real(estimate)
+
+#     noise = estimate - target
+#     sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+
+#     diff = estimate[:, None, :] - constellation[None, :, :]
+#     dist_sq = jnp.sum(diff**2, axis=-1)
+#     # -- 做 exp 之前不一定clip, 但做完之后clip
+#     raw_likelihoods = jnp.exp(-dist_sq / sigma2)
+#     likelihoods = jnp.clip(raw_likelihoods, clip_min, clip_max)
+
+#     denom = jnp.sum(likelihoods, axis=-1) + eps
+
+#     def get_index(t):
+#         distances = jnp.sum((constellation - t)**2, axis=-1)
+#         return jnp.argmin(distances)
+#     indices = jax.vmap(get_index)(target)
+#     likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
+
+#     # ratio
+#     ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
+#     ratio = jnp.clip(ratio, clip_min, clip_max)  # 再clip一次
+#     log_ratio = stable_log2(ratio, min_val=clip_min, max_val=clip_max)
+
+#     gmi = jnp.mean(log_ratio)
+#     return gmi
 
 def loss_fn(module: layer.Layer,
             params: Dict,
