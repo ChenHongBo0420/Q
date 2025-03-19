@@ -603,7 +603,7 @@ def loss_fn(module: layer.Layer,
 #     opt_state = opt.update_fn(i, grads, opt_state)
 #     return loss, opt_state, module_state
 
-@partial(jit, backend='cpu', static_argnums=(0, 1))  # 注意 static_argnums 要包含 loss_type
+@partial(jit, backend='cpu', static_argnums=(0, 2))  # 注意 static_argnums 要包含 loss_type
 def update_step_with_loss_type(module: layer.Layer,
                                opt: cxopt.Optimizer,
                                i: int,
