@@ -727,7 +727,7 @@ def train(
             y, x, aux, const, sparams,
             loss_type='gmi_loss'
         )
-        print(f"Stage1, step {i}, loss_type='gmi_loss', loss={loss:.6f}")
+        # print(f"Stage1, step {i}, loss_type='gmi_loss', loss={loss:.6f}")
         if i % 100 == 0:
             print(f"  Iter {i}, loss={loss:.4f}")
     
@@ -747,7 +747,7 @@ def train(
             y, x, aux, const, sparams,
             loss_type='si_snr'
         )
-        print(f"Stage2, step {idx}, loss_type='si_snr', loss={loss:.6f}")
+        # print(f"Stage2, step {idx}, loss_type='si_snr', loss={loss:.6f}")
         if j % 100 == 0:
             print(f"  Iter {idx}, loss={loss:.4f}")
 
