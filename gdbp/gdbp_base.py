@@ -434,7 +434,7 @@ def normalize_by_energy(signal, eps=1e-8):
     signal_energy = jnp.sqrt(energy(signal))
     return signal / (signal_energy + eps)
 
-def si_snr(target, estimate, eps=1e-8, normalize=False, method='energy'):
+def si_snr(target, estimate, eps=1e-8, normalize=False, method='max'):
     """
     计算 SI-SNR 损失，单位为 dB 的负值（损失越小越好）
     
