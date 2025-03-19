@@ -559,7 +559,7 @@ def loss_fn(module: layer.Layer,
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
-        loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.01 * gmi_loss_16qam(z_original.val, aligned_x)
+        loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.1 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
         raise ValueError("Unknown loss type: " + loss_type)
     
@@ -717,10 +717,10 @@ def train(model: Model,
         y, x = batch_gen[i]
 
         # 2) 切换loss
-        if i < 200:
-            loss_type = 'gmi_loss'
-        else:
+        if i < 2000:
             loss_type = 'si_snr'
+        else:
+            loss_type = 'combined'
         
         # 3) 用 update_step_with_loss_type 或类似的函数
         #    （假设它能按loss_type调用不同的损失）
