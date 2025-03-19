@@ -402,20 +402,70 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
+# def energy(x):
+#     return jnp.sum(jnp.square(x))
+
+
+# def si_snr(target, estimate, eps=1e-8):
+#     target_energy = energy(target)
+#     dot_product = jnp.sum(target * estimate)
+#     s_target = dot_product / (target_energy + eps) * target
+#     e_noise = estimate - s_target
+#     target_energy = energy(s_target)
+#     noise_energy = energy(e_noise)
+#     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+#     return -si_snr_value 
+
 def energy(x):
+    """计算信号的能量（平方和）"""
     return jnp.sum(jnp.square(x))
 
+def normalize_by_max(signal, eps=1e-8):
+    """
+    最大值归一化：将信号缩放到 [-1, 1] 范围内
+    """
+    max_val = jnp.max(jnp.abs(signal))
+    return signal / (max_val + eps)
 
-def si_snr(target, estimate, eps=1e-8):
+def normalize_by_energy(signal, eps=1e-8):
+    """
+    单位能量归一化：将信号能量归一化为 1
+    """
+    signal_energy = jnp.sqrt(energy(signal))
+    return signal / (signal_energy + eps)
+
+def si_snr(target, estimate, eps=1e-8, normalize=False, method='energy'):
+    """
+    计算 SI-SNR 损失，单位为 dB 的负值（损失越小越好）
+    
+    参数:
+      target: 目标信号
+      estimate: 估计信号
+      eps: 防止除零的小常数
+      normalize: 是否对信号进行归一化
+      method: 使用哪种归一化方法，'energy' 为单位能量归一化，'max' 为最大值归一化
+    """
+    # 可选归一化
+    if normalize:
+        if method == 'energy':
+            target = normalize_by_energy(target, eps)
+            estimate = normalize_by_energy(estimate, eps)
+        elif method == 'max':
+            target = normalize_by_max(target, eps)
+            estimate = normalize_by_max(estimate, eps)
+        else:
+            raise ValueError("无效的归一化方法，请选择 'energy' 或 'max'")
+
+    # 计算 SI-SNR
     target_energy = energy(target)
     dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
+    s_target = dot_product / (target_energy + eps) * target  # 将 estimate 投影到 target 上
+    e_noise = estimate - s_target                           # 噪声部分
+    target_energy_proj = energy(s_target)
     noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
-
+    si_snr_value = 10 * jnp.log10((target_energy_proj + eps) / (noise_energy + eps))
+    return -si_snr_value
+        
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state: Dict,
@@ -554,7 +604,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     
     if loss_type == 'si_snr':
-        loss = 0.1 * si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+        loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
