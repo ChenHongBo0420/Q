@@ -603,33 +603,40 @@ def loss_fn(module: layer.Layer,
 #     opt_state = opt.update_fn(i, grads, opt_state)
 #     return loss, opt_state, module_state
 
-@partial(jit, backend='cpu', static_argnums=(0, 1, 10))  # 注意 static_argnums 要包含 loss_type
-def update_step_with_loss_type(module: layer.Layer,
-                               opt: cxopt.Optimizer,
-                               i: int,
-                               opt_state: tuple,
-                               module_state: Dict,
-                               y: Array,
-                               x: Array,
-                               aux: Dict,
-                               const: Dict,
-                               sparams: Dict,
-                               loss_type: str = 'gmi_loss'):
+@partial(jit, backend='cpu', static_argnums=(0, 1, 10))
+def update_step_with_loss_type(
+    module: layer.Layer,       # arg0
+    opt: cxopt.Optimizer,      # arg1
+    i: int,                    # arg2
+    opt_state: tuple,          # arg3
+    module_state: Dict,        # arg4
+    y: Array,                  # arg5
+    x: Array,                  # arg6
+    aux: Dict,                 # arg7
+    const: Dict,               # arg8
+    sparams: Dict,             # arg9
+    loss_type: str = 'si_snr'  # arg10 (被指定成 static_argnums=(...,10))
+):
     """
-    允许指定 loss_type 的 update_step。
+    函数签名中多一个 loss_type，用来调用不同的损失函数分支。
     """
+    # 1) 拿到可训练参数
     params = opt.params_fn(opt_state)
 
+    # 2) 我们包一层函数，这样就能把 loss_type 传入 loss_fn
     def wrapped_loss_fn(params_, module_state_):
         return loss_fn(module, params_, module_state_, y, x,
                        aux, const, sparams, loss_type=loss_type)
 
+    # 3) 计算loss + grads
     (loss, module_state), grads = value_and_grad(
-        wrapped_loss_fn, argnums=0, has_aux=True)(params, module_state)
-    
+        wrapped_loss_fn, argnums=0, has_aux=True
+    )(params, module_state)
+
+    # 4) 更新 opt_state
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
-
+        
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
                     overlaps: int,
@@ -687,156 +694,88 @@ def get_train_batch(ds: gdat.Input,
 #                                                    const, sparams)
 #         yield loss, opt.params_fn(opt_state), module_state
 
-def train(
-    model: Model,
-    data: gdat.Input,
-    batch_size: int = 500,
-    stage1_steps: int = 500,  # 分阶段1：训练多少步
-    stage2_steps: int = 2500,  # 分阶段2：训练多少步
-    opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1500], [1e-3, 1e-4, 1e-5]))
-):
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter: int = 2000,  # 总共2000步
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant(
+              [500, 1000], [1e-4, 1e-5, 1e-6]))
+         ):
     """
-    在第一阶段只用 GMI loss 训练 `stage1_steps` 次，
-    然后在第二阶段改用 si_snr 再训练 `stage2_steps` 次。
-    只是一个示例，可自行调整。
+    单阶段写法，但在循环内部通过 if/else 分段切换损失。
     """
-    # 1) 初始化参数、状态
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    # 2) 获取 batch 生成器
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-    # 把 batch_gen 转成可重用迭代器（或直接一次性取出来）
+    n_iter = min(n_iter, n_batch)  # 防止数据不够
+
+    # 把batch数据一次性取出来（可选）
     batch_gen = list(batch_gen)
-    n_batch = len(batch_gen)
-    
-    # 确保总批次数足够跑完 stage1_steps + stage2_steps
-    total_needed = stage1_steps + stage2_steps
-    if total_needed > n_batch:
-        print(f"Warning: 需要 {total_needed} 个 batch，但数据只有 {n_batch} 个。")
-    
-    # 3) 第一阶段：使用 GMI loss
-    print("=== Stage 1: GMI loss ===")
-    for i in tqdm(range(stage1_steps), desc='Stage1-GMI'):
-        if i >= n_batch:  # 防止超出 batch
-            break
+
+    for i in tqdm(range(n_iter), desc='training'):
+        # 1) 取第 i 个 batch
         y, x = batch_gen[i]
-        # 修改 update_step 调用：加一个 loss_type='gmi_loss'
+
+        # 2) 切换loss
+        if i < 500:
+            loss_type = 'gmi_loss'
+        else:
+            loss_type = 'si_snr'
+        
+        # 3) 用 update_step_with_loss_type 或类似的函数
+        #    （假设它能按loss_type调用不同的损失）
+        aux = core.dict_replace(aux, {'truth': x})
         loss, opt_state, module_state = update_step_with_loss_type(
-            model.module, opt, i, opt_state, module_state,
-            y, x, aux, const, sparams,
-            loss_type='gmi_loss'
+            module = model.module,
+            opt = opt,
+            i = i,
+            opt_state = opt_state,
+            module_state = module_state,
+            y = y,
+            x = x,
+            aux = aux,
+            const = const,
+            sparams = sparams,
+            loss_type = loss_type
         )
-        # print(f"Stage1, step {i}, loss_type='gmi_loss', loss={loss:.6f}")
-        if i % 100 == 0:
-            print(f"  Iter {i}, loss={loss:.4f}")
-    
-    # 3.1) 取出此时的最新 params
-    params_stage1 = opt.params_fn(opt_state)
 
-    # 4) 第二阶段：使用 SI-SNR loss
-    print("=== Stage 2: SI-SNR ===")
-    # 从 stage1_steps 继续往后取 batch
-    for j in tqdm(range(stage2_steps), desc='Stage2-SNR'):
-        idx = stage1_steps + j
-        if idx >= n_batch:
-            break
-        y, x = batch_gen[idx]
-        loss, opt_state, module_state = update_step_with_loss_type(
-            model.module, opt, idx, opt_state, module_state,
-            y, x, aux, const, sparams,
-            loss_type='si_snr'
-        )
-        # print(f"Stage2, step {idx}, loss_type='si_snr', loss={loss:.6f}")
-        if j % 100 == 0:
-            print(f"  Iter {idx}, loss={loss:.4f}")
+        # 4) yield or return or store
+        yield (loss, opt.params_fn(opt_state), module_state)
 
-    # params_stage2 = opt.params_fn(opt_state)
-
-    # 5) 返回最终结果（或 yield）
-    yield loss, opt.params_fn(opt_state), module_state
-
-# def test(model: Model,
-#          params: Dict,
-#          data: gdat.Input,
-#          eval_range: tuple=(300000, -20000),
-#          metric_fn=comm.qamqot):
-#     ''' testing, a simple forward pass
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#         data: dataset
-#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-#             BER, Q, SER and more metrics.
-
-#         Returns:
-#             evaluated matrics and equalized symbols
-#     '''
-
-#     state, aux, const, sparams = model.initvar[1:]
-#     aux = core.dict_replace(aux, {'truth': data.x})
-#     if params is None:
-#       params = model.initvar[0]
-
-#     z, _ = jit(model.module.apply,
-#                backend='cpu')({
-#                    'params': util.dict_merge(params, sparams),
-#                    'aux_inputs': aux,
-#                    'const': const,
-#                    **state
-#                }, core.Signal(data.y))
-#     metric = metric_fn(z.val,
-#                        data.x[z.t.start:z.t.stop],
-#                        scale=np.sqrt(10),
-#                        eval_range=eval_range)
-#     return metric, z
 
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
-    """
-    修正版 test，用于保证一定使用用户传入的最新 params，
-    而不是默默回退到初始参数。
-    
-    Args:
-        model: Model namedtuple return by `model_init`
-        params: 训练好的可学习参数 (不再默认允许 None)
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
         data: dataset
-        eval_range: interval which QoT is evaluated in,
-            assure proper eval of steady-state performance
-        metric_fn: metric function, comm.snrstat 或 comm.qamqot 等
-    
-    Returns:
-        (metric, z): metric 为评估结果，z 为测试时得到的信号。
-    """
-    # 解包初始化时的其它状态
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-
-    # 如果用户没传最新 params，就直接报错
     if params is None:
-        raise ValueError("请务必将训练后的 params 传给 test(...)，否则无法使用最新参数进行测试。")
+      params = model.initvar[0]
 
-    # 与静态参数合并（sparams 通常是非可训练的部分）
-    merged_params = util.dict_merge(params, sparams)
-
-    # 做一次前向传播
     z, _ = jit(model.module.apply,
                backend='cpu')({
-                   'params': merged_params,
+                   'params': util.dict_merge(params, sparams),
                    'aux_inputs': aux,
                    'const': const,
                    **state
-               },
-               core.Signal(data.y))
-
-    # 使用 metric_fn 计算性能（QAM QoT 或 SNR等）
+               }, core.Signal(data.y))
     metric = metric_fn(z.val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-
     return metric, z
