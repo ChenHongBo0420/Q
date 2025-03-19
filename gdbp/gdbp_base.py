@@ -725,7 +725,7 @@ def train(
         loss, opt_state, module_state = update_step_with_loss_type(
             model.module, opt, i, opt_state, module_state,
             y, x, aux, const, sparams,
-            loss_type='gmi_loss'
+            loss_type='si_snr'
         )
         # 您可以在这里 yield 或 print 训练信息
         if i % 100 == 0:
