@@ -557,8 +557,8 @@ def loss_fn(module: layer.Layer,
     if loss_type == 'si_snr':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     elif loss_type == 'gmi_loss':
-        # loss = gmi_loss_16qam(z_original.val, aligned_x)
-        loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+        loss = gmi_loss_16qam(z_original.val, aligned_x)
+        #loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     elif loss_type == 'combined':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.01 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
@@ -725,9 +725,9 @@ def train(
         loss, opt_state, module_state = update_step_with_loss_type(
             model.module, opt, i, opt_state, module_state,
             y, x, aux, const, sparams,
-            loss_type='si_snr'
+            loss_type='gmi_loss'
         )
-        # 您可以在这里 yield 或 print 训练信息
+        print(f"Stage1, step {i}, loss_type='gmi_loss', loss={loss:.6f}")
         if i % 100 == 0:
             print(f"  Iter {i}, loss={loss:.4f}")
     
@@ -747,6 +747,7 @@ def train(
             y, x, aux, const, sparams,
             loss_type='si_snr'
         )
+        print(f"Stage2, step {idx}, loss_type='si_snr', loss={loss:.6f}")
         if j % 100 == 0:
             print(f"  Iter {idx}, loss={loss:.4f}")
 
