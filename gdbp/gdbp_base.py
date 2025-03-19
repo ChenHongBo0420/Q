@@ -719,7 +719,7 @@ def train(model: Model,
 
         # 2) 切换loss
         if i < 500:
-            loss_type = 'gmi_loss'
+            loss_type = 'si_snr'
         else:
             loss_type = 'si_snr'
         
