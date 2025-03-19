@@ -751,10 +751,10 @@ def train(
         if j % 100 == 0:
             print(f"  Iter {idx}, loss={loss:.4f}")
 
-    params_stage2 = opt.params_fn(opt_state)
+    # params_stage2 = opt.params_fn(opt_state)
 
     # 5) 返回最终结果（或 yield）
-    return params_stage2, module_state
+    yield loss, opt.params_fn(opt_state), module_state
 
 def test(model: Model,
          params: Dict,
