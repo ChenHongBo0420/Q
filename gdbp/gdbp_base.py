@@ -573,7 +573,7 @@ def gmi_loss_16qam(
     # vmap 计算每个样本的 xent
     # logits shape: (batch,16), indices shape: (batch,)
     losses = jax.vmap(log2_softmax_cross_entropy)(logits, indices)
-    return jnp.mean(losses)
+    return -jnp.mean(losses)
 
 def loss_fn(module: layer.Layer,
             params: Dict,
