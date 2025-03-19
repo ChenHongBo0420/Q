@@ -406,15 +406,15 @@ def energy(x):
     return jnp.sum(jnp.square(x))
 
 
-# def si_snr(target, estimate, eps=1e-8):
-#     target_energy = energy(target)
-#     dot_product = jnp.sum(target * estimate)
-#     s_target = dot_product / (target_energy + eps) * target
-#     e_noise = estimate - s_target
-#     target_energy = energy(s_target)
-#     noise_energy = energy(e_noise)
-#     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-#     return -si_snr_value 
+def si_snr(target, estimate, eps=1e-8):
+    target_energy = energy(target)
+    dot_product = jnp.sum(target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value 
 
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
@@ -437,43 +437,6 @@ def energy(x):
 import jax
 import jax.numpy as jnp
 
-def si_snr_one(target: jnp.ndarray, estimate: jnp.ndarray, eps=1e-8) -> jnp.ndarray:
-    """
-    对单条 1D 信号 (time,) 计算 SI-SNR。返回一个标量(实数)。
-    返回值是“正向”的 SI-SNR（越大越好）。
-    """
-    # 计算投影分量
-    dot = jnp.sum(target * estimate)               # \sum(t_i * e_i)
-    norm_t = jnp.sum(target**2) + eps              # \sum(t_i^2)
-    s_target = dot / norm_t * target               # 在 target 方向上的投影
-    
-    # 噪声分量
-    e_noise = estimate - s_target
-    target_energy = jnp.sum(s_target**2) + eps
-    noise_energy = jnp.sum(e_noise**2) + eps
-    
-    si_snr_value = 10.0 * jnp.log10(target_energy / noise_energy)
-    return si_snr_value
-        
-def si_snr_loss_batched(target: jnp.ndarray,
-                        estimate: jnp.ndarray,
-                        eps: float = 1e-8) -> jnp.ndarray:
-    """
-    对 (batch, time) 形状的实数波形批量计算 SI-SNR，并返回“负值”的平均。
-    如果输入可能是复数，需要在外部/内部将其先转换为实数波形。
-
-    返回：标量，代表 -平均SI-SNR。
-    """
-    # 确保 target, estimate 的 shape 都是 (batch, time)
-    if target.ndim != 2 or estimate.ndim != 2:
-        raise ValueError(f"Expect target, estimate both (batch, time), got {target.shape}, {estimate.shape}")
-
-    # 使用 vmap 并行对每个样本计算 si_snr_one
-    # si_snr_one 返回正向的 SI-SNR
-    si_snr_values = jax.vmap(si_snr_one, in_axes=(0, 0))(target, estimate)  # shape (batch,)
-
-    # 对 batch 取平均，并加负号，便于最小化 (Loss)
-    return -jnp.mean(si_snr_values)
                                 
 def get_16qam_constellation() -> jnp.ndarray:
     """
@@ -573,7 +536,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'si_snr'):
+            loss_type: str = 'combined'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
@@ -591,7 +554,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     
     if loss_type == 'si_snr':
-        loss = si_snr_loss_batched(z_original.val, aligned_x)
+        loss = si_snr(z_original.val, aligned_x)
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
