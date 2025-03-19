@@ -558,7 +558,8 @@ def loss_fn(module: layer.Layer,
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
         # loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     elif loss_type == 'gmi_loss':
-        loss = gmi_loss_16qam(z_original.val, aligned_x)
+        # loss = gmi_loss_16qam(z_original.val, aligned_x)
+        loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     elif loss_type == 'combined':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.01 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
@@ -718,8 +719,8 @@ def train(model: Model,
         y, x = batch_gen[i]
 
         # 2) 切换loss
-        if i < 500:
-            loss_type = 'si_snr'
+        if i < 1000:
+            loss_type = 'gmi_loss'
         else:
             loss_type = 'si_snr'
         
