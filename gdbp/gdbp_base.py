@@ -557,7 +557,8 @@ def loss_fn(module: layer.Layer,
     if loss_type == 'si_snr':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     elif loss_type == 'gmi_loss':
-        loss = gmi_loss_16qam(z_original.val, aligned_x)
+        # loss = gmi_loss_16qam(z_original.val, aligned_x)
+        loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     elif loss_type == 'combined':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.01 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
@@ -691,7 +692,7 @@ def train(
     data: gdat.Input,
     batch_size: int = 500,
     stage1_steps: int = 500,  # 分阶段1：训练多少步
-    stage2_steps: int = 1500,  # 分阶段2：训练多少步
+    stage2_steps: int = 2500,  # 分阶段2：训练多少步
     opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))
 ):
     """
@@ -724,7 +725,7 @@ def train(
         loss, opt_state, module_state = update_step_with_loss_type(
             model.module, opt, i, opt_state, module_state,
             y, x, aux, const, sparams,
-            loss_type='si_snr'
+            loss_type='gmi_loss'
         )
         # 您可以在这里 yield 或 print 训练信息
         if i % 100 == 0:
@@ -744,7 +745,7 @@ def train(
         loss, opt_state, module_state = update_step_with_loss_type(
             model.module, opt, idx, opt_state, module_state,
             y, x, aux, const, sparams,
-            loss_type='gmi_loss'
+            loss_type='si_snr'
         )
         if j % 100 == 0:
             print(f"  Iter {idx}, loss={loss:.4f}")
