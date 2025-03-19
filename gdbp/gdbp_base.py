@@ -478,50 +478,53 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
         raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
     return x
 
-def gmi_loss_16qam(target: jnp.ndarray, estimate: jnp.ndarray, 
-                   constellation: jnp.ndarray = None, eps: float = 1e-8) -> jnp.ndarray:
+def gmi_loss_16qam(
+    target: jnp.ndarray,
+    estimate: jnp.ndarray,
+    constellation: jnp.ndarray = None,
+    eps: float = 1e-8,
+) -> jnp.ndarray:
     """
-    针对16QAM的GMI loss实现（全部在实数域中计算）：
-      - 假设 target 和 estimate 均为信号，可能为复数或者存在多余中间维度，
-        先调用 to_real() 转换为形状 (batch, 2) 的实数数组；
-      - 计算噪声： noise = estimate - target，其欧氏距离平方的均值近似为 sigma²；
-      - 对于每个样本，计算 estimate 与所有星座点（形状 (16,2)）之间的欧氏距离平方，
-        并计算高斯似然： q(y|x) ∝ exp( -||y - x||² / sigma² )；
-      - 假设星座点先验均匀（1/16），分母取所有星座点似然的平均值；
-      - 将 target 映射到星座中最近的点（使用欧氏距离），取对应的似然，
-        并计算其与分母的比值，取以2为底的对数；
-    返回所有样本对数似然比的平均值。
+    针对16QAM的GMI计算，并返回“负”的平均GMI，方便当作loss使用。
     """
     if constellation is None:
-        constellation = get_16qam_constellation()  # shape (16,2)
-    
-    # 转换为 (batch,2) 实数表示
-    target = to_real(target)
-    estimate = to_real(estimate)
-    
-    # 计算噪声及其方差 sigma²
+        constellation = get_16qam_constellation()  # shape (16, 2)
+
+    # 转 (batch, 2) 实数
+    target = to_real(target)     # (batch, 2)
+    estimate = to_real(estimate) # (batch, 2)
+
+    # 估计平均噪声功率 sigma^2
     noise = estimate - target  # shape (batch,2)
-    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps  # 一个标量
 
-    # 计算 estimate 与所有星座点之间的欧氏距离平方
-    # 结果 shape: (batch, 16)
+    # 计算与星座点的欧氏距离及似然
+    # diff: (batch, 16, 2)
     diff = estimate[:, None, :] - constellation[None, :, :]
-    dist_sq = jnp.sum(diff**2, axis=-1)
-    likelihoods = jnp.exp(-dist_sq / sigma2)  # shape (batch, 16)
+    dist_sq = jnp.sum(diff**2, axis=-1)           # (batch, 16)
+    likelihoods = jnp.exp(-dist_sq / sigma2)      # (batch, 16)
 
-    # 分母：所有星座点似然的平均值（均匀先验）
-    denom = jnp.mean(likelihoods, axis=-1)  # shape (batch,)
+    # 分母：对所有星座点似然做加权（先验1/16），可以写成 sum(...) / 16
+    denom = jnp.sum(likelihoods, axis=-1) + eps   # (batch,)
 
-    # 将 target 映射到星座中最近的点（欧氏距离最小）
+    # 找到 target 对应（或最近）的那一个星座点
     def get_index(t):
         distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
-    indices = jax.vmap(get_index)(target)  # shape (batch,)
-    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # shape (batch,)
+    indices = jax.vmap(get_index)(target)  # (batch,)
 
-    # 计算以2为底的对数似然比
-    log_ratio = jnp.log(likelihood_true / (denom + eps) + eps) / jnp.log(2)
-    return jnp.mean(log_ratio)
+    # 取“正确”点的似然
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
+
+    # 对数似然比: log2( (1/16)*likelihood_true / (1/16)*sum(likelihoods) )
+    # 省略 1/16 后，只差常数项，对优化无影响
+    ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
+    # 注意 jnp.log2(x) 可以写成 jnp.log(x) / jnp.log(2)
+    log_ratio = jnp.log(ratio) / jnp.log(2.0)
+
+    # GMI = 平均 (batch 维度)，最后取负号做 loss
+    gmi = jnp.mean(log_ratio)
+    return -gmi
 
 
 def loss_fn(module: layer.Layer,
@@ -532,7 +535,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'combined'):
+            loss_type: str = 'gmi_loss'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
