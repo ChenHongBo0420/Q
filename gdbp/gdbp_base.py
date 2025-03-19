@@ -558,7 +558,7 @@ def loss_fn(module: layer.Layer,
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
-        loss = si_snr(z_original.val, aligned_x) - gmi_loss_16qam(z_original.val, aligned_x)
+        loss = si_snr(z_original.val, aligned_x) - jnp.real(gmi_loss_16qam(z_original.val, aligned_x))
     else:
         raise ValueError("Unknown loss type: " + loss_type)
     
