@@ -696,7 +696,7 @@ def get_train_batch(ds: gdat.Input,
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter: int = 2000,  # 总共2000步
+          n_iter: int = 3000,  # 总共2000步
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant(
               [500, 1000], [1e-4, 1e-5, 1e-6]))
          ):
@@ -717,7 +717,7 @@ def train(model: Model,
         y, x = batch_gen[i]
 
         # 2) 切换loss
-        if i < 2000:
+        if i < 2500:
             loss_type = 'si_snr'
         else:
             loss_type = 'gmi_loss'
