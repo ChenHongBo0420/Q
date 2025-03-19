@@ -535,7 +535,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            loss_type: str = 'gmi_loss'):
+            loss_type: str = 'combined'):
     """
     扩展后的 loss_fn 支持三种损失计算方式：
       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
@@ -557,7 +557,7 @@ def loss_fn(module: layer.Layer,
     elif loss_type == 'gmi_loss':
         loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
-        loss = si_snr(z_original.val, aligned_x) + 0.1 * gmi_loss_16qam(z_original.val, aligned_x)
+        loss = si_snr(z_original.val, aligned_x) + gmi_loss_16qam(z_original.val, aligned_x)
     else:
         raise ValueError("Unknown loss type: " + loss_type)
     
