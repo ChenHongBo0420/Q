@@ -524,7 +524,7 @@ def gmi_loss_16qam(
 
     # GMI = 平均 (batch 维度)，最后取负号做 loss
     gmi = jnp.mean(log_ratio)
-    return -gmi
+    return gmi
 
 
 def loss_fn(module: layer.Layer,
