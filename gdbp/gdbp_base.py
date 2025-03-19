@@ -693,7 +693,7 @@ def train(
     batch_size: int = 500,
     stage1_steps: int = 500,  # 分阶段1：训练多少步
     stage2_steps: int = 2500,  # 分阶段2：训练多少步
-    opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))
+    opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1500], [1e-3, 1e-4, 1e-5]))
 ):
     """
     在第一阶段只用 GMI loss 训练 `stage1_steps` 次，
