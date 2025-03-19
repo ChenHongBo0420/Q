@@ -717,10 +717,10 @@ def train(model: Model,
         y, x = batch_gen[i]
 
         # 2) 切换loss
-        if i < 2500:
-            loss_type = 'si_snr'
-        else:
+        if i < 200:
             loss_type = 'gmi_loss'
+        else:
+            loss_type = 'si_snr'
         
         # 3) 用 update_step_with_loss_type 或类似的函数
         #    （假设它能按loss_type调用不同的损失）
