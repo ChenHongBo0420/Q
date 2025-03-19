@@ -556,10 +556,8 @@ def loss_fn(module: layer.Layer,
     
     if loss_type == 'si_snr':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-        # loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     elif loss_type == 'gmi_loss':
-        # loss = gmi_loss_16qam(z_original.val, aligned_x)
-        loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+        loss = gmi_loss_16qam(z_original.val, aligned_x)
     elif loss_type == 'combined':
         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.01 * gmi_loss_16qam(z_original.val, aligned_x)
     else:
@@ -720,9 +718,9 @@ def train(model: Model,
 
         # 2) 切换loss
         if i < 1000:
-            loss_type = 'gmi_loss'
-        else:
             loss_type = 'si_snr'
+        else:
+            loss_type = 'gmi_loss'
         
         # 3) 用 update_step_with_loss_type 或类似的函数
         #    （假设它能按loss_type调用不同的损失）
