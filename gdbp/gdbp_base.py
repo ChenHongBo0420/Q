@@ -529,51 +529,20 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     return gmi
 
 def gmi_loss_16qam(
+    pred: jnp.ndarray,
     target: jnp.ndarray,
-    estimate: jnp.ndarray,
-    constellation: jnp.ndarray = None,
-    eps: float = 1e-8,
-):
-    """
-    用 cross-entropy 方式替代 ratio log
-    """
-    if constellation is None:
-        constellation = get_16qam_constellation()
-    target = to_real(target)
-    estimate = to_real(estimate)
+    sigma: float = 1.0,
+    clip_value: float = 10.0,
+) -> jnp.ndarray:
+    mse_val = jnp.mean(jnp.square(pred - target))
+    dist = pred - target
+    dist = jnp.clip(dist, -clip_value, clip_value)
+    logpdf = norm.logpdf(dist, 0.0, sigma)
+    mean_logpdf = jnp.mean(logpdf)
+    extra_term = 2.0 * (sigma**2) * mean_logpdf
+    loss = mse_val + extra_term
+    return loss
 
-    # 噪声估计
-    noise = estimate - target
-    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
-
-    # 距离
-    diff = estimate[:, None, :] - constellation[None, :, :]
-    dist_sq = jnp.sum(diff**2, axis=-1)  # (batch, 16)
-
-    # softmax
-    logits = -dist_sq / sigma2  # bigger => more likely
-    # 这里为了 log2, 其实可以先用 jax.nn.log_softmax(logits) / log(2)
-    # 也行。我们直接用 softmax + log2:
-    def log2_softmax_cross_entropy(logits_, label_):
-        # logits_: (16,) -> probabilities
-        # label_: scalar index
-        # or one-hot
-        # 1) log softmax:
-        logsumexp_ = jax.scipy.special.logsumexp(logits_)
-        log_softmax_ = logits_ - logsumexp_
-        # 2) 取 label_ 的位置
-        # 注意log2
-        return - (log_softmax_[label_] / jnp.log(2.0))
-
-    def get_index(t):
-        distances = jnp.sum((constellation - t)**2, axis=-1)
-        return jnp.argmin(distances)
-
-    indices = jax.vmap(get_index)(target)  # (batch,)
-    # vmap 计算每个样本的 xent
-    # logits shape: (batch,16), indices shape: (batch,)
-    losses = jax.vmap(log2_softmax_cross_entropy)(logits, indices)
-    return -jnp.mean(losses)
 
 def loss_fn(module: layer.Layer,
             params: Dict,
