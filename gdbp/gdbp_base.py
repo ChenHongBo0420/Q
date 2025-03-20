@@ -527,83 +527,72 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     # GMI = 平均 (batch 维度)，最后取负号做 loss
 #     gmi = jnp.mean(log_ratio)
 #     return gmi
-
-def si_snr_point(ref: jnp.ndarray, est: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
-    """
-    把 ref, est 都视为单个“向量样本”(shape=(2,))，类比 SI-SNR 的计算步骤：
-      - 先把 est 在 ref 方向上做投影 s_target
-      - e_noise = est - s_target
-      - SI-SNR(dB) = 10 * log10( ||s_target||^2 / ||e_noise||^2 )
-
-    注：这是“简化版”，只处理2D向量，不含更多波形帧。
-    """
-    dot = jnp.dot(ref, est)                # ref ⋅ est
-    ref_energy = jnp.dot(ref, ref)
-    s_target = (dot / (ref_energy + eps)) * ref
-    e_noise = est - s_target
-
-    t_energy = jnp.dot(s_target, s_target)
-    n_energy = jnp.dot(e_noise, e_noise)
-
-    si_snr_val = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
-    return si_snr_val
         
-import jax
-import jax.numpy as jnp
-from jax.scipy.special import logsumexp
-
 def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
-    constellation: jnp.ndarray = None,
-    tau: float = 1.0,
+    centroids: jnp.ndarray = None,
+    tau: float = 0.5,
+    use_log2: bool = False,
+    fix_prior: bool = False,
     eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    使用 SI-SNR 作为相似度度量的 InfoNCE 损失，针对 16QAM 星座场景：
-      - target, estimate : (batch,2) 或复数(需要转实)
-      - constellation    : (16,2) QAM星座；若 None 则内部获取
-      - tau              : “温度”系数，类似在 InfoNCE 里缩放相似度
-      - eps              : 数值安全常数
+    基于“质心对比”的损失函数，适用于16QAM:
+      - 假设 16 个星座点就是 16 个类别的质心 (可固定或可训练的 centroids)。
+      - 对每个样本 (estimate)，找到与 target 最接近的质心当“正确类”。
+      - 使用对比学习(softmax)方式，让正确类相似度高，错误类低。
+
+    参数:
+      target:   (batch,...) 真实星座位置；若复数则转换为 (batch,2)
+      estimate: (batch,...) 网络输出；同上
+      centroids:(16,2) 或 None. 若 None 则默认使用 get_16qam_constellation()
+      tau:      温度系数, 缩放相似度
+      use_log2: 是否将对数换成 log base 2 (类似 GMI)
+      fix_prior:若为 True, 在正确logit上加 log(16) 偏置, 模拟 GMI 的先验(×16)
+      eps:      数值稳定常数
 
     返回:
-      标量损失(越小越好)。它在对比学习里“最大化对正确星座点的 SI-SNR”，
-      同时压低对错误星座点的 SI-SNR。
+      标量损失 (越小越好)。
     """
+    # 1) 若未给定 centroids, 用默认 16QAM
+    if centroids is None:
+        centroids = get_16qam_constellation()  # shape (16,2)
 
-    if constellation is None:
-        constellation = get_16qam_constellation()  # (16,2)
-
-    # 1) 转成 (batch,2) 实数
+    # 2) 转为 (batch,2) 实数
     target = to_real(target)
     estimate = to_real(estimate)
 
-    # 2) 找到“正确星座点”索引：把 target 与 constellation 的距离最小者当正确
+    # 3) 找到“正确”质心: 这里简化为与 target 最近的那一个
+    #    如果您有真实label可用，就直接用 label 索引; 这里示例: nearest
     def get_index(t):
-        dist_sq = jnp.sum((constellation - t)**2, axis=-1)
+        dist_sq = jnp.sum((centroids - t)**2, axis=-1)
         return jnp.argmin(dist_sq)
     correct_indices = jax.vmap(get_index)(target)  # (batch,)
 
-    # 3) 逐样本计算 estimate 与每个星座 c_i 的 SI-SNR => shape (batch,16)
-    def sisnr_with_constellation(est_vec):
-        # 对 single sample est_vec, shape(2,)
-        # 逐星座点计算 si_snr_point(c, est_vec)
-        return jax.vmap(lambda c: si_snr_point(c, est_vec, eps=eps))(constellation)
+    # 4) 计算 estimate 与各个质心的距离 => 相似度 logits
+    diff = estimate[:, None, :] - centroids[None, :, :]  # (batch,16,2)
+    dist_sq = jnp.sum(diff**2, axis=-1)                  # (batch,16)
+    # 相似度 = - distance / tau
+    # 也可加 sigma^2, 这里省略
+    logits = - dist_sq / tau  # (batch,16)
 
-    sisnr_matrix = jax.vmap(sisnr_with_constellation)(estimate)  # (batch,16)
-
-    # 4) 转成 logits = SISNR / tau；越大的SISNR =>越大的logits
-    logits = sisnr_matrix / tau  # (batch,16)
-
-    # 5) InfoNCE: 
-    #   对于每个样本 b，有正确 index = correct_indices[b]
-    #   loss_b = -( logits_correct - logsumexp(logits[b,:]) )
+    # 5) 如果 fix_prior=True, 给正确logit加 log(16), 模拟 GMI "×16"
     batch_idx = jnp.arange(estimate.shape[0])
-    logits_correct = logits[batch_idx, correct_indices]  # shape (batch,)
-    lse = logsumexp(logits, axis=-1)                     # shape (batch,)
+    logits_correct = logits[batch_idx, correct_indices]
+    if fix_prior:
+        logits_correct = logits_correct + jnp.log(16.0)
 
-    loss_b = -(logits_correct - lse)
-    loss = jnp.mean(loss_b)
+    # 6) InfoNCE-like  =>  - log ( exp(correct) / sum(exp(logits)) )
+    from jax.scipy.special import logsumexp
+    lse = logsumexp(logits, axis=-1)  # (batch,)
+    loss_sample = -(logits_correct - lse)  # (batch,)
+    loss = jnp.mean(loss_sample)           # 标量
+
+    # 7) 若 use_log2, 则除以 log(2)
+    if use_log2:
+        loss = loss / jnp.log(2.0)
+
     return loss
 
 
