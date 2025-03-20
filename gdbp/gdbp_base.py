@@ -528,6 +528,26 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     gmi = jnp.mean(log_ratio)
 #     return gmi
 
+def si_snr_point(ref: jnp.ndarray, est: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
+    """
+    把 ref, est 都视为单个“向量样本”(shape=(2,))，类比 SI-SNR 的计算步骤：
+      - 先把 est 在 ref 方向上做投影 s_target
+      - e_noise = est - s_target
+      - SI-SNR(dB) = 10 * log10( ||s_target||^2 / ||e_noise||^2 )
+
+    注：这是“简化版”，只处理2D向量，不含更多波形帧。
+    """
+    dot = jnp.dot(ref, est)                # ref ⋅ est
+    ref_energy = jnp.dot(ref, ref)
+    s_target = (dot / (ref_energy + eps)) * ref
+    e_noise = est - s_target
+
+    t_energy = jnp.dot(s_target, s_target)
+    n_energy = jnp.dot(e_noise, e_noise)
+
+    si_snr_val = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
+    return si_snr_val
+        
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
@@ -536,49 +556,56 @@ def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
-    sigma2: float = None,
+    tau: float = 1.0,
     eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    一个可选写法：允许用户不传 constellation 和 sigma2，
-    函数内部自动处理。
+    使用 SI-SNR 作为相似度度量的 InfoNCE 损失，针对 16QAM 星座场景：
+      - target, estimate : (batch,2) 或复数(需要转实)
+      - constellation    : (16,2) QAM星座；若 None 则内部获取
+      - tau              : “温度”系数，类似在 InfoNCE 里缩放相似度
+      - eps              : 数值安全常数
+
+    返回:
+      标量损失(越小越好)。它在对比学习里“最大化对正确星座点的 SI-SNR”，
+      同时压低对错误星座点的 SI-SNR。
     """
 
-    # 1) 如果调用方没传 constellation，就用默认 16QAM 星座
     if constellation is None:
-        constellation = get_16qam_constellation()
+        constellation = get_16qam_constellation()  # (16,2)
 
-    # 2) 将输入转为 (batch,2) 实数
+    # 1) 转成 (batch,2) 实数
     target = to_real(target)
     estimate = to_real(estimate)
 
-    # 3) 如果没指定 sigma2, 我们就自己估计
-    if sigma2 is None:
-        noise = estimate - target
-        sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
-
-    # 4) 计算到所有星座点的欧氏距离 => likelihood
-    diff = estimate[:, None, :] - constellation[None, :, :]
-    dist_sq = jnp.sum(diff**2, axis=-1)   # (batch, 16)
-    likelihoods = jnp.exp(-dist_sq / sigma2)  # (batch, 16)
-
-    denom = jnp.sum(likelihoods, axis=-1) + eps
-
-    # 找到最接近 target 的那个星座点索引
+    # 2) 找到“正确星座点”索引：把 target 与 constellation 的距离最小者当正确
     def get_index(t):
-        distances = jnp.sum((constellation - t)**2, axis=-1)
-        return jnp.argmin(distances)
+        dist_sq = jnp.sum((constellation - t)**2, axis=-1)
+        return jnp.argmin(dist_sq)
+    correct_indices = jax.vmap(get_index)(target)  # (batch,)
 
-    indices = jax.vmap(get_index)(target)
-    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
+    # 3) 逐样本计算 estimate 与每个星座 c_i 的 SI-SNR => shape (batch,16)
+    def sisnr_with_constellation(est_vec):
+        # 对 single sample est_vec, shape(2,)
+        # 逐星座点计算 si_snr_point(c, est_vec)
+        return jax.vmap(lambda c: si_snr_point(c, est_vec, eps=eps))(constellation)
 
-    ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
-    # log base 2
-    log_ratio = jnp.log(ratio) / jnp.log(2.0)
+    sisnr_matrix = jax.vmap(sisnr_with_constellation)(estimate)  # (batch,16)
 
-    # 取平均后再取负号
-    gmi = jnp.mean(log_ratio)
-    return gmi
+    # 4) 转成 logits = SISNR / tau；越大的SISNR =>越大的logits
+    logits = sisnr_matrix / tau  # (batch,16)
+
+    # 5) InfoNCE: 
+    #   对于每个样本 b，有正确 index = correct_indices[b]
+    #   loss_b = -( logits_correct - logsumexp(logits[b,:]) )
+    batch_idx = jnp.arange(estimate.shape[0])
+    logits_correct = logits[batch_idx, correct_indices]  # shape (batch,)
+    lse = logsumexp(logits, axis=-1)                     # shape (batch,)
+
+    loss_b = -(logits_correct - lse)
+    loss = jnp.mean(loss_b)
+    return loss
+
 
 def loss_fn(module: layer.Layer,
             params: Dict,
