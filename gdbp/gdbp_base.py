@@ -532,7 +532,7 @@ def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
-    tau: float = 1.0,
+    tau: float = 0.5,
     eps: float = 1e-8,
 ) -> jnp.ndarray:
     """
@@ -778,9 +778,9 @@ def train(model: Model,
 
         # 2) 切换loss
         if i < 2500:
-            loss_type = 'combined'
+            loss_type = 'gmi_loss'
         else:
-            loss_type = 'combined'
+            loss_type = 'gmi_loss'
         
         # 3) 用 update_step_with_loss_type 或类似的函数
         #    （假设它能按loss_type调用不同的损失）
