@@ -528,20 +528,37 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     gmi = jnp.mean(log_ratio)
 #     return gmi
 
-def gmi_loss_16qam(
-    pred: jnp.ndarray,
-    target: jnp.ndarray,
-    sigma: float = 1.0,
-    clip_value: float = 10.0,
-) -> jnp.ndarray:
-    mse_val = jnp.mean(jnp.square(pred - target))
-    dist = pred - target
-    dist = jnp.clip(dist, -clip_value, clip_value)
-    logpdf = norm.logpdf(dist, 0.0, sigma)
-    mean_logpdf = jnp.mean(logpdf)
+from jax.scipy.stats import norm
+
+def gmi_loss_16qam(pred, target, sigma=1.0, clip_value=10.0):
+    """
+    一个在复数场景下的 "MSE + logpdf" 示例，可根据需要改名或微调。
+    """
+    # 1) 原本的 MSE (对复数，通常是 |pred - target|^2 的均值)
+    #    jnp.square(jnp.abs(...)) => (实部^2 + 虚部^2)
+    mse_val = jnp.mean(jnp.square(jnp.abs(pred - target)))
+
+    # 2) 分别计算实部、虚部误差并裁剪
+    dist_real = jnp.real(pred) - jnp.real(target)
+    dist_imag = jnp.imag(pred) - jnp.imag(target)
+
+    dist_real = jnp.clip(dist_real, -clip_value, clip_value)
+    dist_imag = jnp.clip(dist_imag, -clip_value, clip_value)
+
+    # 3) 计算对数似然(假设实部、虚部都是独立的 N(0, sigma^2))
+    #    => 每个维度一个 norm.logpdf
+    logpdf_real = norm.logpdf(dist_real, loc=0.0, scale=sigma)
+    logpdf_imag = norm.logpdf(dist_imag, loc=0.0, scale=sigma)
+
+    # 4) 合并(把实部和虚部的 logpdf 加起来)，再取平均
+    mean_logpdf = jnp.mean(logpdf_real + logpdf_imag)
+
+    # 5) 形成最终 loss: 例如 "MSE + 2*sigma^2 * mean_logpdf"
     extra_term = 2.0 * (sigma**2) * mean_logpdf
     loss = mse_val + extra_term
+
     return loss
+
 
 
 def loss_fn(module: layer.Layer,
