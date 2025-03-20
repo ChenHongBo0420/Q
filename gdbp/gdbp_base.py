@@ -416,68 +416,32 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
         
-def multi_segment_si_snr(
-    target: jnp.ndarray,
+def si_snr_flattened(
+    target: jnp.ndarray, 
     estimate: jnp.ndarray,
-    segment_sizes=(512, 2048), 
-    weights=None,
-    eps=1e-8
+    eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    多分段/多尺度 SI-SNR:
-      - 将波形按多种分段大小分别做 SI-SNR, 再加权求和.
-      - 在光纤场景中, 可根据信道色散记忆(如几百到几千符号), 
-        选不同 segment_sizes 进行局部 vs. 全局对齐.
-
-    参数:
-      target, estimate: (batch, T) 或 (T,) 时域序列
-      segment_sizes: tuple中包含若干分段长度
-      weights: 对应每个 segment_size 的权重, 若 None 则等权
-      eps: 数值安全常数
-
-    返回:
-      标量: 多段加权后的总损失(越小越好).
+    将( T, 2 )形状(双偏振)的时域信号展开成( 2T, )后,
+    计算单通道意义下的SI-SNR, 返回其负值做loss.
     """
 
-    # 如果没有提供权重, 缺省等权
-    if weights is None:
-        weights = [1.0] * len(segment_sizes)
+    # 假设 (T,2)
+    # flatten => (2T,)
+    target_1d = jnp.reshape(target, (-1,))
+    estimate_1d = jnp.reshape(estimate, (-1,))
 
-    # 保证两者同样长
-    if target.shape != estimate.shape:
-        raise ValueError("target & estimate must have the same shape")
+    # 然后调用和单通道同样的si_snr逻辑
+    dot_product = jnp.sum(target_1d * estimate_1d)
+    target_energy = jnp.sum(target_1d**2) + eps
+    s_target = (dot_product / target_energy) * target_1d
 
-    # 如果是 batch 维度, 先做一维展开/处理(根据需要)
-    # 这里简化假设 shape=(T,) -> 单条序列
-    # 若您要支持 batch, 可以遍历 batch 再取平均, 或写更复杂的 vmap.
+    e_noise = estimate_1d - s_target
+    t_energy = jnp.sum(s_target**2)
+    n_energy = jnp.sum(e_noise**2)
 
-    total_loss = 0.0
-    total_weight = 0.0
-
-    T = target.shape[0]
-    for seg_size, w in zip(segment_sizes, weights):
-        # 根据 seg_size 滑窗遍历, 或直接分块(此处演示简单分块)
-        # 例如分段后对每段做 si_snr, 最后取平均
-        n_segs = T // seg_size  # 向下取整
-        seg_loss = 0.0
-        count = 0
-        for i in range(n_segs):
-            start = i * seg_size
-            end = (i+1) * seg_size
-            seg_t = target[start:end]
-            seg_e = estimate[start:end]
-            seg_loss += si_snr(seg_t, seg_e, eps=eps)
-            count += 1
-        if count > 0:
-            seg_loss = seg_loss / count
-        # 加权累计
-        total_loss += w * seg_loss
-        total_weight += w
-
-    if total_weight > 0:
-        total_loss = total_loss / total_weight
-
-    return total_loss
+    si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
+    return -si_snr_value
 
         
 def loss_fn(module: layer.Layer,
@@ -495,7 +459,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = multi_segment_si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
                     
                     
