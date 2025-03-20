@@ -532,7 +532,7 @@ def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
-    tau: float = 0.4,
+    tau: float = 0.6,
     eps: float = 1e-8,
 ) -> jnp.ndarray:
     """
