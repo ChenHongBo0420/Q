@@ -778,9 +778,9 @@ def train(model: Model,
 
         # 2) 切换loss
         if i < 2500:
-            loss_type = 'gmi_loss'
+            loss_type = 'combined'
         else:
-            loss_type = 'gmi_loss'
+            loss_type = 'combined'
         
         # 3) 用 update_step_with_loss_type 或类似的函数
         #    （假设它能按loss_type调用不同的损失）
