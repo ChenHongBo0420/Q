@@ -415,70 +415,135 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
+        
+def multi_segment_si_snr(
+    target: jnp.ndarray,
+    estimate: jnp.ndarray,
+    segment_sizes=(512, 2048), 
+    weights=None,
+    eps=1e-8
+) -> jnp.ndarray:
+    """
+    多分段/多尺度 SI-SNR:
+      - 将波形按多种分段大小分别做 SI-SNR, 再加权求和.
+      - 在光纤场景中, 可根据信道色散记忆(如几百到几千符号), 
+        选不同 segment_sizes 进行局部 vs. 全局对齐.
+
+    参数:
+      target, estimate: (batch, T) 或 (T,) 时域序列
+      segment_sizes: tuple中包含若干分段长度
+      weights: 对应每个 segment_size 的权重, 若 None 则等权
+      eps: 数值安全常数
+
+    返回:
+      标量: 多段加权后的总损失(越小越好).
+    """
+
+    # 如果没有提供权重, 缺省等权
+    if weights is None:
+        weights = [1.0] * len(segment_sizes)
+
+    # 保证两者同样长
+    if target.shape != estimate.shape:
+        raise ValueError("target & estimate must have the same shape")
+
+    # 如果是 batch 维度, 先做一维展开/处理(根据需要)
+    # 这里简化假设 shape=(T,) -> 单条序列
+    # 若您要支持 batch, 可以遍历 batch 再取平均, 或写更复杂的 vmap.
+
+    total_loss = 0.0
+    total_weight = 0.0
+
+    T = target.shape[0]
+    for seg_size, w in zip(segment_sizes, weights):
+        # 根据 seg_size 滑窗遍历, 或直接分块(此处演示简单分块)
+        # 例如分段后对每段做 si_snr, 最后取平均
+        n_segs = T // seg_size  # 向下取整
+        seg_loss = 0.0
+        count = 0
+        for i in range(n_segs):
+            start = i * seg_size
+            end = (i+1) * seg_size
+            seg_t = target[start:end]
+            seg_e = estimate[start:end]
+            seg_loss += si_snr(seg_t, seg_e, eps=eps)
+            count += 1
+        if count > 0:
+            seg_loss = seg_loss / count
+        # 加权累计
+        total_loss += w * seg_loss
+        total_weight += w
+
+    if total_weight > 0:
+        total_loss = total_loss / total_weight
+
+    return total_loss
 
         
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = multi_segment_si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
                     
-
-import jax
-import jax.numpy as jnp
+                    
+############# GMI-LOSS WITH TWO PART TRINING ###################
+# import jax
+# import jax.numpy as jnp
 
                                 
-def get_16qam_constellation() -> jnp.ndarray:
-    """
-    定义16QAM的星座点，返回形状为 (16, 2) 的实数数组，
-    每个星座点以 [real, imag] 表示。
-    取未归一化的 [-3, -1, 1, 3] 网格，然后归一化到单位平均能量。
-    """
-    re = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
-    im = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
-    points = jnp.array([[r, i] for r in re for i in im])
-    norm_factor = jnp.sqrt(jnp.mean(jnp.sum(points**2, axis=-1)))
-    return points / norm_factor
+# def get_16qam_constellation() -> jnp.ndarray:
+#     """
+#     定义16QAM的星座点，返回形状为 (16, 2) 的实数数组，
+#     每个星座点以 [real, imag] 表示。
+#     取未归一化的 [-3, -1, 1, 3] 网格，然后归一化到单位平均能量。
+#     """
+#     re = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
+#     im = jnp.array([-3, -1, 1, 3], dtype=jnp.float32)
+#     points = jnp.array([[r, i] for r in re for i in im])
+#     norm_factor = jnp.sqrt(jnp.mean(jnp.sum(points**2, axis=-1)))
+#     return points / norm_factor
 
-def to_real(x: jnp.ndarray) -> jnp.ndarray:
-    """
-    将输入 x 转换为实数表示，输出形状为 (batch, 2)。
-    规则如下：
-      - 如果 x 为复数数组，则转换为 [real, imag] 表示；
-      - 如果 x 已为实数，但最后一维不是2，则将除 batch 和最后一维外的所有维度 flatten，
-        然后对每个样本取平均，得到形状 (batch,2)。
-    """
-    if jnp.iscomplexobj(x):
-        x = jnp.stack([jnp.real(x), jnp.imag(x)], axis=-1)
-    # 假设 x 形状为 (batch, ..., 2)
-    batch = x.shape[0]
-    # 如果中间维度的乘积大于 1，则 reshape 为 (batch, extra, 2) 后取平均
-    if x.ndim > 2:
-        extra = 1
-        for d in x.shape[1:-1]:
-            extra *= d
-        if extra > 1:
-            x = jnp.reshape(x, (batch, -1, 2))
-            x = jnp.mean(x, axis=1)
-        else:
-            x = jnp.reshape(x, (batch, 2))
-    else:
-        # 如果 x 维度已经是 (batch,2) 则直接返回
-        x = jnp.reshape(x, (batch, 2))
-    if x.shape[-1] != 2:
-        raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
-    return x
+# def to_real(x: jnp.ndarray) -> jnp.ndarray:
+#     """
+#     将输入 x 转换为实数表示，输出形状为 (batch, 2)。
+#     规则如下：
+#       - 如果 x 为复数数组，则转换为 [real, imag] 表示；
+#       - 如果 x 已为实数，但最后一维不是2，则将除 batch 和最后一维外的所有维度 flatten，
+#         然后对每个样本取平均，得到形状 (batch,2)。
+#     """
+#     if jnp.iscomplexobj(x):
+#         x = jnp.stack([jnp.real(x), jnp.imag(x)], axis=-1)
+#     # 假设 x 形状为 (batch, ..., 2)
+#     batch = x.shape[0]
+#     # 如果中间维度的乘积大于 1，则 reshape 为 (batch, extra, 2) 后取平均
+#     if x.ndim > 2:
+#         extra = 1
+#         for d in x.shape[1:-1]:
+#             extra *= d
+#         if extra > 1:
+#             x = jnp.reshape(x, (batch, -1, 2))
+#             x = jnp.mean(x, axis=1)
+#         else:
+#             x = jnp.reshape(x, (batch, 2))
+#     else:
+#         # 如果 x 维度已经是 (batch,2) 则直接返回
+#         x = jnp.reshape(x, (batch, 2))
+#     if x.shape[-1] != 2:
+#         raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
+#     return x
 
 # def gmi_loss_16qam(
 #     target: jnp.ndarray,
@@ -528,180 +593,162 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
 #     gmi = jnp.mean(log_ratio)
 #     return gmi
         
-def gmi_loss_16qam(
-    target: jnp.ndarray,
-    estimate: jnp.ndarray,
-    centroids: jnp.ndarray = None,
-    tau: float = 0.5,
-    use_log2: bool = False,
-    fix_prior: bool = False,
-    eps: float = 1e-8
-) -> jnp.ndarray:
-    """
-    基于“质心对比”的损失函数，适用于16QAM:
-      - 假设 16 个星座点就是 16 个类别的质心 (可固定或可训练的 centroids)。
-      - 对每个样本 (estimate)，找到与 target 最接近的质心当“正确类”。
-      - 使用对比学习(softmax)方式，让正确类相似度高，错误类低。
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Any,
+#             x: Any,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,
+#             loss_type: str = 'si_snr'):
+#     """
+#     扩展后的 loss_fn 支持三种损失计算方式：
+#       - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
+#       - 'gmi_loss': 针对16QAM的 GMI loss（基于高斯似然计算互信息）
+#       - 'combined': SI-SNR loss + 0.1 * GMI loss
 
-    参数:
-      target:   (batch,...) 真实星座位置；若复数则转换为 (batch,2)
-      estimate: (batch,...) 网络输出；同上
-      centroids:(16,2) 或 None. 若 None 则默认使用 get_16qam_constellation()
-      tau:      温度系数, 缩放相似度
-      use_log2: 是否将对数换成 log base 2 (类似 GMI)
-      fix_prior:若为 True, 在正确logit上加 log(16) 偏置, 模拟 GMI 的先验(×16)
-      eps:      数值稳定常数
-
-    返回:
-      标量损失 (越小越好)。
-    """
-    # 1) 若未给定 centroids, 用默认 16QAM
-    if centroids is None:
-        centroids = get_16qam_constellation()  # shape (16,2)
-
-    # 2) 转为 (batch,2) 实数
-    target = to_real(target)
-    estimate = to_real(estimate)
-
-    # 3) 找到“正确”质心: 这里简化为与 target 最近的那一个
-    #    如果您有真实label可用，就直接用 label 索引; 这里示例: nearest
-    def get_index(t):
-        dist_sq = jnp.sum((centroids - t)**2, axis=-1)
-        return jnp.argmin(dist_sq)
-    correct_indices = jax.vmap(get_index)(target)  # (batch,)
-
-    # 4) 计算 estimate 与各个质心的距离 => 相似度 logits
-    diff = estimate[:, None, :] - centroids[None, :, :]  # (batch,16,2)
-    dist_sq = jnp.sum(diff**2, axis=-1)                  # (batch,16)
-    # 相似度 = - distance / tau
-    # 也可加 sigma^2, 这里省略
-    logits = - dist_sq / tau  # (batch,16)
-
-    # 5) 如果 fix_prior=True, 给正确logit加 log(16), 模拟 GMI "×16"
-    batch_idx = jnp.arange(estimate.shape[0])
-    logits_correct = logits[batch_idx, correct_indices]
-    if fix_prior:
-        logits_correct = logits_correct + jnp.log(16.0)
-
-    # 6) InfoNCE-like  =>  - log ( exp(correct) / sum(exp(logits)) )
-    from jax.scipy.special import logsumexp
-    lse = logsumexp(logits, axis=-1)  # (batch,)
-    loss_sample = -(logits_correct - lse)  # (batch,)
-    loss = jnp.mean(loss_sample)           # 标量
-
-    # 7) 若 use_log2, 则除以 log(2)
-    if use_log2:
-        loss = loss / jnp.log(2.0)
-
-    return loss
-
-
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Any,
-            x: Any,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,
-            loss_type: str = 'si_snr'):
-    """
-    扩展后的 loss_fn 支持三种损失计算方式：
-      - 'si_snr'  : SI-SNR loss（适用于复数信号，使用共轭内积）
-      - 'gmi_loss': 针对16QAM的 GMI loss（基于高斯似然计算互信息）
-      - 'combined': SI-SNR loss + 0.1 * GMI loss
-
-    注意：假设网络输出和目标信号均为复数信号（或 [real, imag] 格式）。
-    """
-    # 合并参数
-    params = util.dict_merge(params, sparams)
-    # 应用模块，得到输出信号及更新后的状态
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    # 对齐目标信号
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+#     注意：假设网络输出和目标信号均为复数信号（或 [real, imag] 格式）。
+#     """
+#     # 合并参数
+#     params = util.dict_merge(params, sparams)
+#     # 应用模块，得到输出信号及更新后的状态
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+#     # 对齐目标信号
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
     
-    if loss_type == 'si_snr':
-        loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    elif loss_type == 'gmi_loss':
-        loss = gmi_loss_16qam(z_original.val, aligned_x)
-    elif loss_type == 'combined':
-        loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.1 * gmi_loss_16qam(z_original.val, aligned_x)
-    else:
-        raise ValueError("Unknown loss type: " + loss_type)
+#     if loss_type == 'si_snr':
+#         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     elif loss_type == 'gmi_loss':
+#         loss = gmi_loss_16qam(z_original.val, aligned_x)
+#     elif loss_type == 'combined':
+#         loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))  + 0.1 * gmi_loss_16qam(z_original.val, aligned_x)
+#     else:
+#         raise ValueError("Unknown loss type: " + loss_type)
     
-    return loss, updated_state
+#     return loss, updated_state
 
-
-# @partial(jit, backend='cpu', static_argnums=(0, 1))
-# def update_step(module: layer.Layer,
-#                 opt: cxopt.Optimizer,
-#                 i: int,
-#                 opt_state: tuple,
-#                 module_state: Dict,
-#                 y: Array,
-#                 x: Array,
-#                 aux: Dict,
-#                 const: Dict,
-#                 sparams: Dict):
-#     ''' single backprop step
-
-#         Args:
-#             model: model returned by `model_init`
-#             opt: optimizer
-#             i: iteration counter
-#             opt_state: optimizer state
-#             module_state: module state
-#             y: transmitted waveforms
-#             x: aligned sent symbols
-#             aux: auxiliary input
-#             const: contants (internal info generated by model)
-#             sparams: static parameters
-
-#         Return:
-#             loss, updated module state
-#     '''
-
+# @partial(jit, backend='cpu', static_argnums=(0, 1, 10))
+# def update_step_with_loss_type(
+#     module: layer.Layer,       # arg0
+#     opt: cxopt.Optimizer,      # arg1
+#     i: int,                    # arg2
+#     opt_state: tuple,          # arg3
+#     module_state: Dict,        # arg4
+#     y: Array,                  # arg5
+#     x: Array,                  # arg6
+#     aux: Dict,                 # arg7
+#     const: Dict,               # arg8
+#     sparams: Dict,             # arg9
+#     loss_type: str = 'si_snr'  # arg10 (被指定成 static_argnums=(...,10))
+# ):
+#     """
+#     函数签名中多一个 loss_type，用来调用不同的损失函数分支。
+#     """
+#     # 1) 拿到可训练参数
 #     params = opt.params_fn(opt_state)
+
+#     # 2) 我们包一层函数，这样就能把 loss_type 传入 loss_fn
+#     def wrapped_loss_fn(params_, module_state_):
+#         return loss_fn(module, params_, module_state_, y, x,
+#                        aux, const, sparams, loss_type=loss_type)
+
+#     # 3) 计算loss + grads
 #     (loss, module_state), grads = value_and_grad(
-#         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-#                                           aux, const, sparams)
+#         wrapped_loss_fn, argnums=0, has_aux=True
+#     )(params, module_state)
+
+#     # 4) 更新 opt_state
 #     opt_state = opt.update_fn(i, grads, opt_state)
 #     return loss, opt_state, module_state
 
-@partial(jit, backend='cpu', static_argnums=(0, 1, 10))
-def update_step_with_loss_type(
-    module: layer.Layer,       # arg0
-    opt: cxopt.Optimizer,      # arg1
-    i: int,                    # arg2
-    opt_state: tuple,          # arg3
-    module_state: Dict,        # arg4
-    y: Array,                  # arg5
-    x: Array,                  # arg6
-    aux: Dict,                 # arg7
-    const: Dict,               # arg8
-    sparams: Dict,             # arg9
-    loss_type: str = 'si_snr'  # arg10 (被指定成 static_argnums=(...,10))
-):
-    """
-    函数签名中多一个 loss_type，用来调用不同的损失函数分支。
-    """
-    # 1) 拿到可训练参数
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter: int = 3000,  # 总共2000步
+#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant(
+#               [500, 1000], [1e-4, 1e-5, 1e-6]))
+#          ):
+#     """
+#     单阶段写法，但在循环内部通过 if/else 分段切换损失。
+#     """
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = min(n_iter, n_batch)  # 防止数据不够
+
+#     # 把batch数据一次性取出来（可选）
+#     batch_gen = list(batch_gen)
+
+#     for i in tqdm(range(n_iter), desc='training'):
+#         # 1) 取第 i 个 batch
+#         y, x = batch_gen[i]
+
+#         # 2) 切换loss
+#         if i < 2500:
+#             loss_type = 'gmi_loss'
+#         else:
+#             loss_type = 'gmi_loss'
+        
+#         # 3) 用 update_step_with_loss_type 或类似的函数
+#         #    （假设它能按loss_type调用不同的损失）
+#         aux = core.dict_replace(aux, {'truth': x})
+#         loss, opt_state, module_state = update_step_with_loss_type(
+#             module = model.module,
+#             opt = opt,
+#             i = i,
+#             opt_state = opt_state,
+#             module_state = module_state,
+#             y = y,
+#             x = x,
+#             aux = aux,
+#             const = const,
+#             sparams = sparams,
+#             loss_type = loss_type
+#         )
+
+#         # 4) yield or return or store
+#         yield (loss, opt.params_fn(opt_state), module_state)       
+############# GMI-LOSS WITH TWO PART TRINING ###################
+
+@partial(jit, backend='cpu', static_argnums=(0, 1))
+def update_step(module: layer.Layer,
+                opt: cxopt.Optimizer,
+                i: int,
+                opt_state: tuple,
+                module_state: Dict,
+                y: Array,
+                x: Array,
+                aux: Dict,
+                const: Dict,
+                sparams: Dict):
+    ''' single backprop step
+
+        Args:
+            model: model returned by `model_init`
+            opt: optimizer
+            i: iteration counter
+            opt_state: optimizer state
+            module_state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
+
+        Return:
+            loss, updated module state
+    '''
+
     params = opt.params_fn(opt_state)
-
-    # 2) 我们包一层函数，这样就能把 loss_type 传入 loss_fn
-    def wrapped_loss_fn(params_, module_state_):
-        return loss_fn(module, params_, module_state_, y, x,
-                       aux, const, sparams, loss_type=loss_type)
-
-    # 3) 计算loss + grads
     (loss, module_state), grads = value_and_grad(
-        wrapped_loss_fn, argnums=0, has_aux=True
-    )(params, module_state)
-
-    # 4) 更新 opt_state
+        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
+                                          aux, const, sparams)
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
+
         
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
@@ -728,87 +775,37 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
-
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
-
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter: int = 3000,  # 总共2000步
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant(
-              [500, 1000], [1e-4, 1e-5, 1e-6]))
-         ):
-    """
-    单阶段写法，但在循环内部通过 if/else 分段切换损失。
-    """
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-    n_iter = min(n_iter, n_batch)  # 防止数据不够
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    # 把batch数据一次性取出来（可选）
-    batch_gen = list(batch_gen)
-
-    for i in tqdm(range(n_iter), desc='training'):
-        # 1) 取第 i 个 batch
-        y, x = batch_gen[i]
-
-        # 2) 切换loss
-        if i < 2500:
-            loss_type = 'gmi_loss'
-        else:
-            loss_type = 'gmi_loss'
-        
-        # 3) 用 update_step_with_loss_type 或类似的函数
-        #    （假设它能按loss_type调用不同的损失）
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step_with_loss_type(
-            module = model.module,
-            opt = opt,
-            i = i,
-            opt_state = opt_state,
-            module_state = module_state,
-            y = y,
-            x = x,
-            aux = aux,
-            const = const,
-            sparams = sparams,
-            loss_type = loss_type
-        )
-
-        # 4) yield or return or store
-        yield (loss, opt.params_fn(opt_state), module_state)
-
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
 
 def test(model: Model,
          params: Dict,
