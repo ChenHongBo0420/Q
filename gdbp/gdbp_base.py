@@ -480,114 +480,114 @@ def to_real(x: jnp.ndarray) -> jnp.ndarray:
         raise ValueError(f"Expected last dimension to be 2 for [real, imag] representation, got shape {x.shape}")
     return x
 
-# def gmi_loss_16qam(
-#     target: jnp.ndarray,
-#     estimate: jnp.ndarray,
-#     constellation: jnp.ndarray = None,
-#     eps: float = 1e-8,
-# ) -> jnp.ndarray:
-#     """
-#     针对16QAM的GMI计算，并返回“负”的平均GMI，方便当作loss使用。
-#     """
-#     if constellation is None:
-#         constellation = get_16qam_constellation()  # shape (16, 2)
-
-#     # 转 (batch, 2) 实数
-#     target = to_real(target)     # (batch, 2)
-#     estimate = to_real(estimate) # (batch, 2)
-
-#     # 估计平均噪声功率 sigma^2
-#     noise = estimate - target  # shape (batch,2)
-#     sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps  # 一个标量
-
-#     # 计算与星座点的欧氏距离及似然
-#     # diff: (batch, 16, 2)
-#     diff = estimate[:, None, :] - constellation[None, :, :]
-#     dist_sq = jnp.sum(diff**2, axis=-1)           # (batch, 16)
-#     likelihoods = jnp.exp(-dist_sq / sigma2)      # (batch, 16)
-
-#     # 分母：对所有星座点似然做加权（先验1/16），可以写成 sum(...) / 16
-#     denom = jnp.sum(likelihoods, axis=-1) + eps   # (batch,)
-
-#     # 找到 target 对应（或最近）的那一个星座点
-#     def get_index(t):
-#         distances = jnp.sum((constellation - t)**2, axis=-1)
-#         return jnp.argmin(distances)
-#     indices = jax.vmap(get_index)(target)  # (batch,)
-
-#     # 取“正确”点的似然
-#     likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
-
-#     # 对数似然比: log2( (1/16)*likelihood_true / (1/16)*sum(likelihoods) )
-#     # 省略 1/16 后，只差常数项，对优化无影响
-#     ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
-#     # 注意 jnp.log2(x) 可以写成 jnp.log(x) / jnp.log(2)
-#     log_ratio = jnp.log(ratio) / jnp.log(2.0)
-
-#     # GMI = 平均 (batch 维度)，最后取负号做 loss
-#     gmi = jnp.mean(log_ratio)
-#     return gmi
-
 def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
     constellation: jnp.ndarray = None,
-    tau: float = 0.6,
     eps: float = 1e-8,
 ) -> jnp.ndarray:
     """
-    基于 InfoNCE 的 16QAM 损失函数，返回一个适合最小化的标量 loss。
-
-    与 gmi_loss_16qam 类似： 
-      - 首先将 target, estimate 转为 (batch,2) 的实数形式；
-      - 估计噪声功率 sigma^2；
-      - 计算与全部星座点的距离并做 softmax；
-      - 仅提升“正确星座”对应的对数似然（拉近），同时压低其他星座点（推远）。
-
-    参数:
-      target:  (batch, ...) 或 (batch,2)，实际发射/期望星座点 (复数或实数)
-      estimate:(batch, ...) 或 (batch,2)，网络输出 (复数或实数)
-      constellation: 若为 None，则使用默认 16QAM 星座 (形状 (16,2))
-      tau:     温度系数，越小 => 距离差异放大，越大 => 分布更平滑
-      eps:     防止数值溢出的微小常数
-
-    返回:
-      标量的 InfoNCE loss 值 (越小越好)。
+    针对16QAM的GMI计算，并返回“负”的平均GMI，方便当作loss使用。
     """
     if constellation is None:
         constellation = get_16qam_constellation()  # shape (16, 2)
 
-    # 1) 将 target, estimate 转为 (batch, 2) 实数
-    target = to_real(target)      # (batch, 2)
-    estimate = to_real(estimate)  # (batch, 2)
+    # 转 (batch, 2) 实数
+    target = to_real(target)     # (batch, 2)
+    estimate = to_real(estimate) # (batch, 2)
 
-    # 2) 估计 sigma^2（参考 gmi_loss_16qam 的做法），防止大范围下梯度极端
-    noise = estimate - target  # (batch,2)
-    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+    # 估计平均噪声功率 sigma^2
+    noise = estimate - target  # shape (batch,2)
+    sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps  # 一个标量
 
-    # 3) 计算与星座点的欧氏距离 (dist_sq)，再转成 “相似度” (负距离 / tau)
-    diff = estimate[:, None, :] - constellation[None, :, :]  # (batch, 16, 2)
-    dist_sq = jnp.sum(diff**2, axis=-1)                      # (batch, 16)
-    # logits: (batch, 16)
-    logits = -dist_sq / (sigma2 / tau)   # 等价于 -(dist^2 / sigma2)/tau，也可视为 sim = - dist^2 / temp
+    # 计算与星座点的欧氏距离及似然
+    # diff: (batch, 16, 2)
+    diff = estimate[:, None, :] - constellation[None, :, :]
+    dist_sq = jnp.sum(diff**2, axis=-1)           # (batch, 16)
+    likelihoods = jnp.exp(-dist_sq / sigma2)      # (batch, 16)
 
-    # 4) 找到 target 对应的“正确星座点”索引
+    # 分母：对所有星座点似然做加权（先验1/16），可以写成 sum(...) / 16
+    denom = jnp.sum(likelihoods, axis=-1) + eps   # (batch,)
+
+    # 找到 target 对应（或最近）的那一个星座点
     def get_index(t):
         distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
     indices = jax.vmap(get_index)(target)  # (batch,)
 
-    # 5) InfoNCE: -平均( log (exp(logits_correct) / sum(exp(logits))) )
-    #    => -(logits_correct - logsumexp(logits))
-    #    => 我们做 batch 求平均
-    batch_idx = jnp.arange(estimate.shape[0])
-    logits_correct = logits[batch_idx, indices]  # 正确星座的 logit
-    logsumexp_ = jax.scipy.special.logsumexp(logits, axis=-1)
+    # 取“正确”点的似然
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]  # (batch,)
 
-    loss_per_sample = -(logits_correct - logsumexp_)
-    loss = jnp.mean(loss_per_sample)
+    # 对数似然比: log2( (1/16)*likelihood_true / (1/16)*sum(likelihoods) )
+    # 省略 1/16 后，只差常数项，对优化无影响
+    ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
+    # 注意 jnp.log2(x) 可以写成 jnp.log(x) / jnp.log(2)
+    log_ratio = jnp.log(ratio) / jnp.log(2.0)
 
-    return -loss
+    # GMI = 平均 (batch 维度)，最后取负号做 loss
+    gmi = jnp.mean(log_ratio)
+    return gmi
+
+# def gmi_loss_16qam(
+#     target: jnp.ndarray,
+#     estimate: jnp.ndarray,
+#     constellation: jnp.ndarray = None,
+#     tau: float = 0.6,
+#     eps: float = 1e-8,
+# ) -> jnp.ndarray:
+#     """
+#     基于 InfoNCE 的 16QAM 损失函数，返回一个适合最小化的标量 loss。
+
+#     与 gmi_loss_16qam 类似： 
+#       - 首先将 target, estimate 转为 (batch,2) 的实数形式；
+#       - 估计噪声功率 sigma^2；
+#       - 计算与全部星座点的距离并做 softmax；
+#       - 仅提升“正确星座”对应的对数似然（拉近），同时压低其他星座点（推远）。
+
+#     参数:
+#       target:  (batch, ...) 或 (batch,2)，实际发射/期望星座点 (复数或实数)
+#       estimate:(batch, ...) 或 (batch,2)，网络输出 (复数或实数)
+#       constellation: 若为 None，则使用默认 16QAM 星座 (形状 (16,2))
+#       tau:     温度系数，越小 => 距离差异放大，越大 => 分布更平滑
+#       eps:     防止数值溢出的微小常数
+
+#     返回:
+#       标量的 InfoNCE loss 值 (越小越好)。
+#     """
+#     if constellation is None:
+#         constellation = get_16qam_constellation()  # shape (16, 2)
+
+#     # 1) 将 target, estimate 转为 (batch, 2) 实数
+#     target = to_real(target)      # (batch, 2)
+#     estimate = to_real(estimate)  # (batch, 2)
+
+#     # 2) 估计 sigma^2（参考 gmi_loss_16qam 的做法），防止大范围下梯度极端
+#     noise = estimate - target  # (batch,2)
+#     sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+
+#     # 3) 计算与星座点的欧氏距离 (dist_sq)，再转成 “相似度” (负距离 / tau)
+#     diff = estimate[:, None, :] - constellation[None, :, :]  # (batch, 16, 2)
+#     dist_sq = jnp.sum(diff**2, axis=-1)                      # (batch, 16)
+#     # logits: (batch, 16)
+#     logits = -dist_sq / (sigma2 / tau)   # 等价于 -(dist^2 / sigma2)/tau，也可视为 sim = - dist^2 / temp
+
+#     # 4) 找到 target 对应的“正确星座点”索引
+#     def get_index(t):
+#         distances = jnp.sum((constellation - t)**2, axis=-1)
+#         return jnp.argmin(distances)
+#     indices = jax.vmap(get_index)(target)  # (batch,)
+
+#     # 5) InfoNCE: -平均( log (exp(logits_correct) / sum(exp(logits))) )
+#     #    => -(logits_correct - logsumexp(logits))
+#     #    => 我们做 batch 求平均
+#     batch_idx = jnp.arange(estimate.shape[0])
+#     logits_correct = logits[batch_idx, indices]  # 正确星座的 logit
+#     logsumexp_ = jax.scipy.special.logsumexp(logits, axis=-1)
+
+#     loss_per_sample = -(logits_correct - logsumexp_)
+#     loss = jnp.mean(loss_per_sample)
+
+#     return -loss
         
 def loss_fn(module: layer.Layer,
             params: Dict,
