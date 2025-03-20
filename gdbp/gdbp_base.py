@@ -587,7 +587,7 @@ def gmi_loss_16qam(
     loss_per_sample = -(logits_correct - logsumexp_)
     loss = jnp.mean(loss_per_sample)
 
-    return loss
+    return -loss
         
 def loss_fn(module: layer.Layer,
             params: Dict,
