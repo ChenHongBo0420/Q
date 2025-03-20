@@ -443,6 +443,34 @@ def si_snr_flattened(
     si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
     return -si_snr_value
 
+def si_snr_multich_pol(
+    target: jnp.ndarray,  # shape (T,2)
+    estimate: jnp.ndarray,  # shape (T,2)
+    eps: float = 1e-8
+) -> jnp.ndarray:
+    """
+    多通道(2D)的逐点向量投影SI-SNR.
+    对每个t, 先投影 e_t在t_t方向, 汇总能量比 -> 取log10.
+    返回负值作为loss.
+    """
+    # target[i], estimate[i]都是2D向量
+    def per_sample_snr(te, es):
+        # te, es: shape(2,)
+        dot_ = jnp.dot(te, es)
+        te_en = jnp.dot(te, te) + eps
+        s_vec = (dot_ / te_en) * te  # 投影
+        e_vec = es - s_vec
+        return jnp.sum(s_vec**2), jnp.sum(e_vec**2)
+
+    # vmap逐点
+    s_energy, n_energy = jax.vmap(per_sample_snr)(target, estimate)
+
+    # 对时域累加
+    s_tot = jnp.sum(s_energy)
+    n_tot = jnp.sum(n_energy)
+
+    si_snr_val = 10.0 * jnp.log10((s_tot + eps) / (n_tot + eps))
+    return -si_snr_val
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -458,8 +486,9 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_multich_pol(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
                     
                     
