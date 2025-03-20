@@ -535,48 +535,51 @@ from jax.scipy.special import logsumexp
 def gmi_loss_16qam(
     target: jnp.ndarray,
     estimate: jnp.ndarray,
-    constellation: jnp.ndarray,
-    sigma2: float,
-    # sigma2: 若您要动态算的话也行, 这里只是形参
-    tau: float = 1.0,
-    use_log2: bool = True,
-    fix_prior: bool = True,
-):
+    constellation: jnp.ndarray = None,
+    sigma2: float = None,
+    eps: float = 1e-8
+) -> jnp.ndarray:
     """
-    与 GMI 更接近的 InfoNCE:
-
-    - fix_prior=True : 在正确样本的 logits 上加 log(16), 对应 GMI 中的 " x16 " 先验比。
-    - use_log2=True  : 将对数换成 log base 2，以匹配 GMI 的信息量单位。
+    一个可选写法：允许用户不传 constellation 和 sigma2，
+    函数内部自动处理。
     """
-    # 1) 计算距离 -> 相似度 logits
-    diff = estimate[:, None, :] - constellation[None, :, :]  # (batch,16,2)
-    dist_sq = jnp.sum(diff**2, axis=-1)                      # (batch,16)
-    logits = - dist_sq / (sigma2 / tau)
 
-    # 2) 找到 target 对应的星座索引
+    # 1) 如果调用方没传 constellation，就用默认 16QAM 星座
+    if constellation is None:
+        constellation = get_16qam_constellation()
+
+    # 2) 将输入转为 (batch,2) 实数
+    target = to_real(target)
+    estimate = to_real(estimate)
+
+    # 3) 如果没指定 sigma2, 我们就自己估计
+    if sigma2 is None:
+        noise = estimate - target
+        sigma2 = jnp.mean(jnp.sum(noise**2, axis=-1)) + eps
+
+    # 4) 计算到所有星座点的欧氏距离 => likelihood
+    diff = estimate[:, None, :] - constellation[None, :, :]
+    dist_sq = jnp.sum(diff**2, axis=-1)   # (batch, 16)
+    likelihoods = jnp.exp(-dist_sq / sigma2)  # (batch, 16)
+
+    denom = jnp.sum(likelihoods, axis=-1) + eps
+
+    # 找到最接近 target 的那个星座点索引
     def get_index(t):
         distances = jnp.sum((constellation - t)**2, axis=-1)
         return jnp.argmin(distances)
 
-    indices = jax.vmap(get_index)(target)   # (batch,)
-    batch_idx = jnp.arange(target.shape[0])
-    logits_correct = logits[batch_idx, indices]
+    indices = jax.vmap(get_index)(target)
+    likelihood_true = likelihoods[jnp.arange(target.shape[0]), indices]
 
-    # 3) 加上 log(16) 偏移(先验)
-    if fix_prior:
-        logits_correct = logits_correct + jnp.log(16.0)   # => same as GMI's ratio = 16 * L_true
+    ratio = (likelihood_true + eps) / (denom / 16.0 + eps)
+    # log base 2
+    log_ratio = jnp.log(ratio) / jnp.log(2.0)
 
-    # 4) 计算 InfoNCE
-    lse = logsumexp(logits, axis=-1)
-    loss_per_sample = -(logits_correct - lse)
-    loss = jnp.mean(loss_per_sample)
+    # 取平均后再取负号
+    gmi = jnp.mean(log_ratio)
+    return gmi
 
-    # 5) log base 2
-    if use_log2:
-        loss = loss / jnp.log(2.0)
-    return loss
-
-        
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
