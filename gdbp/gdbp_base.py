@@ -250,7 +250,7 @@ def make_base_module(steps: int = 3,
 
     # (A) 我们只定义一个“融合后”的 FDBP 分支 (包含 fdbp + fdbp1 + bridge)
     fused_branch = layer.Serial(
-        layer.FDBP2Branches(steps=steps, 
+        layer.FDBP(steps=steps, 
                             dtaps=dtaps,
                             ntaps=ntaps,
                             ixpm_window=7,
