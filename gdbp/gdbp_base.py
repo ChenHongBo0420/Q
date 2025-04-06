@@ -500,7 +500,7 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+    return mse_loss, updated_state
                     
                     
 ############# GMI-LOSS WITH TWO PART TRINING ###################
