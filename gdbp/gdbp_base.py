@@ -502,83 +502,128 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
-def pseudo_si_snr(estimate, pseudo_target, eps=1e-8):
+def fastica_2d(X, max_iter=200, tol=1e-5, random_key=None):
     """
-    根据给定的 'estimate' 和 'pseudo_target' 来计算模仿 SI-SNR 的值。
-    pseudo_target 相当于盲估计的“理想形态”。
-    
-    返回值越大表示越接近 pseudo_target，取负号就可以作为损失。
+    一个简化的 FastICA，仅适用于 2 个通道的示例。
+    X: shape (n_samples, 2)
+    返回分离后的信号 S 以及解混合矩阵 W，使得 S = X @ W^T
     """
-    dot_product = jnp.sum(estimate * pseudo_target)
-    t_energy = energy(pseudo_target)
-    s_target = (dot_product / (t_energy + eps)) * pseudo_target  # 与 pseudo_target 同相成分
-    e_noise = estimate - s_target
-    s_target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((s_target_energy + eps) / (noise_energy + eps))
-    return si_snr_value
+    if random_key is None:
+        random_key = jax.random.PRNGKey(0)
+    # whiten (可选，这里做个简化)
+    X_centered = X - jnp.mean(X, axis=0)
+    cov = jnp.cov(X_centered, rowvar=False)
+    E, D, _ = jnp.linalg.svd(cov)  # E: 特征向量，D: 特征值
+    # 白化变换
+    D_inv_sqrt = jnp.diag(1.0 / jnp.sqrt(D + 1e-12))
+    W_whiten = E @ D_inv_sqrt @ E.T
+    X_white = X_centered @ W_whiten.T
+
+    # 初始化解混合矩阵 W (2x2)
+    W_key1, W_key2 = jax.random.split(random_key)
+    w1 = jax.random.normal(W_key1, shape=(2,))
+    w2 = jax.random.normal(W_key2, shape=(2,))
+    # 对两个向量做正交处理
+    w1 = w1 / jnp.linalg.norm(w1)
+    w2 = w2 - jnp.dot(w1, w2)*w1
+    w2 = w2 / jnp.linalg.norm(w2)
+    W = jnp.stack([w1, w2], axis=0)  # shape (2,2)
+
+    # 迭代
+    def _contrast_fn(w, Xw):
+        # 用 tanh 做非线性对比函数
+        # g(x) = tanh(x)，g'(x) = 1 - tanh^2(x)
+        gw = jnp.tanh(Xw)
+        g_prime = 1.0 - jnp.square(gw)
+        return gw, g_prime
+
+    for _ in range(max_iter):
+        # 对两个分量分别做一轮更新
+        for i in range(2):
+            w_i = W[i, :]
+            Xw = X_white @ w_i
+            gw, g_prime = _contrast_fn(w_i, Xw)
+
+            # w_new = E[X*g(Xw)] - E[g'(Xw)] * w
+            # 其中 E[x*g(xw)] 为 X_white.T @ gw / n_samples
+            w_new = (X_white.T @ gw) / X_white.shape[0]
+            w_new -= jnp.mean(g_prime) * w_i
+
+            # 和已经收敛好的分量做正交
+            for j in range(i):
+                wj = W[j, :]
+                w_new -= jnp.dot(w_new, wj)*wj
+
+            w_new_norm = jnp.linalg.norm(w_new)
+            if w_new_norm < 1e-12:
+                continue
+            w_new /= w_new_norm
+
+            diff = jnp.abs(jnp.dot(w_new, w_i))
+            W = W.at[i,:].set(w_new)
+
+            if 1 - diff < tol:
+                break
+
+    # 分离后的信号: S = X_white @ W^T
+    # 其中每一列 S[:, i] 对应第 i 个独立分量
+    S = X_white @ W.T
+    return S, W
         
-from sklearn.cluster import KMeans
-def cluster_si_snr_loss(batch_estimate, n_clusters=4, random_state=42):
+def kurtosis_1d(x):
+    # 传统定义: kurt(x) = E[x^4]/(E[x^2])^2 - 3
+    # 这里做一个简化：
+    mean = jnp.mean(x)
+    var = jnp.mean((x - mean)**2)
+    fourth = jnp.mean((x - mean)**4)
+    kurt = fourth / (var**2 + 1e-12) - 3.0
+    return kurt
+
+def pick_max_kurtosis_source(S):
     """
-    对 batch_estimate (形状 [B, D]) 做 KMeans 聚类，
-    用每个样本所属簇的中心作为“伪目标”，然后计算 SI-SNR，
-    最终返回该 batch 的 “负均值” 当作损失。
-    
-    1) 先聚类 => 得到集群中心 c_k
-    2) 对每个 x_i, 取 c_{k(i)} 当 pseudo target
-    3) 计算 SI-SNR(x_i, c_{k(i)})
-    4) 取平均再乘 -1 作为损失
+    S: shape (n_samples, 2)
+    返回 (chosen_source, idx)，其中 chosen_source是一维信号
     """
-    B, D = batch_estimate.shape
+    k0 = kurtosis_1d(S[:, 0])
+    k1 = kurtosis_1d(S[:, 1])
+    idx = jnp.argmax(jnp.array([k0, k1]))
+    return S[:, idx], idx
 
-    # --- 1) 用 sklearn 做 KMeans 聚类 (纯CPU, 非JAX可微) ---
-    # 如果你想在 JAX 内实现，需要自己写一套 soft-KMeans 或可微聚类逻辑
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state)
-    # 转成 numpy 做聚类
-    x_np = np.array(batch_estimate)       # [B, D]
-    kmeans.fit(x_np)
-    labels = kmeans.labels_              # [B,] 每条样本的簇索引
-    centers = kmeans.cluster_centers_    # [n_clusters, D]
+def loss_fn(module, params, state, y, aux, const, sparams):
+    """
+    假设:
+    - y: [n_samples, 2] 的混合输入
+    - module.apply(...) 的输出 z_original.val 是已经做完“均衡/增强”后的一维信号
+    - 其余附加参数仅作示意
+    """
+    import functools
 
-    # --- 2) 逐样本取其簇中心做“伪目标”，再算 SI-SNR ---
-    si_snr_vals = []
-    for i in range(B):
-        c = centers[labels[i]]   # shape=(D,)
-        x_i = batch_estimate[i]  # shape=(D,)
-        snr_val = si_snr(x_i, c) # scalar
-        si_snr_vals.append(snr_val)
-
-    # --- 3) 负的平均值 => final loss
-    si_snr_vals = jnp.array(si_snr_vals)    # shape=[B]
-    si_snr_mean = jnp.mean(si_snr_vals)
-    return -si_snr_mean
-
-
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: jnp.ndarray,
-            x: jnp.ndarray,       # 这里虽然传进来，但我们暂时不用
-            aux: Dict,
-            const: Dict,
-            sparams: Dict):
+    # 1) 用 ICA 得到分离后的多路信号
+    S, _ = fastica_2d(y)
     
-    # 合并参数
-    params = util.dict_merge(params, sparams)
-    
-    # 1) 对原始输入 y 做一次前向
+    # 2) 选出其中峰度最大的分量 (pseudo_target)
+    pseudo_target, idx = pick_max_kurtosis_source(S)
+
+    # 3) 让 module 对输入 y 做处理
+    #    注意：根据你自己网络的输入/输出实际写法而定
+    merged_params = dict(params, **sparams)  # 合并一下
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, 
-        core.Signal(y)
+        {'params': merged_params, 'aux_inputs': aux, 'const': const, **state}, 
+        y   # 这里把 y 当输入，也可以是别的
     )
+    estimate = z_original.val  # 一维估计
 
-    # 3) 使用 SimSiam 风格的 SNR 对比损失
-    #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
-    #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
-    contrastive_loss = cluster_si_snr_loss(jnp.abs(z_original.val))
-    
-    return contrastive_loss, updated_state
+    # 4) 计算 SI-SNR (相对于 pseudo_target)
+    #    可能你要保证两个信号对齐，或做插值/裁剪
+    #    这里只做简单示意
+    min_len = jnp.minimum(pseudo_target.shape[0], estimate.shape[0])
+    snr_value = si_snr(pseudo_target[:min_len], estimate[:min_len])
+
+    # 5) 我们如果想要“最小化 loss”，可以返回  -snr_value
+    loss = -snr_value
+
+    return loss, updated_state
+
 
               
 ############# GMI-LOSS WITH TWO PART TRINING ###################
