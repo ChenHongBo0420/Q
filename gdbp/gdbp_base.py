@@ -537,21 +537,13 @@ def moving_average(x, kernel_size=5):
     else:
         raise ValueError("moving_average 目前只演示支持最多 2D 数组")
 
-def blind_snr_constant_modulus(estimate, cma_r=1.0, eps=1e-8):
+def blind_snr_smoothing(estimate, kernel_size=5, eps=1e-8):
     """
-    盲恒模版本的SI-SNR，只基于自身输出来构造伪目标，
-    假设信号应当具有恒定幅度 sqrt(cma_r)。
+    盲平滑版本的SI-SNR，以移动平均后的信号当成“伪目标”。
     """
-    # 1) 构造“伪目标”：每个采样点幅度都强行固定为 sqrt(cma_r)
-    mag = jnp.abs(estimate) + eps       # 幅度
-    phase = estimate / mag             # 其相当于 e^{j * arg(estimate)} (若是复数情况)
-    
-    # pseudo_target 与 estimate 相同相位，但模为 sqrt(cma_r)
-    pseudo_target = phase * jnp.sqrt(cma_r)
-    
-    # 2) 计算模仿 SI-SNR
+    pseudo_target = moving_average(estimate, kernel_size=kernel_size)
     si_snr_val = pseudo_si_snr(estimate, pseudo_target, eps=eps)
-    return -si_snr_val  # 取负数当损失，值越小表示估计越贴近恒模
+    return -si_snr_val
 
 
 def loss_fn(module: layer.Layer,
@@ -575,7 +567,7 @@ def loss_fn(module: layer.Layer,
     # 3) 使用 SimSiam 风格的 SNR 对比损失
     #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
     #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
-    contrastive_loss = blind_snr_constant_modulus(jnp.abs(z_original.val))
+    contrastive_loss = blind_snr_smoothing(jnp.abs(z_original.val))
     
     return contrastive_loss, updated_state
 
