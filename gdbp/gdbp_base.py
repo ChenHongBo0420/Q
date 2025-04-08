@@ -502,17 +502,39 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
-def simsiam_snr_loss(z1, z2):
+def pseudo_si_snr(estimate, pseudo_target, eps=1e-8):
     """
-    使用 SI-SNR 作为度量的 SimSiam 风格对比损失。
-    """
-    # 第一个方向：z1 对比 stop_gradient(z2)
-    snr_1 = si_snr(z1, jax.lax.stop_gradient(z2))
-    # 第二个方向：z2 对比 stop_gradient(z1)
-    snr_2 = si_snr(z2, jax.lax.stop_gradient(z1))
+    根据给定的 'estimate' 和 'pseudo_target' 来计算模仿 SI-SNR 的值。
+    pseudo_target 相当于盲估计的“理想形态”。
     
-    # 由于要最大化SNR，这里加负号并取平均做最后的损失
-    return 0.5 * (snr_1 + snr_2)
+    返回值越大表示越接近 pseudo_target，取负号就可以作为损失。
+    """
+    dot_product = jnp.sum(estimate * pseudo_target)
+    t_energy = energy(pseudo_target)
+    s_target = (dot_product / (t_energy + eps)) * pseudo_target  # 与 pseudo_target 同相成分
+    e_noise = estimate - s_target
+    s_target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    si_snr_value = 10 * jnp.log10((s_target_energy + eps) / (noise_energy + eps))
+    return si_snr_value
+        
+def moving_average(x, kernel_size=5):
+    """
+    用简单卷积做移动平均滤波 (为了演示思路).
+    边界处理可自行定义，这里仅做一个最简单的 'valid' 卷积。
+    """
+    kernel = jnp.ones(kernel_size) / kernel_size
+    # 注意: jax.numpy.convolve 仅支持一维序列, 如果你的 x 是多维，需另行处理
+    smoothed = jnp.convolve(x, kernel, mode='same')  
+    return smoothed
+
+def blind_snr_smoothing(estimate, kernel_size=5, eps=1e-8):
+    """
+    盲平滑版本的SI-SNR，以移动平均后的信号当成“伪目标”。
+    """
+    pseudo_target = moving_average(estimate, kernel_size=kernel_size)
+    si_snr_val = pseudo_si_snr(estimate, pseudo_target, eps=eps)
+    return -si_snr_val
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -532,20 +554,10 @@ def loss_fn(module: layer.Layer,
         core.Signal(y)
     )
 
-    # 2) 对 y 做随机增广 y_transformed，再次前向得到 z_transformed
-    y_transformed = apply_combined_transform(y)
-    z_transformed, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, 
-        core.Signal(y_transformed)
-    )
-
     # 3) 使用 SimSiam 风格的 SNR 对比损失
     #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
     #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
-    contrastive_loss = simsiam_snr_loss(
-        z1 = jnp.abs(z_original.val),
-        z2 = jnp.abs(z_transformed.val)
-    )
+    contrastive_loss = blind_snr_smoothing(jnp.abs(z_original.val))
     
     return contrastive_loss, updated_state
 
