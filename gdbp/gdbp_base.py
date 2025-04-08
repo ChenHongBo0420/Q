@@ -637,10 +637,7 @@ def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, 
     # 3) 让 module 对输入 y 做处理
     #    注意：根据你自己网络的输入/输出实际写法而定
     merged_params = dict(params, **sparams)  # 合并一下
-    z_original, updated_state = module.apply(
-        {'params': merged_params, 'aux_inputs': aux, 'const': const, **state}, 
-        y   # 这里把 y 当输入，也可以是别的
-    )
+    z_original, updated_state = module.apply({'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     estimate = z_original.val  # 一维估计
 
     # 4) 计算 SI-SNR (相对于 pseudo_target)
