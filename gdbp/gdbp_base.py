@@ -505,44 +505,64 @@ def si_snr_flattened(
 def build_toeplitz(x, filter_len):
     """
     构造一阶 Toeplitz 矩阵 X，使得 (X @ a) 等效于 x 与 a 的线性卷积。
-    假设 x 形状为 (N,)，返回的 X 形状为 (N, filter_len)。
-    X[n, k] = x[n-k]，若 n-k < 0 则补 0。
+    x 形状为 (N,)，返回 X 形状为 (N, filter_len)。
     """
     N = x.shape[0]
     X = jnp.zeros((N, filter_len))
-    # 这里用 for 循环演示；如果长度很大，可考虑更高效的卷积实现
     for n in range(N):
         for k in range(filter_len):
             m = n - k
-            X = X.at[n, k].set(x[m] if m >= 0 else 0.)
+            val = x[m] if m >= 0 else 0.
+            X = X.at[n, k].set(val)
     return X
 
-def ci_sdr(reference, estimate, filter_len=512, eps=1e-8):
+def ci_sdr_single_channel(reference, estimate, filter_len=512, eps=1e-8):
     """
-    计算单通道的 CI-SDR:
-      1) 对 reference 构造 Toeplitz 矩阵 X
-      2) 最小二乘求解最优卷积滤波器 a
-      3) 得到 s_filtered = X @ a
-      4) 计算 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
-      5) 通常做损失时取负号返回
+    计算单通道 CI-SDR (不取负号):
+      1) 构造 Toeplitz 矩阵 X
+      2) 最小二乘求解卷积滤波器 a
+      3) s_filtered = X @ a
+      4) CI-SDR = 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
     """
-    # 构造 Toeplitz 矩阵
     X = build_toeplitz(reference, filter_len)
-    
-    # 用最小二乘法求解卷积滤波器 a
-    # jnp.linalg.lstsq 返回 (a, residuals, rank, s)，这里只关心 a
+    # 最小二乘
     a, *_ = jnp.linalg.lstsq(X, estimate, rcond=None)
-    
     # 计算卷积后的信号
     s_filtered = X @ a
-    
-    # 计算 CI-SDR = 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
+    # 计算 CI-SDR
     numerator = energy(s_filtered)
     denominator = energy(s_filtered - estimate)
     ci_sdr_value = 10.0 * jnp.log10((numerator + eps) / (denominator + eps))
+    return ci_sdr_value
+
+def ci_sdr_multi_channel(reference, estimate, filter_len=512, eps=1e-8):
+    """
+    适用于形状 (N,2) 的 2 通道 CI-SDR。
+    会逐通道算单通道 CI-SDR，然后对结果取平均，
+    并返回 “负”的平均值作为损失（越大越好，故取负）。
+    """
+    # 假设 reference, estimate 均为 (N, 2)
+    assert reference.ndim == 2 and estimate.ndim == 2, \
+        "reference, estimate 必须是 (N, C) 形状"
+    assert reference.shape == estimate.shape, \
+        "reference 和 estimate 形状需要一致"
     
-    # 如果是训练目标，通常取负做“损失”（越大越好）
-    return -ci_sdr_value
+    num_channels = reference.shape[1]
+    
+    # 对每个通道分别计算 CI-SDR
+    ci_sdr_list = []
+    for ch in range(num_channels):
+        ref_ch = reference[:, ch]
+        est_ch = estimate[:, ch]
+        ci_sdr_val = ci_sdr_single_channel(ref_ch, est_ch, filter_len, eps)
+        ci_sdr_list.append(ci_sdr_val)
+    
+    # 计算多通道平均
+    ci_sdr_array = jnp.stack(ci_sdr_list)  # shape = (num_channels,)
+    mean_ci_sdr = jnp.mean(ci_sdr_array)   # 标量
+    
+    # 对训练通常返回负值作为 loss
+    return -mean_ci_sdr
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -557,7 +577,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = ci_sdr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = ci_sdr_multi_channel(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
 
               
