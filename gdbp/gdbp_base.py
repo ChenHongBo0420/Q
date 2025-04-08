@@ -589,7 +589,7 @@ def pick_max_kurtosis_source(S):
     idx = jnp.argmax(jnp.array([k0, k1]))
     return S[:, idx], idx
 
-def loss_fn(module, params, state, y, aux, const, sparams):
+def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, aux: Dict, const: Dict, sparams: Dict,):
     """
     假设:
     - y: [n_samples, 2] 的混合输入
