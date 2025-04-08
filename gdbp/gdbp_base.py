@@ -502,77 +502,107 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
+
 def fastica_2d(X, max_iter=200, tol=1e-5, random_key=None):
     """
-    一个简化的 FastICA，仅适用于 2 个通道的示例。
+    一个简化的 FastICA，仅适用于 2 个通道的演示版本（无 break/if）。
     X: shape (n_samples, 2)
-    返回分离后的信号 S 以及解混合矩阵 W，使得 S = X @ W^T
+    返回 (S, W)
+      - S: 分离结果 (n_samples, 2)
+      - W: 解混合矩阵 (2, 2)
     """
+
     if random_key is None:
         random_key = jax.random.PRNGKey(0)
-    # whiten (可选，这里做个简化)
+
+    # --------------------------------------------------
+    # 0) 预处理：中心化 + 白化
+    # --------------------------------------------------
     X_centered = X - jnp.mean(X, axis=0)
     cov = jnp.cov(X_centered, rowvar=False)
-    E, D, _ = jnp.linalg.svd(cov)  # E: 特征向量，D: 特征值
-    # 白化变换
+    E, D, _ = jnp.linalg.svd(cov)  # E: 特征向量, D: 特征值
     D_inv_sqrt = jnp.diag(1.0 / jnp.sqrt(D + 1e-12))
     W_whiten = E @ D_inv_sqrt @ E.T
-    X_white = X_centered @ W_whiten.T
+    X_white = X_centered @ W_whiten.T  # shape (n_samples, 2)
 
-    # 初始化解混合矩阵 W (2x2)
+    # --------------------------------------------------
+    # 1) 初始化解混合矩阵 W (2x2)
+    #    做正交以保证第 1、2 行相互正交
+    # --------------------------------------------------
     W_key1, W_key2 = jax.random.split(random_key)
     w1 = jax.random.normal(W_key1, shape=(2,))
     w2 = jax.random.normal(W_key2, shape=(2,))
-    # 对两个向量做正交处理
     w1 = w1 / jnp.linalg.norm(w1)
+
+    # 令 w2 与 w1 正交
     w2 = w2 - jnp.dot(w1, w2)*w1
-    w2 = w2 / jnp.linalg.norm(w2)
-    W = jnp.stack([w1, w2], axis=0)  # shape (2,2)
+    w2 = w2 / (jnp.linalg.norm(w2) + 1e-12)
 
-    # 迭代
-    def _contrast_fn(w, Xw):
-        # 用 tanh 做非线性对比函数
-        # g(x) = tanh(x)，g'(x) = 1 - tanh^2(x)
-        gw = jnp.tanh(Xw)
-        g_prime = 1.0 - jnp.square(gw)
-        return gw, g_prime
+    W_init = jnp.stack([w1, w2], axis=0)  # (2,2)
 
-    for _ in range(max_iter):
-        # 对两个分量分别做一轮更新
-        for i in range(2):
-            w_i = W[i, :]
-            Xw = X_white @ w_i
-            gw, g_prime = _contrast_fn(w_i, Xw)
+    # --------------------------------------------------
+    # 2) 定义单次迭代更新函数
+    # --------------------------------------------------
+    def ica_step(W, _):
+        """
+        对 W 做 1 次迭代：逐行更新 (w1, w2)
+        返回更新后的 W
+        """
+        # 对比函数: g(u)=tanh(u), g'(u)=1 - tanh^2(u)
+        def contrast(Xw):
+            gw = jnp.tanh(Xw)
+            g_prime = 1.0 - jnp.square(gw)
+            return gw, g_prime
 
-            # w_new = E[X*g(Xw)] - E[g'(Xw)] * w
-            # 其中 E[x*g(xw)] 为 X_white.T @ gw / n_samples
+        def update_row(W, i):
+            """更新 W[i] 这一行 (其余行视为已固定)"""
+            w_old = W[i, :]
+            Xw = X_white @ w_old
+            gw, g_prime = contrast(Xw)
+
+            # w_new = E[x*g(xw)] - E[g'(xw)]*w_old
             w_new = (X_white.T @ gw) / X_white.shape[0]
-            w_new -= jnp.mean(g_prime) * w_i
+            w_new = w_new - jnp.mean(g_prime) * w_old
 
-            # 和已经收敛好的分量做正交
+            # 与前面已经收敛的分量正交
             for j in range(i):
                 wj = W[j, :]
-                w_new -= jnp.dot(w_new, wj)*wj
+                w_new = w_new - (jnp.dot(w_new, wj)) * wj
 
-            w_new_norm = jnp.linalg.norm(w_new)
-            if w_new_norm < 1e-12:
-                continue
-            w_new /= w_new_norm
+            # 避免 norm=0
+            norm_w_new = jnp.linalg.norm(w_new)
+            # 若 norm < 1e-12，则退化为原先 w_old
+            w_new = jnp.where(norm_w_new < 1e-12,
+                              w_old,
+                              w_new / norm_w_new)
 
-            diff = jnp.abs(jnp.dot(w_new, w_i))
-            W = W.at[i,:].set(w_new)
+            # 替换 W[i,:]
+            W = W.at[i, :].set(w_new)
+            return W
 
-            if 1 - diff < tol:
-                break
+        # 依次更新 w1, w2
+        W = update_row(W, 0)
+        W = update_row(W, 1)
+        return W, None
 
-    # 分离后的信号: S = X_white @ W^T
-    # 其中每一列 S[:, i] 对应第 i 个独立分量
-    S = X_white @ W.T
-    return S, W
+    # --------------------------------------------------
+    # 3) 用 fori_loop 迭代 max_iter 次
+    #    (去除原先 break/tol 判断)
+    # --------------------------------------------------
+    def body_fun(i, carry):
+        W, _ = carry
+        W_new, _ = ica_step(W, i)
+        return (W_new, None)
+
+    W_final, _ = jax.lax.fori_loop(0, max_iter, body_fun, (W_init, None))
+    # --------------------------------------------------
+    # 4) 得到分离结果 S = X_white @ W_final^T
+    # --------------------------------------------------
+    S = X_white @ W_final.T
+    return S, W_final
         
 def kurtosis_1d(x):
-    # 传统定义: kurt(x) = E[x^4]/(E[x^2])^2 - 3
-    # 这里做一个简化：
+    # kurt(x) = E[x^4]/(E[x^2])^2 - 3
     mean = jnp.mean(x)
     var = jnp.mean((x - mean)**2)
     fourth = jnp.mean((x - mean)**4)
