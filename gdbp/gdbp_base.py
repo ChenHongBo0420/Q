@@ -518,15 +518,24 @@ def pseudo_si_snr(estimate, pseudo_target, eps=1e-8):
     si_snr_value = 10 * jnp.log10((s_target_energy + eps) / (noise_energy + eps))
     return si_snr_value
         
-def moving_average(x, kernel_size=5):
+def moving_average_1d(x, kernel_size=5):
     """
-    用简单卷积做移动平均滤波 (为了演示思路).
-    边界处理可自行定义，这里仅做一个最简单的 'valid' 卷积。
+    针对单条 1D 信号做移动平均。
     """
     kernel = jnp.ones(kernel_size) / kernel_size
-    # 注意: jax.numpy.convolve 仅支持一维序列, 如果你的 x 是多维，需另行处理
-    smoothed = jnp.convolve(x, kernel, mode='same')  
-    return smoothed
+    return jnp.convolve(x, kernel, mode='same')
+
+def moving_average(x, kernel_size=5):
+    """
+    通用移动平均，如果 x 是 1D，直接调用；
+    如果 x 是 2D，则用 vmap 对每一行 (batch / channel) 分别做 1D 卷积。
+    """
+    if x.ndim == 1:
+        return moving_average_1d(x, kernel_size)
+    elif x.ndim == 2:
+        return jax.vmap(lambda row: moving_average_1d(row, kernel_size))(x)
+    else:
+        raise ValueError("moving_average 目前只演示支持最多 2D 数组")
 
 def blind_snr_constant_modulus(estimate, cma_r=1.0, eps=1e-8):
     """
