@@ -502,55 +502,53 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
-def contrastive_snr_loss(target, estimate, label, margin=1.0, eps=1e-8):
+def simsiam_snr_loss(z1, z2):
     """
-    使用 SI-SNR 作为相似度的对比损失函数 (Contrastive Loss).
-    
-    参数：
-    --------
-    target:  jnp.array, 目标音频 或 特征
-    estimate:jnp.array, 待比较的音频 或 特征
-    label:   int (0/1) 或 jnp.array, 表示是否为正例(1)或负例(0)
-    margin:  float, 对负样本的 margin 超参
-    eps:     float, 避免log(0)或除0的微小常数
-
-    返回：
-    --------
-    对比损失值 (越小越好).
+    使用 SI-SNR 作为度量的 SimSiam 风格对比损失。
     """
-    # 首先计算 SI-SNR 值(越大越相似)
-    snr_value = si_snr(target, estimate, eps=eps)
+    # 第一个方向：z1 对比 stop_gradient(z2)
+    snr_1 = si_snr(z1, jax.lax.stop_gradient(z2))
+    # 第二个方向：z2 对比 stop_gradient(z1)
+    snr_2 = si_snr(z2, jax.lax.stop_gradient(z1))
     
-    # 将相似度转换为“距离”(snr 越大, distance 越小)
-    dist = -snr_value
-    
-    # Contrastive Loss 公式
-    # 正样本(label=1): 惩罚的是 dist^2 (希望 dist 尽量趋近于 0)
-    # 负样本(label=0): 惩罚的是 [max(0, margin - dist)]^2 (希望 dist 至少大于 margin)
-    pos_loss = label * (dist ** 2)
-    neg_loss = (1 - label) * jnp.clip(margin - dist, 0, None) ** 2
-
-    return jnp.mean(pos_loss + neg_loss)
+    # 由于要最大化SNR，这里加负号并取平均做最后的损失
+    return 0.5 * (snr_1 + snr_2)
 
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
-            y: Array,
-            x: Array,
+            y: jnp.ndarray,
+            x: jnp.ndarray,       # 这里虽然传进来，但我们暂时不用
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
+            sparams: Dict):
+    
+    # 合并参数
     params = util.dict_merge(params, sparams)
+    
+    # 1) 对原始输入 y 做一次前向
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, 
+        core.Signal(y)
+    )
+
+    # 2) 对 y 做随机增广 y_transformed，再次前向得到 z_transformed
     y_transformed = apply_combined_transform(y)
     z_transformed, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed)) 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = contrastive_snr_loss(jnp.abs(z_original.val), jnp.abs(z_transformed.val), jnp.abs(aligned_x)) 
-    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, 
+        core.Signal(y_transformed)
+    )
+
+    # 3) 使用 SimSiam 风格的 SNR 对比损失
+    #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
+    #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
+    contrastive_loss = simsiam_snr_loss(
+        z1 = z_original.val,
+        z2 = z_transformed.val
+    )
+    
+    return contrastive_loss, updated_state
+
               
 ############# GMI-LOSS WITH TWO PART TRINING ###################
 # import jax
