@@ -503,154 +503,27 @@ def si_snr_flattened(
 #     return snr, updated_state
 
 
-def fastica_2d(X, max_iter=200, tol=1e-5, random_key=None):
-    """
-    一个简化的 FastICA，仅适用于 2 个通道的演示版本（无 break/if）。
-    X: shape (n_samples, 2)
-    返回 (S, W)
-      - S: 分离结果 (n_samples, 2)
-      - W: 解混合矩阵 (2, 2)
-    """
-
-    if random_key is None:
-        random_key = jax.random.PRNGKey(0)
-
-    # --------------------------------------------------
-    # 0) 预处理：中心化 + 白化
-    # --------------------------------------------------
-    X_centered = X - jnp.mean(X, axis=0)
-    cov = jnp.cov(X_centered, rowvar=False)
-    E, D, _ = jnp.linalg.svd(cov)  # E: 特征向量, D: 特征值
-    D_inv_sqrt = jnp.diag(1.0 / jnp.sqrt(D + 1e-12))
-    W_whiten = E @ D_inv_sqrt @ E.T
-    X_white = X_centered @ W_whiten.T  # shape (n_samples, 2)
-
-    # --------------------------------------------------
-    # 1) 初始化解混合矩阵 W (2x2)
-    #    做正交以保证第 1、2 行相互正交
-    # --------------------------------------------------
-    W_key1, W_key2 = jax.random.split(random_key)
-    w1 = jax.random.normal(W_key1, shape=(2,))
-    w2 = jax.random.normal(W_key2, shape=(2,))
-    w1 = w1 / jnp.linalg.norm(w1)
-
-    # 令 w2 与 w1 正交
-    w2 = w2 - jnp.dot(w1, w2)*w1
-    w2 = w2 / (jnp.linalg.norm(w2) + 1e-12)
-
-    W_init = jnp.stack([w1, w2], axis=0)  # (2,2)
-
-    # --------------------------------------------------
-    # 2) 定义单次迭代更新函数
-    # --------------------------------------------------
-    def ica_step(W, _):
-        """
-        对 W 做 1 次迭代：逐行更新 (w1, w2)
-        返回更新后的 W
-        """
-        # 对比函数: g(u)=tanh(u), g'(u)=1 - tanh^2(u)
-        def contrast(Xw):
-            gw = jnp.tanh(Xw)
-            g_prime = 1.0 - jnp.square(gw)
-            return gw, g_prime
-
-        def update_row(W, i):
-            """更新 W[i] 这一行 (其余行视为已固定)"""
-            w_old = W[i, :]
-            Xw = X_white @ w_old
-            gw, g_prime = contrast(Xw)
-
-            # w_new = E[x*g(xw)] - E[g'(xw)]*w_old
-            w_new = (X_white.T @ gw) / X_white.shape[0]
-            w_new = w_new - jnp.mean(g_prime) * w_old
-
-            # 与前面已经收敛的分量正交
-            for j in range(i):
-                wj = W[j, :]
-                w_new = w_new - (jnp.dot(w_new, wj)) * wj
-
-            # 避免 norm=0
-            norm_w_new = jnp.linalg.norm(w_new)
-            # 若 norm < 1e-12，则退化为原先 w_old
-            w_new = jnp.where(norm_w_new < 1e-12,
-                              w_old,
-                              w_new / norm_w_new)
-
-            # 替换 W[i,:]
-            W = W.at[i, :].set(w_new)
-            return W
-
-        # 依次更新 w1, w2
-        W = update_row(W, 0)
-        W = update_row(W, 1)
-        return W, None
-
-    # --------------------------------------------------
-    # 3) 用 fori_loop 迭代 max_iter 次
-    #    (去除原先 break/tol 判断)
-    # --------------------------------------------------
-    def body_fun(i, carry):
-        W, _ = carry
-        W_new, _ = ica_step(W, i)
-        return (W_new, None)
-
-    W_final, _ = jax.lax.fori_loop(0, max_iter, body_fun, (W_init, None))
-    # --------------------------------------------------
-    # 4) 得到分离结果 S = X_white @ W_final^T
-    # --------------------------------------------------
-    S = X_white @ W_final.T
-    return S, W_final
-        
-def kurtosis_1d(x):
-    # kurt(x) = E[x^4]/(E[x^2])^2 - 3
-    mean = jnp.mean(x)
-    var = jnp.mean((x - mean)**2)
-    fourth = jnp.mean((x - mean)**4)
-    kurt = fourth / (var**2 + 1e-12) - 3.0
-    return kurt
-
-def pick_max_kurtosis_source(S):
-    """
-    S: shape (n_samples, 2)
-    返回 (chosen_source, idx)，其中 chosen_source是一维信号
-    """
-    k0 = kurtosis_1d(S[:, 0])
-    k1 = kurtosis_1d(S[:, 1])
-    idx = jnp.argmax(jnp.array([k0, k1]))
-    return S[:, idx], idx
-
-def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, aux: Dict, const: Dict, sparams: Dict,):
-    """
-    假设:
-    - y: [n_samples, 2] 的混合输入
-    - module.apply(...) 的输出 z_original.val 是已经做完“均衡/增强”后的一维信号
-    - 其余附加参数仅作示意
-    """
-    import functools
-
-    # 1) 用 ICA 得到分离后的多路信号
-    S, _ = fastica_2d(y)
-    
-    # 2) 选出其中峰度最大的分量 (pseudo_target)
-    pseudo_target, idx = pick_max_kurtosis_source(S)
-
-    # 3) 让 module 对输入 y 做处理
-    #    注意：根据你自己网络的输入/输出实际写法而定
-    merged_params = dict(params, **sparams)  # 合并一下
-    z_original, updated_state = module.apply({'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    estimate = z_original.val  # 一维估计
-
-    # 4) 计算 SI-SNR (相对于 pseudo_target)
-    #    可能你要保证两个信号对齐，或做插值/裁剪
-    #    这里只做简单示意
-    min_len = jnp.minimum(pseudo_target.shape[0], estimate.shape[0])
-    snr_value = si_snr(pseudo_target[:min_len], estimate[:min_len])
-
-    # 5) 我们如果想要“最小化 loss”，可以返回  -snr_value
-    loss = -snr_value
-
-    return loss, updated_state
-
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    y_transformed = apply_combined_transform(y)
+    z_transformed, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr1 = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    snr2 = si_snr(jnp.abs(z_transformed.val), jnp.abs(aligned_x))
+    snr = snr1 -snr2
+    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
 
               
 ############# GMI-LOSS WITH TWO PART TRINING ###################
