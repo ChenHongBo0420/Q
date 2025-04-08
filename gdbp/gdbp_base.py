@@ -515,9 +515,10 @@ def loss_fn(module: layer.Layer,
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
+    aligned_y = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr1 = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr2 = si_snr(jnp.abs(y), jnp.abs(aligned_x))
+    snr2 = si_snr(jnp.abs(aligned_y), jnp.abs(aligned_x))
     snr = snr1 -snr2
     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
