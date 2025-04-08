@@ -543,8 +543,8 @@ def loss_fn(module: layer.Layer,
     #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
     #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
     contrastive_loss = simsiam_snr_loss(
-        z1 = z_original.val,
-        z2 = z_transformed.val
+        z1 = jnp.abs(z_original.val),
+        z2 = jnp.abs(z_transformed.val)
     )
     
     return contrastive_loss, updated_state
