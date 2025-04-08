@@ -502,7 +502,48 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
+def build_toeplitz(x, filter_len):
+    """
+    构造一阶 Toeplitz 矩阵 X，使得 (X @ a) 等效于 x 与 a 的线性卷积。
+    假设 x 形状为 (N,)，返回的 X 形状为 (N, filter_len)。
+    X[n, k] = x[n-k]，若 n-k < 0 则补 0。
+    """
+    N = x.shape[0]
+    X = jnp.zeros((N, filter_len))
+    # 这里用 for 循环演示；如果长度很大，可考虑更高效的卷积实现
+    for n in range(N):
+        for k in range(filter_len):
+            m = n - k
+            X = X.at[n, k].set(x[m] if m >= 0 else 0.)
+    return X
 
+def ci_sdr(reference, estimate, filter_len=512, eps=1e-8):
+    """
+    计算单通道的 CI-SDR:
+      1) 对 reference 构造 Toeplitz 矩阵 X
+      2) 最小二乘求解最优卷积滤波器 a
+      3) 得到 s_filtered = X @ a
+      4) 计算 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
+      5) 通常做损失时取负号返回
+    """
+    # 构造 Toeplitz 矩阵
+    X = build_toeplitz(reference, filter_len)
+    
+    # 用最小二乘法求解卷积滤波器 a
+    # jnp.linalg.lstsq 返回 (a, residuals, rank, s)，这里只关心 a
+    a, *_ = jnp.linalg.lstsq(X, estimate, rcond=None)
+    
+    # 计算卷积后的信号
+    s_filtered = X @ a
+    
+    # 计算 CI-SDR = 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
+    numerator = energy(s_filtered)
+    denominator = energy(s_filtered - estimate)
+    ci_sdr_value = 10.0 * jnp.log10((numerator + eps) / (denominator + eps))
+    
+    # 如果是训练目标，通常取负做“损失”（越大越好）
+    return -ci_sdr_value
+        
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -515,12 +556,8 @@ def loss_fn(module: layer.Layer,
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    aligned_y = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr1 = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr2 = si_snr(jnp.abs(y), jnp.abs(x))
-    snr = snr1 -snr2
-    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = ci_sdr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
 
               
