@@ -518,32 +518,41 @@ def pseudo_si_snr(estimate, pseudo_target, eps=1e-8):
     si_snr_value = 10 * jnp.log10((s_target_energy + eps) / (noise_energy + eps))
     return si_snr_value
         
-def moving_average_1d(x, kernel_size=5):
-    """
-    针对单条 1D 信号做移动平均。
-    """
-    kernel = jnp.ones(kernel_size) / kernel_size
-    return jnp.convolve(x, kernel, mode='same')
 
-def moving_average(x, kernel_size=5):
+def cluster_si_snr_loss(batch_estimate, n_clusters=4, random_state=42):
     """
-    通用移动平均，如果 x 是 1D，直接调用；
-    如果 x 是 2D，则用 vmap 对每一行 (batch / channel) 分别做 1D 卷积。
+    对 batch_estimate (形状 [B, D]) 做 KMeans 聚类，
+    用每个样本所属簇的中心作为“伪目标”，然后计算 SI-SNR，
+    最终返回该 batch 的 “负均值” 当作损失。
+    
+    1) 先聚类 => 得到集群中心 c_k
+    2) 对每个 x_i, 取 c_{k(i)} 当 pseudo target
+    3) 计算 SI-SNR(x_i, c_{k(i)})
+    4) 取平均再乘 -1 作为损失
     """
-    if x.ndim == 1:
-        return moving_average_1d(x, kernel_size)
-    elif x.ndim == 2:
-        return jax.vmap(lambda row: moving_average_1d(row, kernel_size))(x)
-    else:
-        raise ValueError("moving_average 目前只演示支持最多 2D 数组")
+    B, D = batch_estimate.shape
 
-def blind_snr_smoothing(estimate, kernel_size=5, eps=1e-8):
-    """
-    盲平滑版本的SI-SNR，以移动平均后的信号当成“伪目标”。
-    """
-    pseudo_target = moving_average(estimate, kernel_size=kernel_size)
-    si_snr_val = pseudo_si_snr(estimate, pseudo_target, eps=eps)
-    return -si_snr_val
+    # --- 1) 用 sklearn 做 KMeans 聚类 (纯CPU, 非JAX可微) ---
+    # 如果你想在 JAX 内实现，需要自己写一套 soft-KMeans 或可微聚类逻辑
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state)
+    # 转成 numpy 做聚类
+    x_np = np.array(batch_estimate)       # [B, D]
+    kmeans.fit(x_np)
+    labels = kmeans.labels_              # [B,] 每条样本的簇索引
+    centers = kmeans.cluster_centers_    # [n_clusters, D]
+
+    # --- 2) 逐样本取其簇中心做“伪目标”，再算 SI-SNR ---
+    si_snr_vals = []
+    for i in range(B):
+        c = centers[labels[i]]   # shape=(D,)
+        x_i = batch_estimate[i]  # shape=(D,)
+        snr_val = si_snr(x_i, c) # scalar
+        si_snr_vals.append(snr_val)
+
+    # --- 3) 负的平均值 => final loss
+    si_snr_vals = jnp.array(si_snr_vals)    # shape=[B]
+    si_snr_mean = jnp.mean(si_snr_vals)
+    return -si_snr_mean
 
 
 def loss_fn(module: layer.Layer,
@@ -567,7 +576,7 @@ def loss_fn(module: layer.Layer,
     # 3) 使用 SimSiam 风格的 SNR 对比损失
     #    这里可以看需求要不要对 z_original.val / z_transformed.val 做 abs()
     #    如果做语音幅度比较，则可用 jnp.abs()；若网络输出本身就是幅度谱或其他特征，可视情况
-    contrastive_loss = blind_snr_smoothing(jnp.abs(z_original.val))
+    contrastive_loss = cluster_si_snr_loss(jnp.abs(z_original.val))
     
     return contrastive_loss, updated_state
 
