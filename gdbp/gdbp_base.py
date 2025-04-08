@@ -518,7 +518,7 @@ def pseudo_si_snr(estimate, pseudo_target, eps=1e-8):
     si_snr_value = 10 * jnp.log10((s_target_energy + eps) / (noise_energy + eps))
     return si_snr_value
         
-
+from sklearn.cluster import KMeans
 def cluster_si_snr_loss(batch_estimate, n_clusters=4, random_state=42):
     """
     对 batch_estimate (形状 [B, D]) 做 KMeans 聚类，
