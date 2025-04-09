@@ -517,7 +517,7 @@ def si_snr(target, estimate, eps=1e-8):
         
 def ci_snr_loss_fn(target, estimate, eps=1e-8, ctaps=61):
  
-    filtered = create_RConv(rtaps)
+    filtered = create_CConv(rtaps)
     s_filtered = filtered(target)
     num = energy(s_filtered)
     den = energy(s_filtered - estimate)
