@@ -489,56 +489,57 @@ import jax.numpy as jnp
 import jax
 import jax.numpy as jnp
 
-def unsupervised_snr_jones(
-    x: jnp.ndarray,  # shape (T, 2), complex dtype
-    v: jnp.ndarray,  # shape (2,), complex dtype (trainable or from your model)
+def unsupervised_snr_complex_rank1(
+    X: jnp.ndarray,
     eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    利用双偏振观测的 Rank-1 近似,
-    构造无监督的 'SNR' 风格损失:
-      1) 给定 x(t) in C^2,
-      2) 令 s(t) = <x(t), v^*> / <v, v^*>, 
-      3) 令 x_approx(t) = s(t) * v,
-      4) 噪声 e(t) = x(t) - x_approx(t),
-      5) 以 sum(|x_approx|^2) / sum(|e|^2) 做 SNR 度量, 并取负值.
-    
-    参数:
-      x : (T, 2) 复数张量, 表示T个时刻的双偏振信号
-      v : (2,)   复数向量, 对应 "Jones向量" 或 主偏振方向
-      eps: 浮点安全项
-    
-    注意:
-      - 为了让此函数可微, 需要 x, v 都是 jnp.array;
-      - 如果要训练 v, 需在外部用 jax.grad / jax.jit 包起来一起优化;
-      - s(t) 是根据最小二乘投影显式计算, 也会对 v 产生梯度.
+    给定 X (T, 2) 形状的双偏振复信号，
+    1) 先对 X^H * X 做特征分解, 找到其最大特征值对应的特征向量 v (2,),
+       这相当于找 X 的最强(最大奇异值)秩1分量。
+    2) 用 v 投影 X, 得到重建的秩1近似 X_approx，残差 e = X - X_approx。
+    3) 计算 ||X_approx||^2 / ||e||^2 转成 dB，返回其负值 (-SNR) 供做无监督loss。
+
+    不需要事先给定 v，完全由数据本身确定。
     """
 
-    # (1) 计算 v 的范数^2
-    v_norm2 = jnp.sum(jnp.abs(v)**2) + eps
+    # X.shape = (T, 2), 复数
+    # 0) 预防性检查
+    #    如果 X 是实数类型，但确实代表光纤振幅，也可在外层先转成复数 jnp.asarray(X, dtype=jnp.complex64)
 
-    # (2) 对每个 t 计算 s(t) 
-    # s(t) = ( x(t) 与 v 的内积 ) / ( ||v||^2 )
-    # x(t)* conj(v) => 这里把 x 视为行向量, v 视为列向量
-    # shape (T,)
-    st = jnp.sum(x * jnp.conj(v), axis=-1) / v_norm2
+    # 1) 计算 X^H * X => (2,2) 的协方差型矩阵
+    #    conj(X) => (T,2)，转置 => (2,T)，再与 X (T,2) 矩阵乘 => (2,2)
+    XhX = jnp.conj(X).T @ X  # (2, 2), 复数
 
-    # (3) 重建 x_approx(t)
-    #  x_approx(t) = s(t) * v, shape => (T, 2)
-    # 需要 broadcasting
-    x_approx = st[:, None] * v[None, :]
+    # 2) 对 (2,2) 矩阵做特征分解
+    #    eigenvalues e, eigenvectors V => XhX = V * diag(e) * V^{-1}
+    e, V = jnp.linalg.eig(XhX)  # e.shape = (2,), V.shape=(2,2)
+    #   JAX 的 eig 支持复数，但要注意数值稳定
 
-    # (4) 残差 e
-    e = x - x_approx
+    # 3) 找到最大特征值对应的特征向量(即最大奇异值方向)
+    #    以绝对值比较(因为特征值可能是复数, 但理论上对协Hermitian矩阵应为实数>=0)
+    idx = jnp.argmax(jnp.abs(e))  # 0 或 1
+    v = V[:, idx]  # shape=(2,)
 
-    # (5) 计算信号能量与噪声能量
-    signal_energy = jnp.sum(jnp.abs(x_approx)**2)
-    noise_energy  = jnp.sum(jnp.abs(e)**2)
+    # 4) 可以先行归一化 v，以减少数值漂移
+    v_norm = jnp.sqrt(jnp.sum(jnp.abs(v)**2) + eps)
+    v = v / v_norm
 
-    snr_value = 10.0 * jnp.log10( (signal_energy + eps) / (noise_energy + eps) )
+    # 5) 用 v 做投影估计:  s(t) = <x(t), conj(v)>  (不需要再除以||v||^2, 
+    #    因为我们已将 v 归一化, 这样 s(t) = x(t)在v方向上的分量)
+    #    x(t)* conj(v) => (T,)
+    st = jnp.sum(X * jnp.conj(v), axis=-1)  # (T,)
 
-    # 训练时取负值做loss
-    return -snr_value
+    # 6) 重建 X_approx(t) = s(t)*v
+    X_approx = st[:, None] * v[None, :]  # (T,2)
+
+    # 7) 计算残差 e, 以及信噪比
+    E = X - X_approx
+    signal_energy = jnp.sum(jnp.abs(X_approx)**2)
+    noise_energy  = jnp.sum(jnp.abs(E)**2)
+
+    snr_value = 10.0 * jnp.log10((signal_energy + eps) / (noise_energy + eps))
+    return -snr_value  # 训练时最小化
 
      
         
@@ -574,7 +575,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = unsupervised_snr_svd(jnp.abs(z_original.val)) 
+    snr = unsupervised_snr_complex_rank1(jnp.abs(z_original.val)) 
     return snr, updated_state
 
               
