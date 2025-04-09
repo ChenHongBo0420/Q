@@ -501,6 +501,33 @@ def si_snr_flattened(
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
+
+def make_conv_filter_module(rtaps=61):
+    """
+    返回一个最简单的可训练1D卷积模块(多通道也可),
+    其中 'Conv1d' 的权重将通过训练来适配.
+    """
+    mod = layer.Serial(
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps)
+    )
+    return mod
+        
+def ci_snr_loss_fn(params, apply_fn, target, estimate, eps=1e-8):
+    """
+    计算 -CI-SNR (单次调用), 用于反向传播:
+      1) 用可训练卷积层 apply_fn(params, target) 得到 s_filtered
+      2) 计算 s_filtered 与 estimate 的能量比
+      3) 返回 -CI-SNR
+    target, estimate: (N, C) 形状(多通道)
+    """
+    # s_filtered: 把target经过可训练卷积 -> (N, C)
+    s_filtered = apply_fn(params, target)
+
+    num = energy(s_filtered)
+    den = energy(s_filtered - estimate)
+    ci_snr_val = 10.0 * jnp.log10((num + eps) / (den + eps))
+    
+    return -ci_snr_val  
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -515,7 +542,8 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    conv_module = make_conv_filter_module(rtaps=61) 
+    snr = ci_snr_loss_fn(params, conv_module.apply, jnp.abs(z_original.val), jnp.abs(aligned_x))
     return snr, updated_state
 
               
