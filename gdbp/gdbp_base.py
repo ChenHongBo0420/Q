@@ -501,35 +501,6 @@ def si_snr_flattened(
 #     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
-
-def sa_sdr_2ch(target, estimate, eps=1e-8):
-    """
-    基于 Scale-Invariant 思想的 SA-SDR，适用于 (N,2) 双通道。
-    - target, estimate 均为 (N, 2)
-    - 返回值为 -SA-SDR（用作损失）。
-    - 原理：对双通道整体寻求最优标量 alpha，
-            再计算合并后的能量比。
-    """
-    # 1) 计算内积（全局），得到最优标量 alpha
-    #    这里把 (N,2) flatten 也行，直接 sum 也行 (二者等价)
-    dot_product = jnp.sum(target * estimate)          # 标量
-    target_energy = jnp.sum(target * target)          # 标量
-    alpha = dot_product / (target_energy + eps)       # 标量系数
-
-    # 2) 计算“目标部分”和“噪声部分”
-    #    s_target, e_noise 均是 (N,2)
-    s_target = alpha * target
-    e_noise = estimate - s_target
-
-    # 3) 计算总能量
-    num = energy(s_target)      # \| alpha * target \|^2
-    den = energy(e_noise)       # \| estimate - alpha*target \|^2
-
-    # 4) 计算 SA-SDR
-    sa_sdr_value = 10.0 * jnp.log10((num + eps) / (den + eps))
-
-    # 5) 取负号作为损失
-    return -sa_sdr_value
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -544,7 +515,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = sa_sdr_2ch(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
 
               
