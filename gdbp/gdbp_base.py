@@ -502,28 +502,6 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
-def create_CConv(ctaps):
-    return layer.vmap(layer.Conv1d)(name='CConv', taps=ctaps)
-        
-def si_snr(target, estimate, eps=1e-8):
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
-        
-def ci_snr_loss_fn(target, estimate, eps=1e-8, ctaps=61):
- 
-    filtered = create_CConv(ctaps)
-    s_filtered = filtered(target)
-    num = energy(s_filtered)
-    den = energy(s_filtered - estimate)
-    ci_snr_val = 10.0 * jnp.log10((num + eps) / (den + eps))
-    
-    return -ci_snr_val  
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -538,7 +516,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = ci_snr_loss_fn(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    snr = si_snr(jnp.abs(jnp.abs(aligned_x), z_original.val))
     return snr, updated_state
 
               
