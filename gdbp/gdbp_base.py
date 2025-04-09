@@ -486,39 +486,60 @@ def si_snr_flattened(
         
 import jax.numpy as jnp
 
-def unsupervised_snr_svd(
-    x: jnp.ndarray,
+import jax
+import jax.numpy as jnp
+
+def unsupervised_snr_jones(
+    x: jnp.ndarray,  # shape (T, 2), complex dtype
+    v: jnp.ndarray,  # shape (2,), complex dtype (trainable or from your model)
     eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    基于 Rank-1 的多通道一致性无监督示例。
-    x.shape == (T, C)
-    1) 对 x 做 SVD 分解: x = U * S * V^T
-    2) 用最大的奇异值 s[0] 对应的 u[:,0], v[0,:] 构造 Rank-1 近似
-         x_approx = s[0] * outer(u[:, 0], v[0, :])
-    3) 把 x_approx 看作“主要信号”， x - x_approx 看作“噪声”
-    4) 计算能量比  (||x_approx||^2 / ||noise||^2) 转成 dB 并取负值返回
+    利用双偏振观测的 Rank-1 近似,
+    构造无监督的 'SNR' 风格损失:
+      1) 给定 x(t) in C^2,
+      2) 令 s(t) = <x(t), v^*> / <v, v^*>, 
+      3) 令 x_approx(t) = s(t) * v,
+      4) 噪声 e(t) = x(t) - x_approx(t),
+      5) 以 sum(|x_approx|^2) / sum(|e|^2) 做 SNR 度量, 并取负值.
+    
+    参数:
+      x : (T, 2) 复数张量, 表示T个时刻的双偏振信号
+      v : (2,)   复数向量, 对应 "Jones向量" 或 主偏振方向
+      eps: 浮点安全项
+    
+    注意:
+      - 为了让此函数可微, 需要 x, v 都是 jnp.array;
+      - 如果要训练 v, 需在外部用 jax.grad / jax.jit 包起来一起优化;
+      - s(t) 是根据最小二乘投影显式计算, 也会对 v 产生梯度.
     """
-    # x: (T, C)
-    # 1) 进行 SVD
-    U, S, Vh = jnp.linalg.svd(x, full_matrices=False)
-    # S: (min(T, C),)  (奇异值)
-    # U: (T, T)
-    # Vh: (C, C)
 
-    # 2) 只取最大的奇异值 s[0], 以及对应的左/右奇异向量
-    x_approx = S[0] * jnp.outer(U[:, 0], Vh[0, :])  # (T, C)
+    # (1) 计算 v 的范数^2
+    v_norm2 = jnp.sum(jnp.abs(v)**2) + eps
 
-    # 3) 计算残差
-    E = x - x_approx
+    # (2) 对每个 t 计算 s(t) 
+    # s(t) = ( x(t) 与 v 的内积 ) / ( ||v||^2 )
+    # x(t)* conj(v) => 这里把 x 视为行向量, v 视为列向量
+    # shape (T,)
+    st = jnp.sum(x * jnp.conj(v), axis=-1) / v_norm2
 
-    # 4) 计算能量
-    signal_energy = jnp.sum(x_approx**2)
-    noise_energy = jnp.sum(E**2)
+    # (3) 重建 x_approx(t)
+    #  x_approx(t) = s(t) * v, shape => (T, 2)
+    # 需要 broadcasting
+    x_approx = st[:, None] * v[None, :]
 
-    # 5) 定义类似 SNR 的度量并取负值做 loss
-    snr_value = 10.0 * jnp.log10((signal_energy + eps) / (noise_energy + eps))
+    # (4) 残差 e
+    e = x - x_approx
+
+    # (5) 计算信号能量与噪声能量
+    signal_energy = jnp.sum(jnp.abs(x_approx)**2)
+    noise_energy  = jnp.sum(jnp.abs(e)**2)
+
+    snr_value = 10.0 * jnp.log10( (signal_energy + eps) / (noise_energy + eps) )
+
+    # 训练时取负值做loss
     return -snr_value
+
      
         
 # def loss_fn(module: layer.Layer,
