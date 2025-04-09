@@ -484,6 +484,40 @@ def si_snr_flattened(
     si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
     return -si_snr_value
         
+def unsupervised_snr_flattened(
+    x: jnp.ndarray,
+    eps: float = 1e-8
+) -> jnp.ndarray:
+    """
+    给定 (T, 2) 形状的双通道信号 x，
+    直接用两个通道的平均值作为“公共信号”，
+    将与其差视作噪声，计算能量比并返回其负值 (供做loss使用)。
+    
+    这是一个非常朴素的无监督示例，仅用来展示实现思路。
+    """
+    # 假设 x.shape == (T, 2)
+    # 1) 计算公共信号 s(t) = average(x1(t), x2(t))
+    #    s.shape == (T,)
+    s = jnp.mean(x, axis=-1)
+
+    # 2) 计算噪声 e(t,通道) = x - s[:, None]
+    #    e.shape == (T, 2)
+    e = x - s[:, None]
+
+    # 3) 拉平为1D，方便统一计算能量
+    s_flat = s.reshape(-1)
+    e_flat = e.reshape(-1)
+
+    # 4) 计算能量
+    s_energy = jnp.sum(s_flat**2)
+    e_energy = jnp.sum(e_flat**2)
+
+    # 5) 定义类似 SNR 的度量
+    snr_value = 10.0 * jnp.log10((s_energy + eps) / (e_energy + eps))
+
+    # 6) 训练时通常取负值作为 loss
+    return -snr_value       
+        
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state: Dict,
@@ -516,7 +550,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(aligned_x), jnp.abs(z_original.val))
+    snr = unsupervised_snr_flattened(jnp.abs(z_original.val)) 
     return snr, updated_state
 
               
