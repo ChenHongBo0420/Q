@@ -484,62 +484,68 @@ def si_snr_flattened(
     si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
     return -si_snr_value
         
-import jax.numpy as jnp
-
 import jax
 import jax.numpy as jnp
 
-def unsupervised_snr_complex_rank1(
-    X: jnp.ndarray,
+def power_iteration_top_eigenvector(
+    A: jnp.ndarray,
+    num_iters: int = 10,
     eps: float = 1e-8
 ) -> jnp.ndarray:
     """
-    给定 X (T, 2) 形状的双偏振复信号，
-    1) 先对 X^H * X 做特征分解, 找到其最大特征值对应的特征向量 v (2,),
-       这相当于找 X 的最强(最大奇异值)秩1分量。
-    2) 用 v 投影 X, 得到重建的秩1近似 X_approx，残差 e = X - X_approx。
-    3) 计算 ||X_approx||^2 / ||e||^2 转成 dB，返回其负值 (-SNR) 供做无监督loss。
-
-    不需要事先给定 v，完全由数据本身确定。
+    在复数(或实数)方阵 A 上做幂迭代, 近似求最大特征值对应的特征向量.
+    A.shape = (n, n)
+    返回 shape=(n,) 的向量 v, 使得 v ~ argmax_{||v||=1} v^H A v.
+    
+    注意:
+      1) 对复数 A, 幂迭代时我们取 v <- A * v 的方式, 这里使用右乘即可;
+         需要在物理或语境上确保 A 是厄米特(Hermitian), 这样才保证
+         目标特征值/向量是可解释的.
+      2) num_iters 越多, 收敛越精确; 在反向传播中, 也会有相应开销.
+      3) JAX 对此可正常自动微分.
     """
+    n = A.shape[0]
 
-    # X.shape = (T, 2), 复数
-    # 0) 预防性检查
-    #    如果 X 是实数类型，但确实代表光纤振幅，也可在外层先转成复数 jnp.asarray(X, dtype=jnp.complex64)
+    # 初始化 v: 这里随便起个小随机数, 也可给定 seed
+    # 如果你想让函数 pure, 可改成在外部传入初始 v
+    key = jax.random.PRNGKey(42)
+    v_init = jax.random.normal(key, shape=(n,), dtype=A.dtype) \
+             + 1j * jax.random.normal(key, shape=(n,), dtype=A.dtype)
+    # 避免零向量
+    v_init = v_init / (jnp.linalg.norm(v_init) + eps)
 
-    # 1) 计算 X^H * X => (2,2) 的协方差型矩阵
-    #    conj(X) => (T,2)，转置 => (2,T)，再与 X (T,2) 矩阵乘 => (2,2)
-    XhX = jnp.conj(X).T @ X  # (2, 2), 复数
+    def body_fn(v, _):
+        # v' = A v
+        v_next = A @ v
+        # 归一化
+        v_next /= (jnp.linalg.norm(v_next) + eps)
+        return v_next, None
 
-    # 2) 对 (2,2) 矩阵做特征分解
-    #    eigenvalues e, eigenvectors V => XhX = V * diag(e) * V^{-1}
-    e, V = jnp.linalg.eig(XhX)  # e.shape = (2,), V.shape=(2,2)
-    #   JAX 的 eig 支持复数，但要注意数值稳定
+    # 运行多轮迭代
+    v_final, _ = jax.lax.scan(body_fn, v_init, None, length=num_iters)
+    return v_final
 
-    # 3) 找到最大特征值对应的特征向量(即最大奇异值方向)
-    #    以绝对值比较(因为特征值可能是复数, 但理论上对协Hermitian矩阵应为实数>=0)
-    idx = jnp.argmax(jnp.abs(e))  # 0 或 1
-    v = V[:, idx]  # shape=(2,)
+def unsupervised_snr_complex_rank1_poweriter(X: jnp.ndarray, eps=1e-8) -> jnp.ndarray:
+    """
+    类似之前 unsupervised_snr_complex_rank1，但用幂迭代替代 jnp.linalg.eig().
+    """
+    # 1) X^H X
+    XhX = jnp.conj(X).T @ X  # shape=(2,2), 复数
 
-    # 4) 可以先行归一化 v，以减少数值漂移
-    v_norm = jnp.sqrt(jnp.sum(jnp.abs(v)**2) + eps)
-    v = v / v_norm
+    # 2) 幂迭代找 top eigenvector
+    v = power_iteration_top_eigenvector(XhX, num_iters=10)
 
-    # 5) 用 v 做投影估计:  s(t) = <x(t), conj(v)>  (不需要再除以||v||^2, 
-    #    因为我们已将 v 归一化, 这样 s(t) = x(t)在v方向上的分量)
-    #    x(t)* conj(v) => (T,)
+    # 3) 用 v 做投影 (同先前逻辑)
     st = jnp.sum(X * jnp.conj(v), axis=-1)  # (T,)
-
-    # 6) 重建 X_approx(t) = s(t)*v
-    X_approx = st[:, None] * v[None, :]  # (T,2)
-
-    # 7) 计算残差 e, 以及信噪比
+    X_approx = st[:, None] * v[None, :]
     E = X - X_approx
+
     signal_energy = jnp.sum(jnp.abs(X_approx)**2)
     noise_energy  = jnp.sum(jnp.abs(E)**2)
-
     snr_value = 10.0 * jnp.log10((signal_energy + eps) / (noise_energy + eps))
-    return -snr_value  # 训练时最小化
+
+    return -snr_value
+
 
      
         
@@ -575,7 +581,7 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = unsupervised_snr_complex_rank1(jnp.abs(z_original.val)) 
+    snr = unsupervised_snr_complex_rank1_poweriter(jnp.abs(z_original.val)) 
     return snr, updated_state
 
               
