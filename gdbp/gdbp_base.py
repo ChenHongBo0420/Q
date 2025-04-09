@@ -502,67 +502,34 @@ def si_snr_flattened(
 #     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     return snr, updated_state
 
-def build_toeplitz(x, filter_len):
+def sa_sdr_2ch(target, estimate, eps=1e-8):
     """
-    构造一阶 Toeplitz 矩阵 X，使得 (X @ a) 等效于 x 与 a 的线性卷积。
-    x 形状为 (N,)，返回 X 形状为 (N, filter_len)。
+    基于 Scale-Invariant 思想的 SA-SDR，适用于 (N,2) 双通道。
+    - target, estimate 均为 (N, 2)
+    - 返回值为 -SA-SDR（用作损失）。
+    - 原理：对双通道整体寻求最优标量 alpha，
+            再计算合并后的能量比。
     """
-    N = x.shape[0]
-    X = jnp.zeros((N, filter_len))
-    for n in range(N):
-        for k in range(filter_len):
-            m = n - k
-            val = x[m] if m >= 0 else 0.
-            X = X.at[n, k].set(val)
-    return X
+    # 1) 计算内积（全局），得到最优标量 alpha
+    #    这里把 (N,2) flatten 也行，直接 sum 也行 (二者等价)
+    dot_product = jnp.sum(target * estimate)          # 标量
+    target_energy = jnp.sum(target * target)          # 标量
+    alpha = dot_product / (target_energy + eps)       # 标量系数
 
-def ci_sdr_single_channel(reference, estimate, filter_len=512, eps=1e-8):
-    """
-    计算单通道 CI-SDR (不取负号):
-      1) 构造 Toeplitz 矩阵 X
-      2) 最小二乘求解卷积滤波器 a
-      3) s_filtered = X @ a
-      4) CI-SDR = 10 * log10( ||s_filtered||^2 / ||s_filtered - estimate||^2 )
-    """
-    X = build_toeplitz(reference, filter_len)
-    # 最小二乘
-    a, *_ = jnp.linalg.lstsq(X, estimate, rcond=None)
-    # 计算卷积后的信号
-    s_filtered = X @ a
-    # 计算 CI-SDR
-    numerator = energy(s_filtered)
-    denominator = energy(s_filtered - estimate)
-    ci_sdr_value = 10.0 * jnp.log10((numerator + eps) / (denominator + eps))
-    return ci_sdr_value
+    # 2) 计算“目标部分”和“噪声部分”
+    #    s_target, e_noise 均是 (N,2)
+    s_target = alpha * target
+    e_noise = estimate - s_target
 
-def ci_sdr_multi_channel(reference, estimate, filter_len=512, eps=1e-8):
-    """
-    适用于形状 (N,2) 的 2 通道 CI-SDR。
-    会逐通道算单通道 CI-SDR，然后对结果取平均，
-    并返回 “负”的平均值作为损失（越大越好，故取负）。
-    """
-    # 假设 reference, estimate 均为 (N, 2)
-    assert reference.ndim == 2 and estimate.ndim == 2, \
-        "reference, estimate 必须是 (N, C) 形状"
-    assert reference.shape == estimate.shape, \
-        "reference 和 estimate 形状需要一致"
-    
-    num_channels = reference.shape[1]
-    
-    # 对每个通道分别计算 CI-SDR
-    ci_sdr_list = []
-    for ch in range(num_channels):
-        ref_ch = reference[:, ch]
-        est_ch = estimate[:, ch]
-        ci_sdr_val = ci_sdr_single_channel(ref_ch, est_ch, filter_len, eps)
-        ci_sdr_list.append(ci_sdr_val)
-    
-    # 计算多通道平均
-    ci_sdr_array = jnp.stack(ci_sdr_list)  # shape = (num_channels,)
-    mean_ci_sdr = jnp.mean(ci_sdr_array)   # 标量
-    
-    # 对训练通常返回负值作为 loss
-    return -mean_ci_sdr
+    # 3) 计算总能量
+    num = energy(s_target)      # \| alpha * target \|^2
+    den = energy(e_noise)       # \| estimate - alpha*target \|^2
+
+    # 4) 计算 SA-SDR
+    sa_sdr_value = 10.0 * jnp.log10((num + eps) / (den + eps))
+
+    # 5) 取负号作为损失
+    return -sa_sdr_value
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -576,8 +543,8 @@ def loss_fn(module: layer.Layer,
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = ci_sdr_multi_channel(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = sa_sdr_2ch(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
 
               
