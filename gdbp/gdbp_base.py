@@ -484,89 +484,6 @@ def si_snr_flattened(
     si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
     return -si_snr_value
         
-import jax
-import jax.numpy as jnp
-
-def power_iteration_top_eigenvector(
-    A: jnp.ndarray,
-    num_iters: int = 10,
-    eps: float = 1e-8
-) -> jnp.ndarray:
-    """
-    在复数(或实数)方阵 A 上做幂迭代, 近似求最大特征值对应的特征向量.
-    A.shape = (n, n)
-    返回 shape=(n,) 的向量 v, 使得 v ~ argmax_{||v||=1} v^H A v.
-    
-    注意:
-      1) 对复数 A, 幂迭代时我们取 v <- A * v 的方式, 这里使用右乘即可;
-         需要在物理或语境上确保 A 是厄米特(Hermitian), 这样才保证
-         目标特征值/向量是可解释的.
-      2) num_iters 越多, 收敛越精确; 在反向传播中, 也会有相应开销.
-      3) JAX 对此可正常自动微分.
-    """
-    n = A.shape[0]
-
-    # 初始化 v: 这里随便起个小随机数, 也可给定 seed
-    # 如果你想让函数 pure, 可改成在外部传入初始 v
-    key = jax.random.PRNGKey(42)
-    v_init = jax.random.normal(key, shape=(n,), dtype=A.dtype) \
-             + 1j * jax.random.normal(key, shape=(n,), dtype=A.dtype)
-    # 避免零向量
-    v_init = v_init / (jnp.linalg.norm(v_init) + eps)
-
-    def body_fn(v, _):
-        # v' = A v
-        v_next = A @ v
-        # 归一化
-        v_next /= (jnp.linalg.norm(v_next) + eps)
-        return v_next, None
-
-    # 运行多轮迭代
-    v_final, _ = jax.lax.scan(body_fn, v_init, None, length=num_iters)
-    return v_final
-
-def unsupervised_snr_complex_rank1_poweriter(X: jnp.ndarray, eps=1e-8) -> jnp.ndarray:
-    """
-    类似之前 unsupervised_snr_complex_rank1，但用幂迭代替代 jnp.linalg.eig().
-    """
-    # 1) X^H X
-    XhX = jnp.conj(X).T @ X  # shape=(2,2), 复数
-
-    # 2) 幂迭代找 top eigenvector
-    v = power_iteration_top_eigenvector(XhX, num_iters=10)
-
-    # 3) 用 v 做投影 (同先前逻辑)
-    st = jnp.sum(X * jnp.conj(v), axis=-1)  # (T,)
-    X_approx = st[:, None] * v[None, :]
-    E = X - X_approx
-
-    signal_energy = jnp.sum(jnp.abs(X_approx)**2)
-    noise_energy  = jnp.sum(jnp.abs(E)**2)
-    snr_value = 10.0 * jnp.log10((signal_energy + eps) / (noise_energy + eps))
-
-    return -snr_value
-
-
-     
-        
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
-
         
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -579,10 +496,14 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = unsupervised_snr_complex_rank1_poweriter(jnp.abs(z_original.val)) 
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
+
+        
 
               
 ############# GMI-LOSS WITH TWO PART TRINING ###################
