@@ -108,7 +108,7 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.vmap(layer.Conv1d_ffn)(name='RConv1', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='fdbp_series'
     )
@@ -126,7 +126,7 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.vmap(layer.Conv1d_ffn)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='serial_branch'  # 添加名称
     )
