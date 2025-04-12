@@ -96,6 +96,7 @@ def make_base_module(steps: int = 3,
 
     # 定义串联的 FDBP 层
     fdbp_series = layer.Serial(
+        layer.vmap(layer.Conv1d_ffn)(name='FC', taps=rtaps),
         layer.FDBP(steps=steps,
                     dtaps=dtaps,
                     ntaps=ntaps,
@@ -108,13 +109,14 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d_ffn)(name='RConv1', taps=rtaps),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='fdbp_series'
     )
 
     # 定义原有的串行分支
     serial_branch = layer.Serial(
+        layer.vmap(layer.Conv1d)(name='FC1', taps=rtaps),
         layer.FDBP1(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
@@ -126,7 +128,7 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d_ffn)(name='RConv', taps=rtaps),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='serial_branch'  # 添加名称
     )
