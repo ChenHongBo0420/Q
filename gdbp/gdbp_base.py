@@ -96,7 +96,7 @@ def make_base_module(steps: int = 3,
 
     # 定义串联的 FDBP 层
     fdbp_series = layer.Serial(
-        layer.vmap(layer.Conv1d_ffn)(name='FC', taps=rtaps),
+        layer.Conv1d_ffn(name='FC', taps=rtaps),
         layer.FDBP(steps=steps,
                     dtaps=dtaps,
                     ntaps=ntaps,
@@ -116,7 +116,7 @@ def make_base_module(steps: int = 3,
 
     # 定义原有的串行分支
     serial_branch = layer.Serial(
-        layer.vmap(layer.Conv1d)(name='FC1', taps=rtaps),
+        layer.Conv1d_ffn(name='FC', taps=rtaps),
         layer.FDBP1(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
@@ -500,9 +500,9 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
 
         
