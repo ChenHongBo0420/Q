@@ -641,6 +641,7 @@ def test(model: Model, params: Dict, m_state: Dict,
 
     # b. 乘回平均功率
     # z_val = k_mean * z.val
+    z_val = z.val
     metric = metric_fn(z_val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
