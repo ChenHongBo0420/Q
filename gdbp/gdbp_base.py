@@ -442,7 +442,22 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         t_shift = np.random.randint(shift_range1[0], shift_range1[1])
         x = jnp.roll(x, shift=t_shift)
     return x
-  
+
+def block_kappa(x, s, blk=16384):
+    """返回 (n_blk,) 复增益；默认用 conj 内积求最佳缩放"""
+    kap = []
+    for i in range(0, len(s)-blk, blk):
+        sb, xb = s[i:i+blk], x[i:i+blk]
+        kap.append(jnp.vdot(xb, sb) / jnp.vdot(sb, sb))
+    return jnp.array(kap)
+
+def _rms(sig, eps=1e-12):
+    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
+
+def _proj_mse(z, s):
+    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
+    return jnp.mean(jnp.abs(z - alpha*s)**2)
+
 def energy(x):
     return jnp.sum(jnp.square(x))
 
@@ -485,25 +500,47 @@ def si_snr_flattened(
     return -si_snr_value
         
         
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return snr, updated_state
 
-        
+ 
+def loss_fn(module: layer.Layer,
+            params: Dict, state: Dict,
+            y: Array, x: Array,
+            aux: Dict, const: Dict, sparams: Dict
+           ) -> Tuple[jnp.ndarray, Dict]:
+    params = util.dict_merge(params, sparams)
+
+    # a. RMS‑norm（match sent symbols）
+    r = _rms(x)
+    y, x = y / r, x / r
+
+    # b. 前向
+    z, new_state = module.apply(
+        {'params': params, 'aux_inputs': aux,
+         'const': const, **state},
+        core.Signal(y))
+
+    x_aligned = x[z.t.start:z.t.stop]
+
+    # c. 投影‑MSE
+    loss = _proj_mse(z.val, x_aligned)
+    return loss, new_state    
 
               
 ############# GMI-LOSS WITH TWO PART TRINING ###################
@@ -782,70 +819,120 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-def train(model: Model,
-          data: gdat.Input,
-          batch_size: int = 500,
-          n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter = None,
+#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+#     ''' training process (1 epoch)
 
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#             data: dataset
+#             batch_size: batch size
+#             opt: optimizer
 
-        Returns:
-            yield loss, trained parameters, module state
-    '''
+#         Returns:
+#             yield loss, trained parameters, module state
+#     '''
 
-    params, module_state, aux, const, sparams = model.initvar
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+#     for i, (y, x) in tqdm(enumerate(batch_gen),
+#                              total=n_iter, desc='training', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
+#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+#                                                    module_state, y, x, aux,
+#                                                    const, sparams)
+#         yield loss, opt.params_fn(opt_state), module_state
+
+def train(model: Model, data: gdat.Input,
+          batch_size=500, n_iter=None,
+          opt = gb.optim.adam(               # 复用原 optim
+              gb.optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
+         ):
+    """返回 (params,state) 以及训练集 |κ|̄"""
+    # a. 估计 K‑MEAN
+    k_mean = _estimate_kmean(
+        np.asarray(data.y[:,0]), np.asarray(data.x[:,0]))
+
+    params, m_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    # b. batch 生成
+    n_batch, batch_gen = gb.get_train_batch(
+        data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
-        if i >= n_iter: break
+    for i,(y,x) in tqdm(enumerate(batch_gen),
+                        total=n_iter, desc='train', leave=False):
+        if i>=n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-        yield loss, opt.params_fn(opt_state), module_state
+        loss, opt_state, m_state = update_step(
+            model.module, opt, i, opt_state,
+            m_state, y, x, aux, const, sparams)
 
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
+    return opt.params_fn(opt_state), m_state, k_mean
+                 
+# def test(model: Model,
+#          params: Dict,
+#          data: gdat.Input,
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+#     ''' testing, a simple forward pass
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#         data: dataset
+#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+#             BER, Q, SER and more metrics.
+
+#         Returns:
+#             evaluated matrics and equalized symbols
+#     '''
+
+#     state, aux, const, sparams = model.initvar[1:]
+#     aux = core.dict_replace(aux, {'truth': data.x})
+#     if params is None:
+#       params = model.initvar[0]
+
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(data.y))
+#     metric = metric_fn(z.val,
+#                        data.x[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
+#                        eval_range=eval_range)
+#     return metric, z
+
+def test(model: Model, params: Dict, m_state: Dict,
+         data: gdat.Input, k_mean: float,
+         eval_range=(300000,-20000),
          metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
-    state, aux, const, sparams = model.initvar[1:]
+    state, aux, const, sparams = m_state
     aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
+    # a. RMS‑norm for y
+    r = np.sqrt(np.mean(np.abs(data.x)**2))
+    z,_ = jit(model.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **state},
+        core.Signal(data.y / r))
+
+    # b. 乘回平均功率
+    z_val = k_mean * z.val
+    metric = metric_fn(z_val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-    return metric, z
+    return metric
