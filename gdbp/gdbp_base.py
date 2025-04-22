@@ -642,10 +642,10 @@ def test(model: Model, params: Dict, m_state: Dict,
         core.Signal(data.y / r))
 
     # b. 乘回平均功率
-    # z_val = k_mean * z.val
-    z_val = z.val
-    metric = metric_fn(z_val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
+    z_val = k_mean * z.val
+    metric = metric_fn(
+    z_val,
+    data.x[z.t.start:z.t.stop],
+    eval_range=eval_range)     # 把 scale 参数删掉
+
     return metric
