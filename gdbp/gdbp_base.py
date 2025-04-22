@@ -570,7 +570,7 @@ def train(model: Model, data: gdat.Input,
     # a. 估计 K‑MEAN
     k_mean = _estimate_kmean(
         np.asarray(data.y[:,0]), np.asarray(data.x[:,0]))
-
+    print("k_mean =", k_mean)      # 理论上应 0.95–1.05 左右
     params, m_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
