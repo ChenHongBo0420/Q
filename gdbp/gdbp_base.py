@@ -636,16 +636,22 @@ def test(model: Model, params: Dict, m_state: Dict,
 
     # a. RMS‑norm for y
     r = np.sqrt(np.mean(np.abs(data.x)**2))
+
+    # 前向：y_norm
     z,_ = jit(model.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y / r))
 
-    # b. 乘回平均功率
-    z_val = k_mean * z.val
-    metric = metric_fn(
-    z_val,
-    data.x[z.t.start:z.t.stop],
-    eval_range=eval_range)     # 把 scale 参数删掉
+    # (可选) 乘回 k_mean
+    z_val = k_mean * z.val          # k_mean≈1 时也可直接 z.val
 
+    # 把参考符号也做同样归一
+    x_ref = data.x / r
+    x_ref = x_ref[z.t.start:z.t.stop]
+
+    metric = comm.qamqot(
+        z_val,
+        x_ref,                       # ← 现在两边同尺度
+        eval_range=eval_range)       # 无 scale 参数
     return metric
