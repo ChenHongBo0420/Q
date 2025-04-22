@@ -575,7 +575,7 @@ def train(model: Model, data: gdat.Input,
     opt_state = opt.init_fn(params)
 
     # b. batch 生成
-    n_batch, batch_gen = gb.get_train_batch(
+    n_batch, batch_gen = get_train_batch(
         data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
