@@ -629,29 +629,31 @@ def train(model: Model, data: gdat.Input,
 
 def test(model: Model, params: Dict, m_state: Dict,
          data: gdat.Input, k_mean: float,
-         eval_range=(300000,-20000),
-         metric_fn=comm.qamqot):
+         eval_range=(300000,-20000)):
     state, aux, const, sparams = m_state
     aux = core.dict_replace(aux, {'truth': data.x})
 
-    # a. RMS‑norm for y
+    # ① 训练同款 rms
     r = np.sqrt(np.mean(np.abs(data.x)**2))
 
-    # 前向：y_norm
+    # ② 前向 (y 已除 r)
     z,_ = jit(model.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y / r))
 
-    # (可选) 乘回 k_mean
-    z_val = k_mean * z.val          # k_mean≈1 时也可直接 z.val
+    # ③ 可选乘回 k_mean（若它≈1 可直接 z.val）
+    z_val = k_mean * z.val
 
-    # 把参考符号也做同样归一
+    # ④ 参考符号同步除 r
     x_ref = data.x / r
-    x_ref = x_ref[z.t.start:z.t.stop]
+    x_ref = x_ref[z.t.start : z.t.stop]
 
+    # ⑤ 评估 —— scale 设 1.0
     metric = comm.qamqot(
         z_val,
-        x_ref,                       # ← 现在两边同尺度
-        eval_range=eval_range)       # 无 scale 参数
+        x_ref,
+        scale=1.0,                 # ⚠️ 必须显式给 1.0
+        eval_range=eval_range)
     return metric
+
