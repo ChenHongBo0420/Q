@@ -568,8 +568,10 @@ def train(model: Model, data: gdat.Input,
               optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
     """返回 (params,state) 以及训练集 |κ|̄"""
     # a. 估计 K‑MEAN
-    k_mean = _estimate_kmean(
-        np.asarray(data.y[:,0]), np.asarray(data.x[:,0]))
+    # k_mean = _estimate_kmean(
+    #     np.asarray(data.y[:,0]), np.asarray(data.x[:,0]))
+    k_mean = _estimate_kmean(data.y[::2,0],  # 复信号两倍采样 → 抽 Dec2
+                         data.x[:,0])
     print("k_mean =", k_mean)      # 理论上应 0.95–1.05 左右
     params, m_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
