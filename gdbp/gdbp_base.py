@@ -6,7 +6,7 @@ import numpy as np
 from functools import partial
 from collections import namedtuple
 from tqdm.auto import tqdm
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Tuple
 from . import data as gdat
 import jax
 from scipy import signal
@@ -14,6 +14,7 @@ from flax import linen as nn
 from sklearn.neighbors import KernelDensity
 from jax.scipy.stats import norm
 from jax import jit, lax
+from typing import Tuple
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
