@@ -624,32 +624,43 @@ def test(model: Model,
     return metric, z
                  
 def test_once(model_te, params, state_bundle, data_te,
-              eval_range=(300_000,-20_000)):
+              eval_range=(300_000, -20_000)):
     module_state, aux, const, sparams = state_bundle
     aux = core.dict_replace(aux, {'truth': data_te.x})
 
-                      
+    # --- ① 仅归一 Rx 波形 ---
+    r  = np.sqrt(np.mean(np.abs(data_te.x)**2))     # ≈ √10
+    sig_norm = data_te.y / r
+
+    # --- ② 前向 ---
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(data_te.y))
+        core.Signal(sig_norm))
 
+    # --- ③ QoT ---
+    x_ref = data_te.x[z.t.start:z.t.stop]           # 原尺度
     metric = comm.qamqot(
         z.val,
-        data_te.x[z.t.start:z.t.stop],
-        scale=1.0,
+        x_ref,
+        scale=np.sqrt(10),                          # 显式 √10
         eval_range=eval_range)
     return metric, z
+
                       
 def equalize_dataset(model_te, params, state_bundle, data):
-    """返回 (eq_wave, ref_sym) —— 均为 1-pol, 已对齐同长度"""
     module_state, aux, const, sparams = state_bundle
-    r   = np.sqrt(np.mean(np.abs(data.x)**2))
+    r  = np.sqrt(np.mean(np.abs(data.x)**2))
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
         core.Signal(data.y / r))
-    return np.asarray(z.val[:,0]), np.asarray(data.x)[z.t.start:z.t.stop,0]
+
+    start, stop = z.t.start, z.t.stop
+    z_eq  = np.asarray(z.val[:,0])          # equalized
+    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
+    return z_eq, s_ref
+
                 
 ##### LMS - LOSS #####
 # def test(model: Model,
