@@ -462,7 +462,8 @@ def loss_fn(module: layer.Layer,
     x_aligned = x[z.t.start:z.t.stop]
 
     # c. 投影‑MSE
-    loss = _proj_mse(z.val, x_aligned)
+    # loss = _proj_mse(z.val, x_aligned)
+    loss = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return loss, new_state    
 
 
