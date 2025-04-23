@@ -579,7 +579,7 @@ def train_once(model_tr, data_tr,
                         total=min(n_iter,n_batch), desc='train', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})   # 保存真符号
-        loss, opt_state, module_state = gb.update_step(
+        loss, opt_state, module_state = update_step(
             model_tr.module, opt, i, opt_state,
             module_state, y, x, aux, const, sparams)
 
