@@ -628,29 +628,27 @@ def train(model: Model, data: gdat.Input,
 #     return metric, z
 
 def test(model: Model, params: Dict, m_state: Dict,
-         data: gdat.Input, k_mean: float,
-         eval_range=(300000,-20000)):
+         data: gdat.Input,
+         eval_range=(300000, -20000)):
     state, aux, const, sparams = m_state
     aux = core.dict_replace(aux, {'truth': data.x})
 
-    # ① rms
+    # ① 统一 RMS 归一
     r = np.sqrt(np.mean(np.abs(data.x)**2))
+    y_norm = data.y / r
+    x_norm = data.x / r
 
-    # ② 前向 (y/r)
-    z,_ = jit(model.module.apply, backend='cpu')(
+    # ② 前向
+    z, _ = jit(model.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **state},
-        core.Signal(data.y / r))
+        core.Signal(y_norm))
 
-    # ③ 乘回 k_mean 与 r
-    y_eval = k_mean * z.val * r      # ← 功率完全回原幅度
-
-    x_ref = data.x[z.t.start : z.t.stop]
-
-    # ④ 评估 —— scale 继续用 √10
+    # ③ 评估 —— 不传 scale、不再乘 k_mean
     metric = comm.qamqot(
-        y_eval,
-        x_ref,
-        scale=np.sqrt(10),
+        z.val,
+        x_norm[z.t.start : z.t.stop],
+        scale=1.0,                      # ← 显式 1.0
         eval_range=eval_range)
+
     return metric
