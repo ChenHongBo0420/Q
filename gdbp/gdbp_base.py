@@ -628,13 +628,11 @@ def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
     module_state, aux, const, sparams = state_bundle
     aux = core.dict_replace(aux, {'truth': data.x})
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
+    z,_ = jax.jit(model.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **module_state},
+        core.Signal(data.y))
+                      
     metric = metric_fn(z.val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
