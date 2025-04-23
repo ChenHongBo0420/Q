@@ -596,28 +596,29 @@ def train(model: Model,
 #                        eval_range=eval_range)
 #     return metric, z
 
-def test(model: Model, params: Dict, m_state: Dict,
+def test(model: Model,
+         params: Dict,
          data: gdat.Input,
-         eval_range=(300000, -20000)):
-    state, aux, const, sparams = m_state
-    aux = core.dict_replace(aux, {'truth': data.x})
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
 
-    # ① 统一 RMS 归一
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+      params = model.initvar[0]
+            
     r = np.sqrt(np.mean(np.abs(data.x)**2))
     y_norm = data.y / r
     x_norm = data.x / r
-
-    # ② 前向
-    z, _ = jit(model.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y_norm))
-
-    # ③ 评估 —— 不传 scale、不再乘 k_mean
-    metric = comm.qamqot(
-        z.val,
-        x_norm[z.t.start : z.t.stop],
-        scale=1.0,                      # ← 显式 1.0
-        eval_range=eval_range)
-
-    return metric
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(y_norm))
+    metric = metric_fn(z.val,
+                       x_norm[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
