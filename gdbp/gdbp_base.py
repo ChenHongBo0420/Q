@@ -560,7 +560,33 @@ def train(model: Model,
                                                    module_state, y, x, aux,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
-                 
+                                     
+def train_once(model_tr, data_tr, 
+               batch_size=500, n_iter=3000):
+    """return  params , state_bundle"""
+    params, module_state, aux, const, sparams = model_tr.initvar
+
+    # ——优化器
+    opt = gb.optim.adam(
+            gb.optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
+    opt_state = opt.init_fn(params)
+
+    # ——batch 生成
+    n_batch, batch_gen = gb.get_train_batch(
+        data_tr, batch_size, model_tr.overlaps)
+
+    for i,(y,x) in tqdm(enumerate(batch_gen),
+                        total=min(n_iter,n_batch), desc='train', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})   # 保存真符号
+        loss, opt_state, module_state = gb.update_step(
+            model_tr.module, opt, i, opt_state,
+            module_state, y, x, aux, const, sparams)
+
+    params = opt.params_fn(opt_state)
+    state_bundle = (module_state, aux, const, sparams)
+    return params, state_bundle        
+                       
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
@@ -597,6 +623,36 @@ def test(model: Model,
                        eval_range=eval_range)
     return metric, z
                  
+def test_once(model_te, params, state_bundle, data_te,
+              eval_range=(300_000,-20_000)):
+    module_state, aux, const, sparams = state_bundle
+    aux = core.dict_replace(aux, {'truth': data_te.x})
+
+    # ——RMS-norm
+    r = np.sqrt(np.mean(np.abs(data_te.x)**2))
+    sig = data_te.y / r
+    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **module_state},
+        core.Signal(sig))
+
+    metric = comm.qamqot(
+        z.val,
+        (data_te.x/r)[z.t.start:z.t.stop],
+        scale=1.0,
+        eval_range=eval_range)
+    return metric, z
+                      
+def equalize_dataset(model_te, params, state_bundle, data):
+    """返回 (eq_wave, ref_sym) —— 均为 1-pol, 已对齐同长度"""
+    module_state, aux, const, sparams = state_bundle
+    r   = np.sqrt(np.mean(np.abs(data.x)**2))
+    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **module_state},
+        core.Signal(data.y / r))
+    return np.asarray(z.val[:,0]), np.asarray(data.x)[z.t.start:z.t.stop,0]
+                
 ##### LMS - LOSS #####
 # def test(model: Model,
 #          params: Dict,
