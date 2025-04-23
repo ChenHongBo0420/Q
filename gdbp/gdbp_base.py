@@ -624,7 +624,7 @@ def test(model: Model,
     return metric, z
                  
 def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
-              eval_range=(300_000, -20_000)):
+              eval_range=(300_000, -20_000), metric_fn=comm.qamqot):
     module_state, aux, const, sparams = state_bundle
     aux = core.dict_replace(aux, {'truth': data.x})
 
