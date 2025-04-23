@@ -528,68 +528,37 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
 
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
 
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
+        Returns:
+            yield loss, trained parameters, module state
+    '''
 
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
-
-def train(model: Model, data: gdat.Input,
-          batch_size=500, n_iter=None,
-          opt=None):
-    if opt is None:                      
-        opt = optim.adam(
-              optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
-    """返回 (params,state) 以及训练集 |κ|̄"""
-    # a. 估计 K‑MEAN
-    # k_mean = _estimate_kmean(
-    #     np.asarray(data.y[:,0]), np.asarray(data.x[:,0]))
-    k_mean = _estimate_kmean(data.y[::2,0],  # 复信号两倍采样 → 抽 Dec2
-                         data.x[:,0])
-    print("k_mean =", k_mean)      # 理论上应 0.95–1.05 左右
-    params, m_state, aux, const, sparams = model.initvar
+    params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    # b. batch 生成
-    n_batch, batch_gen = get_train_batch(
-        data, batch_size, model.overlaps)
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i,(y,x) in tqdm(enumerate(batch_gen),
-                        total=n_iter, desc='train', leave=False):
-        if i>=n_iter: break
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, m_state = update_step(
-            model.module, opt, i, opt_state,
-            m_state, y, x, aux, const, sparams)
-
-    return opt.params_fn(opt_state), (m_state, aux, const, sparams), k_mean
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
                  
 # def test(model: Model,
 #          params: Dict,
