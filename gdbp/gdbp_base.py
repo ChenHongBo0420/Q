@@ -567,12 +567,12 @@ def train_once(model_tr, data_tr,
     params, module_state, aux, const, sparams = model_tr.initvar
 
     # ——优化器
-    opt = gb.optim.adam(
-            gb.optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
+    opt = optim.adam(
+            optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
     opt_state = opt.init_fn(params)
 
     # ——batch 生成
-    n_batch, batch_gen = gb.get_train_batch(
+    n_batch, batch_gen = get_train_batch(
         data_tr, batch_size, model_tr.overlaps)
 
     for i,(y,x) in tqdm(enumerate(batch_gen),
