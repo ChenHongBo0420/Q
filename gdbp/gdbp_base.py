@@ -423,48 +423,48 @@ def si_snr_flattened(
     return -si_snr_value
         
         
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
 
  
-def loss_fn(module: layer.Layer,
-            params: Dict, state: Dict,
-            y: Array, x: Array,
-            aux: Dict, const: Dict, sparams: Dict
-           ) -> Tuple[jnp.ndarray, Dict]:
-    params = util.dict_merge(params, sparams)
+# def loss_fn(module: layer.Layer,
+#             params: Dict, state: Dict,
+#             y: Array, x: Array,
+#             aux: Dict, const: Dict, sparams: Dict
+#            ) -> Tuple[jnp.ndarray, Dict]:
+#     params = util.dict_merge(params, sparams)
 
-    # a. RMS‑norm（match sent symbols）
-    r = _rms(x)
-    y, x = y / r, x / r
+#     # a. RMS‑norm（match sent symbols）
+#     r = _rms(x)
+#     y, x = y / r, x / r
 
-    # b. 前向
-    z, new_state = module.apply(
-        {'params': params, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+#     # b. 前向
+#     z, new_state = module.apply(
+#         {'params': params, 'aux_inputs': aux,
+#          'const': const, **state},
+#         core.Signal(y))
 
-    x_aligned = x[z.t.start:z.t.stop]
+#     x_aligned = x[z.t.start:z.t.stop]
 
-    # c. 投影‑MSE
-    # loss = _proj_mse(z.val, x_aligned)
-    loss = si_snr(jnp.abs(z.val), jnp.abs(x_aligned)) 
-    return loss, new_state    
+#     # c. 投影‑MSE
+#     # loss = _proj_mse(z.val, x_aligned)
+#     loss = si_snr(jnp.abs(z.val), jnp.abs(x_aligned)) 
+#     return loss, new_state    
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
@@ -561,65 +561,65 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                  
-# def test(model: Model,
-#          params: Dict,
-#          data: gdat.Input,
-#          eval_range: tuple=(300000, -20000),
-#          metric_fn=comm.qamqot):
-#     ''' testing, a simple forward pass
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#         data: dataset
-#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-#             BER, Q, SER and more metrics.
-
-#         Returns:
-#             evaluated matrics and equalized symbols
-#     '''
-
-#     state, aux, const, sparams = model.initvar[1:]
-#     aux = core.dict_replace(aux, {'truth': data.x})
-#     if params is None:
-#       params = model.initvar[0]
-
-#     z, _ = jit(model.module.apply,
-#                backend='cpu')({
-#                    'params': util.dict_merge(params, sparams),
-#                    'aux_inputs': aux,
-#                    'const': const,
-#                    **state
-#                }, core.Signal(data.y))
-#     metric = metric_fn(z.val,
-#                        data.x[z.t.start:z.t.stop],
-#                        scale=np.sqrt(10),
-#                        eval_range=eval_range)
-#     return metric, z
-
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
          eval_range: tuple=(300000, -20000),
          metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
       params = model.initvar[0]
-            
-    r = np.sqrt(np.mean(np.abs(data.x)**2))
-    y_norm = data.y / r
-    x_norm = data.x / r
+
     z, _ = jit(model.module.apply,
                backend='cpu')({
                    'params': util.dict_merge(params, sparams),
                    'aux_inputs': aux,
                    'const': const,
                    **state
-               }, core.Signal(y_norm))
+               }, core.Signal(data.y))
     metric = metric_fn(z.val,
-                       x_norm[z.t.start:z.t.stop],
+                       data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
+
+# def test(model: Model,
+#          params: Dict,
+#          data: gdat.Input,
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+
+#     state, aux, const, sparams = model.initvar[1:]
+#     aux = core.dict_replace(aux, {'truth': data.x})
+#     if params is None:
+#       params = model.initvar[0]
+            
+#     r = np.sqrt(np.mean(np.abs(data.x)**2))
+#     y_norm = data.y / r
+#     x_norm = data.x / r
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(y_norm))
+#     metric = metric_fn(z.val,
+#                        x_norm[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
+#                        eval_range=eval_range)
+#     return metric, z
