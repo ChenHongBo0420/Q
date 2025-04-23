@@ -642,11 +642,10 @@ def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
                       
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
-    r  = np.sqrt(np.mean(np.abs(data.x)**2))
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(data.y / r))
+        core.Signal(data.y))
 
     start, stop = z.t.start, z.t.stop
     z_eq  = np.asarray(z.val[:,0])          # equalized
