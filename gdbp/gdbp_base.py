@@ -628,17 +628,15 @@ def test_once(model_te, params, state_bundle, data_te,
     module_state, aux, const, sparams = state_bundle
     aux = core.dict_replace(aux, {'truth': data_te.x})
 
-    # ——RMS-norm
-    r = np.sqrt(np.mean(np.abs(data_te.x)**2))
-    sig = data_te.y / r
+                      
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(sig))
+        core.Signal(data_te.y))
 
     metric = comm.qamqot(
         z.val,
-        (data_te.x/r)[z.t.start:z.t.stop],
+        data_te.x[z.t.start:z.t.stop],
         scale=1.0,
         eval_range=eval_range)
     return metric, z
