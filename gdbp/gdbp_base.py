@@ -623,28 +623,22 @@ def test(model: Model,
                        eval_range=eval_range)
     return metric, z
                  
-def test_once(model_te, params, state_bundle, data_te,
+def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
               eval_range=(300_000, -20_000)):
     module_state, aux, const, sparams = state_bundle
-    aux = core.dict_replace(aux, {'truth': data_te.x})
+    aux = core.dict_replace(aux, {'truth': data.x})
 
-    # --- ① 仅归一 Rx 波形 ---
-    r  = np.sqrt(np.mean(np.abs(data_te.x)**2))     # ≈ √10
-    sig_norm = data_te.y / r
-
-    # --- ② 前向 ---
-    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(sig_norm))
-
-    # --- ③ QoT ---
-    x_ref = data_te.x[z.t.start:z.t.stop]           # 原尺度
-    metric = comm.qamqot(
-        z.val,
-        x_ref,
-        scale=np.sqrt(10),                          # 显式 √10
-        eval_range=eval_range)
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
     return metric, z
 
                       
