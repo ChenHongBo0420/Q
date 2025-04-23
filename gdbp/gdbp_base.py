@@ -423,25 +423,25 @@ def si_snr_flattened(
     return -si_snr_value
         
         
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return mse_loss, updated_state
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return mse_loss, updated_state
 
- 
+#### LMS - LOSS #####
 # def loss_fn(module: layer.Layer,
 #             params: Dict, state: Dict,
 #             y: Array, x: Array,
@@ -466,6 +466,35 @@ def loss_fn(module: layer.Layer,
 #     loss = si_snr(jnp.abs(z.val), jnp.abs(x_aligned)) 
 #     return loss, new_state    
 
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict):
+    """投影-MSE  (= -SI-SNR 的单调映射)
+
+    L = 1/N · ‖ z − α·s ‖²
+    其中 α = ⟨z , s⟩ / ⟨s , s⟩ 为最优复缩放
+    """
+    # 1) 前向
+    params = util.dict_merge(params, sparams)
+    z, new_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y))
+
+    # 2) 取对齐的参考符号
+    s = x[z.t.start : z.t.stop]      # shape (T, 2) or (T,)
+
+    # 3) 最小二乘投影系数  α
+    alpha = jnp.vdot(z.val, s) / jnp.vdot(s, s)    # conj 内积
+
+    # 4) 投影-MSE  (等价于 -SI-SNR 的单调函数)
+    proj_mse = jnp.mean(jnp.abs(z.val - alpha * s) ** 2)
+
+    return proj_mse, new_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -596,7 +625,8 @@ def test(model: Model,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
-
+                 
+##### LMS - LOSS #####
 # def test(model: Model,
 #          params: Dict,
 #          data: gdat.Input,
