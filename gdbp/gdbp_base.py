@@ -394,52 +394,88 @@ def si_snr(target, estimate, eps=1e-8):
     noise_energy = energy(e_noise)
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
-        
-def si_snr_flattened(
-    target: jnp.ndarray, 
-    estimate: jnp.ndarray,
-    eps: float = 1e-8
-) -> jnp.ndarray:
+
+def _si_snr_1ch(target: jnp.ndarray,
+                estimate: jnp.ndarray,
+                eps: float = 1e-8) -> jnp.ndarray:
     """
-    将( T, 2 )形状(双偏振)的时域信号展开成( 2T, )后,
-    计算单通道意义下的SI-SNR, 返回其负值做loss.
+    target, estimate 形状均为 (T,) — 单极化 1-D 序列
+    返回 -SI-SNR (dB) —— 可直接用作 loss 分量
     """
+    dot = jnp.vdot(target, estimate).real                 # ⟨s,x⟩
+    s_target = (dot / (jnp.vdot(target, target).real + eps)) * target
+    e_noise  = estimate - s_target
+    snr_val  = 10.0 * jnp.log10(
+        (jnp.vdot(s_target, s_target).real + eps) /
+        (jnp.vdot(e_noise , e_noise ).real + eps)
+    )
+    return -snr_val     
+                        
+def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
+         eps: float = 1e-8) -> jnp.ndarray:
+    """
+    target, estimate 形状均为 (T,2) — 双偏振符号级数据
+    EVM 定义为 √E{|x-s|²} / √E{|s|²}; 这里返回其平方方便梯度
+    """
+    num = jnp.mean(jnp.abs(estimate - target) ** 2)
+    den = jnp.mean(jnp.abs(target) ** 2) + eps
+    return num / den  
 
-    # 假设 (T,2)
-    # flatten => (2T,)
-    target_1d = jnp.reshape(target, (-1,))
-    estimate_1d = jnp.reshape(estimate, (-1,))
-
-    # 然后调用和单通道同样的si_snr逻辑
-    dot_product = jnp.sum(target_1d * estimate_1d)
-    target_energy = jnp.sum(target_1d**2) + eps
-    s_target = (dot_product / target_energy) * target_1d
-
-    e_noise = estimate_1d - s_target
-    t_energy = jnp.sum(s_target**2)
-    n_energy = jnp.sum(e_noise**2)
-
-    si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
-    return -si_snr_value
-        
-        
 def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    return snr, updated_state
+            params: dict,
+            state: dict,
+            y: jnp.ndarray,         # Rx 波形  shape = (Nsamp, 2)
+            x: jnp.ndarray,         # Tx 符号  shape = (Nsym , 2)
+            aux: dict,
+            const: dict,
+            sparams: dict,
+            alpha: float = 0.7      # α: SI-SNR 权重
+           ):
+    """
+    α   :  0.0–1.0 之间 — α 越大越着重簇间距 (SI-SNR)，α 越小越着重簇内方差 (EVM)
+    可自行加参数 lambda_cross 叠加 cross-pol 惩罚项
+    """
+    # —— 1) 前向推理 ——————————————————————————
+    merged = util.dict_merge(params, sparams)
+    z_sig , new_state = module.apply(
+        {'params': merged, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y) )
+
+    # —— 2) 对齐 Tx/Rx 序列 ————————————————————
+    tx_aligned  = x[z_sig.t.start : z_sig.t.stop]          # shape = (N,2)
+    rx_equal    = z_sig.val                                # shape = (N,2)
+
+    # —— 3) 逐极化计算 -SI-SNR ————————————————
+    snr_dim0 = _si_snr_1ch(tx_aligned[:,0], rx_equal[:,0])
+    snr_dim1 = _si_snr_1ch(tx_aligned[:,1], rx_equal[:,1])
+    snr_pair = (snr_dim0 + snr_dim1) / 2.0                 # 取平均或求和均可
+
+    # —— 4) 计算整体 EVM ————————————————
+    evm_loss = _evm(tx_aligned, rx_equal)
+
+    # —— 5) 总损失：L = α·(-SI-SNR_pair) + (1-α)·EVM ——
+    total_loss = alpha * snr_pair + (1.0 - alpha) * evm_loss
+    
+    # —— 6) 返回 (loss, new_state) 以适配 gdbp_base —— 
+    return total_loss, new_state
+                   
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     return snr, updated_state
+
 
 #### LMS - LOSS #####
 # def loss_fn(module: layer.Layer,
