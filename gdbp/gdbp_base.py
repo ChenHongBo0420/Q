@@ -454,8 +454,8 @@ def loss_fn(module: layer.Layer,
     evm_loss = _evm(tx_aligned, rx_equal)
 
     # —— 5) 总损失：L = α·(-SI-SNR_pair) + (1-α)·EVM ——
-    total_loss = alpha * snr_pair + (1.0 - alpha) * evm_loss
-    
+    # total_loss = alpha * snr_pair + (1.0 - alpha) * evm_loss
+    total_loss = snr_pair
     # —— 6) 返回 (loss, new_state) 以适配 gdbp_base —— 
     return total_loss, new_state
                    
