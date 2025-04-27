@@ -448,7 +448,7 @@ def loss_fn(module: layer.Layer,
     # —— 3) 逐极化计算 -SI-SNR ————————————————
     snr_dim0 = _si_snr_1ch(tx_aligned[:,0], rx_equal[:,0])
     snr_dim1 = _si_snr_1ch(tx_aligned[:,1], rx_equal[:,1])
-    snr_pair = (snr_dim0 + snr_dim1) / 2.0                 # 取平均或求和均可
+    snr_pair = jnp.sqrt((snr_dim0**2 + snr_dim1**2) / 2.0)               # 取平均或求和均可
 
     # —— 4) 计算整体 EVM ————————————————
     evm_loss = _evm(tx_aligned, rx_equal)
