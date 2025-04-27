@@ -474,8 +474,8 @@ def loss_fn(module: layer.Layer,
     rx_equal    = z_sig.val                                # shape = (N,2)
 
     # —— 3) 逐极化计算 -SI-SNR ————————————————
-    snr_dim0 = _si_snr_db_soft(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]), c=30)
-    snr_dim1 = _si_snr_db_soft(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]), c=30)
+    snr_dim0 = _si_snr_sig(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]), c=30)
+    snr_dim1 = _si_snr_sig(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]), c=30)
     loss = 0.5*(snr_dim0 + snr_dim1)
           
 
