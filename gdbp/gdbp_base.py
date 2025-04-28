@@ -411,17 +411,34 @@ def si_snr(target, estimate, eps=1e-8):
 #     )
 #     return -snr_val    
         
-def evm_ring(tx, rx, eps=1e-8):
-    r = jnp.abs(tx)
-    mask_in  = r < 0.6
-    mask_mid = (r >= 0.6) & (r < 1.1)
-    mask_out = r >= 1.1
-    def _evm(m):     # m: bool mask
-        return jnp.mean(jnp.abs(rx[m]-tx[m])**2) / (jnp.mean(jnp.abs(tx[m])**2)+eps)
-    w_in, w_mid, w_out = 1.0, 1.5, 2.0          # 可调
-    return (w_in  *_evm(mask_in)  +
-            w_mid *_evm(mask_mid) +
-            w_out *_evm(mask_out))
+def evm_ring(tx, rx, eps=1e-8,
+             thr_in=0.60, thr_mid=1.10,
+             w_in=1.0, w_mid=1.5, w_out=2.0):
+    """
+    ring-wise EVM²  (JAX-friendly, 无布尔索引)
+    ----------------------------------------------------------
+      tx, rx : 复数 (N,2)  ——  Tx 真值 / Rx 符号
+      thr_*  : 半径阈值，按 16-QAM 三环分割
+      w_*    : 三环权重
+    返回     : 标量损失（数值越小越好）
+    """
+    r   = jnp.abs(tx)                     # (N,2)
+    err2= jnp.abs(rx - tx)**2             # (N,2)
+    sig2= jnp.abs(tx)**2                  # (N,2)
+
+    # 0/1 mask（float32 才能 JIT）
+    m_in  = (r < thr_in).astype(tx.dtype)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(tx.dtype)
+    m_out = (r >= thr_mid).astype(tx.dtype)
+
+    def _evm(mask):
+        num = jnp.sum(err2 * mask)
+        den = jnp.sum(sig2 * mask) + eps
+        return num / den                  # = EVM² of that ring
+
+    return (w_in  * _evm(m_in) +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
                  
 def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     """幅度|·|，两极化展平后算 α，再平分给两路"""
