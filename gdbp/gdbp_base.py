@@ -403,31 +403,24 @@ lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])
 def evm_ring(tx, rx, eps=1e-8,
              thr_in=0.60, thr_mid=1.10,
              w_in=1.0, w_mid=1.5, w_out=2.0):
-    """
-    ring-wise EVM²  (JAX-friendly, 无布尔索引)
-    ----------------------------------------------------------
-      tx, rx : 复数 (N,2)  ——  Tx 真值 / Rx 符号
-      thr_*  : 半径阈值，按 16-QAM 三环分割
-      w_*    : 三环权重
-    返回     : 标量损失（数值越小越好）
-    """
-    r   = jnp.abs(tx)                     # (N,2)
-    err2= jnp.abs(rx - tx)**2             # (N,2)
-    sig2= jnp.abs(tx)**2                  # (N,2)
+    r    = jnp.abs(tx)
+    err2 = jnp.abs(rx - tx)**2
+    sig2 = jnp.abs(tx)**2
 
-    # 0/1 mask（float32 才能 JIT）
-    m_in  = (r < thr_in).astype(tx.dtype)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(tx.dtype)
-    m_out = (r >= thr_mid).astype(tx.dtype)
+    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    m_in  = (r < thr_in).astype(jnp.float32)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
 
     def _evm(mask):
         num = jnp.sum(err2 * mask)
         den = jnp.sum(sig2 * mask) + eps
-        return num / den                  # = EVM² of that ring
+        return num / den
 
     return (w_in  * _evm(m_in) +
             w_mid * _evm(m_mid) +
             w_out * _evm(m_out))
+
 
 def phase_err(tx, rx):
     return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
