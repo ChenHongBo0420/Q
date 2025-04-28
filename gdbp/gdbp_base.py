@@ -449,39 +449,21 @@ def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
     return num / den  
 
 def loss_fn(module: layer.Layer,
-            params: dict,
-            state: dict,
-            y: jnp.ndarray,         # Rx 波形  shape = (Nsamp, 2)
-            x: jnp.ndarray,         # Tx 符号  shape = (Nsym , 2)
-            aux: dict,
-            const: dict,
-            sparams: dict,
-            alpha: float = 0.7      # α: SI-SNR 权重
-           ):
-    """
-    α   :  0.0–1.0 之间 — α 越大越着重簇间距 (SI-SNR)，α 越小越着重簇内方差 (EVM)
-    可自行加参数 lambda_cross 叠加 cross-pol 惩罚项
-    """
-    # —— 1) 前向推理 ——————————————————————————
-    merged = util.dict_merge(params, sparams)
-    z_sig , new_state = module.apply(
-        {'params': merged, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y) )
-
-    # —— 2) 对齐 Tx/Rx 序列 ————————————————————
-    tx_aligned  = x[z_sig.t.start : z_sig.t.stop]          # shape = (N,2)
-    rx_equal    = z_sig.val                                # shape = (N,2)
-
-    # —— 3) 逐极化计算 -SI-SNR ————————————————
-    snr_dim0 = si_snr_flattened(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]))
-    snr_dim1 = si_snr_flattened(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]))
-    loss = 0.5*(snr_dim0 + snr_dim1)
-          
-
-    # —— 4) 计算整体 EVM ————————————————
-    evm_loss = _evm(tx_aligned, rx_equal)
-
-    return loss, new_state
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr_flattened(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
