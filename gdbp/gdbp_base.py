@@ -411,12 +411,32 @@ def si_snr(target, estimate, eps=1e-8):
 #     )
 #     return -snr_val    
 
-def _si_snr_lin(trg, est, eps=1e-8, scale=0.1):
-    dot = jnp.vdot(trg, est).real
-    s_hat = (dot / (jnp.vdot(trg, trg).real + eps)) * trg
-    e     = est - s_hat
-    ratio = (jnp.vdot(s_hat, s_hat).real + eps) / (jnp.vdot(e, e).real + eps)
-    return -scale * ratio 
+def si_snr_flattened(
+    target: jnp.ndarray, 
+    estimate: jnp.ndarray,
+    eps: float = 1e-8
+) -> jnp.ndarray:
+    """
+    将( T, 2 )形状(双偏振)的时域信号展开成( 2T, )后,
+    计算单通道意义下的SI-SNR, 返回其负值做loss.
+    """
+
+    # 假设 (T,2)
+    # flatten => (2T,)
+    target_1d = jnp.reshape(target, (-1,))
+    estimate_1d = jnp.reshape(estimate, (-1,))
+
+    # 然后调用和单通道同样的si_snr逻辑
+    dot_product = jnp.sum(target_1d * estimate_1d)
+    target_energy = jnp.sum(target_1d**2) + eps
+    s_target = (dot_product / target_energy) * target_1d
+
+    e_noise = estimate_1d - s_target
+    t_energy = jnp.sum(s_target**2)
+    n_energy = jnp.sum(e_noise**2)
+
+    si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
+    return -si_snr_value
         
 def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
          eps: float = 1e-8) -> jnp.ndarray:
@@ -453,8 +473,8 @@ def loss_fn(module: layer.Layer,
     rx_equal    = z_sig.val                                # shape = (N,2)
 
     # —— 3) 逐极化计算 -SI-SNR ————————————————
-    snr_dim0 = _si_snr_lin(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]))
-    snr_dim1 = _si_snr_lin(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]))
+    snr_dim0 = si_snr_flattened(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]))
+    snr_dim1 = si_snr_flattened(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]))
     loss = 0.5*(snr_dim0 + snr_dim1)
           
 
