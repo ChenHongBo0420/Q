@@ -444,23 +444,41 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
         
-def loss_fn(module, params, state, y, x, aux, const, sparams,
-            step:int):
-    # ① 根据 step 选择 α, β1, β2
-    for end, a,b1,b2,_ in STAGES:
+def loss_fn(module,
+            params,
+            state,
+            y, x,
+            aux, const, sparams,
+            step: int):
+    """阶段调权重的总损失"""
+    # 1) 当前阶段权重
+    for end, a, b1, b2, _ in STAGES:
         if step < end:
             alpha, beta1, beta2 = a, b1, b2
             break
 
-    # ② 计算各分量
-    snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-    evm_loss = evm_ring(tx, rx)               # JIT-safe 版本
+    # 2) 前向推理  (保持原 aux/const 结构)
+    params_full = util.dict_merge(params, sparams)
+    z, new_state = module.apply(
+        {'params': params_full,
+         'aux_inputs': aux,
+         'const': const,
+         **state},
+        core.Signal(y))
+
+    tx = x[z.t.start:z.t.stop]     # 对齐 Tx / Rx
+    rx = z.val
+
+    # 3) 损失各分量
+    snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
+    evm_loss   = evm_ring(tx, rx)
     phase_loss = phase_err(tx, rx)
 
     total = (alpha * snr_loss +
              beta1 * evm_loss +
              beta2 * phase_loss)
     return total, new_state
+
 
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
@@ -564,22 +582,19 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
 #     return loss, opt_state, module_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
-def update_step(module: layer.Layer,
-                opt: cxopt.Optimizer,
-                i: int,
-                opt_state: tuple,
-                module_state: Dict,
-                y: Array,
-                x: Array,
-                aux: Dict,
-                const: Dict,
-                sparams: Dict):
+def update_step(module, opt, i,
+                opt_state, module_state,
+                y, x, aux, const, sparams):
+
     params = opt.params_fn(opt_state)
     (loss, module_state), grads = value_and_grad(
-        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-                                          aux, const, sparams)
+        loss_fn, has_aux=True, argnums=1)(
+            module, params, module_state,
+            y, x, aux, const, sparams,
+            step=i)                 # ← 关键：把当前迭代号传进去
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
+
                         
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
@@ -605,24 +620,52 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
+def lr_schedule(step: int):
+    base = 1e-4          # 你的初始 lr
+    for end, _, _, _, scale in STAGES:
+        if step < end:
+            return base * scale
+
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter = None,
+#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+#     ''' training process (1 epoch)
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#             data: dataset
+#             batch_size: batch size
+#             opt: optimizer
+
+#         Returns:
+#             yield loss, trained parameters, module state
+#     '''
+
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+#     for i, (y, x) in tqdm(enumerate(batch_gen),
+#                              total=n_iter, desc='training', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
+#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+#                                                    module_state, y, x, aux,
+#                                                    const, sparams)
+#         yield loss, opt.params_fn(opt_state), module_state
 
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
-
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
-
+          opt: optim.Optimizer = None):
+   
+    if opt is None:
+        opt = optim.adam(lr_schedule) 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
