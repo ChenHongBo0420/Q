@@ -457,6 +457,19 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
+        
+def si_snr_cplx_1ch(s, x, eps=1e-8, c=25.0):
+    """复数单极化 -SI-SNR_db / c  (c≈20-30)"""
+    alpha = jnp.vdot(s, x) / (jnp.vdot(s, s) + eps)
+    e     = x - alpha * s
+    num   = jnp.vdot(alpha*s, alpha*s).real + eps
+    den   = jnp.vdot(e, e).real + eps
+    snr_db = 10.*jnp.log10(num/den)
+    return -snr_db / c
+
+def si_snr_pair_cplx(tx, rx, c=25.0):
+    return 0.5*( si_snr_cplx_1ch(tx[:,0], rx[:,0], c=c) +
+                 si_snr_cplx_1ch(tx[:,1], rx[:,1], c=c) )
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -472,7 +485,8 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_pair_cplx(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
