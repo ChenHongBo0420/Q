@@ -447,6 +447,16 @@ def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
     num = jnp.mean(jnp.abs(estimate - target) ** 2)
     den = jnp.mean(jnp.abs(target) ** 2) + eps
     return num / den  
+                 
+def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
+    """幅度|·|，两极化展平后算 α，再平分给两路"""
+    s  = jnp.reshape(jnp.abs(tx), (-1,))
+    x  = jnp.reshape(jnp.abs(rx), (-1,))
+    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
+    e  = x - alpha * s
+    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
+                              (jnp.vdot(e, e).real + eps) )
+    return -snr_db                     # 这就是 pair-loss，标量
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -462,7 +472,7 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
