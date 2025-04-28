@@ -394,14 +394,12 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-STAGES = [
-    #  iter-end , α  , β1 , β2 , lr-scale
-    (1000      , 0.8, 0.0, 0.0, 1.0),   # 粗收敛
-    (3000      , 0.6, 0.0, 0.0, 0.8),   # 聚簇
-    (4000      , 0.6, 0.3, 0.0, 0.5),   # 外环补偿
-    (5000      , 0.6, 0.3, 0.1, 0.3),   # 相位精修
-]
-        
+stage_end  = jnp.array([1000, 3000, 4000, 5000])          # int32
+alpha_tab  = jnp.array([0.8 , 0.6 , 0.6 , 0.6 ])
+beta1_tab  = jnp.array([0.0 , 0.0 , 0.3 , 0.3 ])
+beta2_tab  = jnp.array([0.0 , 0.0 , 0.0 , 0.1 ])
+lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])   
+
 def evm_ring(tx, rx, eps=1e-8,
              thr_in=0.60, thr_mid=1.10,
              w_in=1.0, w_mid=1.5, w_out=2.0):
@@ -444,39 +442,32 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
         
-def loss_fn(module,
-            params,
-            state,
-            y, x,
-            aux, const, sparams,
+def loss_fn(module, params, state,
+            y, x, aux, const, sparams,
             step: int):
-    """阶段调权重的总损失"""
-    # 1) 当前阶段权重
-    for end, a, b1, b2, _ in STAGES:
-        if step < end:
-            alpha, beta1, beta2 = a, b1, b2
-            break
 
-    # 2) 前向推理  (保持原 aux/const 结构)
-    params_full = util.dict_merge(params, sparams)
+    # —— 0) 选阶段索引 idx  =  sum(step >= stage_end)
+    idx = jnp.sum(step >= stage_end).astype(jnp.int32)
+
+    alpha  = alpha_tab[idx]
+    beta1  = beta1_tab[idx]
+    beta2  = beta2_tab[idx]
+
+    # —— 1) 前向
+    p_full = util.dict_merge(params, sparams)
     z, new_state = module.apply(
-        {'params': params_full,
-         'aux_inputs': aux,
-         'const': const,
-         **state},
+        {'params': p_full, 'aux_inputs': aux,
+         'const': const, **state},
         core.Signal(y))
 
-    tx = x[z.t.start:z.t.stop]     # 对齐 Tx / Rx
-    rx = z.val
+    tx, rx = x[z.t.start:z.t.stop], z.val
 
-    # 3) 损失各分量
+    # —— 2) 三分量损失
     snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
     evm_loss   = evm_ring(tx, rx)
     phase_loss = phase_err(tx, rx)
 
-    total = (alpha * snr_loss +
-             beta1 * evm_loss +
-             beta2 * phase_loss)
+    total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
     return total, new_state
 
 
@@ -620,11 +611,10 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-def lr_schedule(step: int):
-    base = 1e-4          # 你的初始 lr
-    for end, _, _, _, scale in STAGES:
-        if step < end:
-            return base * scale
+def lr_schedule(step):
+    base = 1e-4
+    idx  = jnp.sum(step >= stage_end).astype(jnp.int32)
+    return base * lr_scale_t[idx]
 
 # def train(model: Model,
 #           data: gdat.Input,
