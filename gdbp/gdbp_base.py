@@ -395,49 +395,21 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-# def _si_snr_1ch(target: jnp.ndarray,
-#                 estimate: jnp.ndarray,
-#                 eps: float = 1e-8) -> jnp.ndarray:
-#     """
-#     target, estimate 形状均为 (T,) — 单极化 1-D 序列
-#     返回 -SI-SNR (dB) —— 可直接用作 loss 分量
-#     """
-#     dot = jnp.vdot(target, estimate).real                 # ⟨s,x⟩
-#     s_target = (dot / (jnp.vdot(target, target).real + eps)) * target
-#     e_noise  = estimate - s_target
-#     snr_val  = 10.0 * jnp.log10(
-#         (jnp.vdot(s_target, s_target).real + eps) /
-#         (jnp.vdot(e_noise , e_noise ).real + eps)
-#     )
-#     return -snr_val     
-# ------------------------------------------------------------
-# A) dB 域 + 软缩放
-
-def _si_snr_db_soft(trg, est, c=25.0, eps=1e-8):
-    dot = jnp.vdot(trg, est).real
-    s_hat = (dot / (jnp.vdot(trg, trg).real + eps)) * trg
-    e     = est - s_hat
-    ratio = (jnp.vdot(s_hat, s_hat).real + eps) / (jnp.vdot(e, e).real + eps)
-    snr_db = 10.0 * jnp.log10(ratio + eps)
-    return -snr_db / c                # c=25 时 loss 约 -1~-6
-
-# ------------------------------------------------------------
-# B) log1p 线性域
-def _si_snr_log(trg, est, eps=1e-8):
-    dot = jnp.vdot(trg, est).real
-    s_hat = (dot / (jnp.vdot(trg, trg).real + eps)) * trg
-    e     = est - s_hat
-    ratio = (jnp.vdot(s_hat, s_hat).real + eps) / (jnp.vdot(e, e).real + eps)
-    return -jnp.log1p(ratio)          # ∈(-∞,0)
-
-# ------------------------------------------------------------
-# C) sigmoid 压缩
-def _si_snr_sig(trg, est, k=0.02, eps=1e-8):
-    dot = jnp.vdot(trg, est).real
-    s_hat = (dot / (jnp.vdot(trg, trg).real + eps)) * trg
-    e     = est - s_hat
-    ratio = (jnp.vdot(s_hat, s_hat).real + eps) / (jnp.vdot(e, e).real + eps)
-    return jax.nn.sigmoid(-ratio * k) # 0~1, 后期梯度自动减
+def _si_snr_1ch(target: jnp.ndarray,
+                estimate: jnp.ndarray,
+                eps: float = 1e-8) -> jnp.ndarray:
+    """
+    target, estimate 形状均为 (T,) — 单极化 1-D 序列
+    返回 -SI-SNR (dB) —— 可直接用作 loss 分量
+    """
+    dot = jnp.vdot(target, estimate).real                 # ⟨s,x⟩
+    s_target = (dot / (jnp.vdot(target, target).real + eps)) * target
+    e_noise  = estimate - s_target
+    snr_val  = 10.0 * jnp.log10(
+        (jnp.vdot(s_target, s_target).real + eps) /
+        (jnp.vdot(e_noise , e_noise ).real + eps)
+    )
+    return -snr_val     
                         
 def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
          eps: float = 1e-8) -> jnp.ndarray:
@@ -474,8 +446,8 @@ def loss_fn(module: layer.Layer,
     rx_equal    = z_sig.val                                # shape = (N,2)
 
     # —— 3) 逐极化计算 -SI-SNR ————————————————
-    snr_dim0 = _si_snr_sig(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]))
-    snr_dim1 = _si_snr_sig(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]))
+    snr_dim0 = _si_snr_1ch(jnp.abs(tx_aligned[:,0]), jnp.abs(rx_equal[:,0]))
+    snr_dim1 = _si_snr_1ch(jnp.abs(tx_aligned[:,1]), jnp.abs(rx_equal[:,1]))
     loss = 0.5*(snr_dim0 + snr_dim1)
           
 
