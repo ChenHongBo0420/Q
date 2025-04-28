@@ -384,7 +384,6 @@ def _proj_mse(z, s):
 def energy(x):
     return jnp.sum(jnp.square(x))
 
-
 def si_snr(target, estimate, eps=1e-8):
     target_energy = energy(target)
     dot_product = jnp.sum(target * estimate)
@@ -439,7 +438,10 @@ def evm_ring(tx, rx, eps=1e-8,
     return (w_in  * _evm(m_in) +
             w_mid * _evm(m_mid) +
             w_out * _evm(m_out))
-                 
+
+def phase_err(tx, rx):
+    return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
+        
 def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     """幅度|·|，两极化展平后算 α，再平分给两路"""
     s  = jnp.reshape(jnp.abs(tx), (-1,))
@@ -467,7 +469,7 @@ def loss_fn(module: layer.Layer,
     # snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = 0.5 * snr + 0.5 * evm_loss
+    snr = 0.6 * snr + 0.3 * evm_loss + 0.1 * phase_err
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
