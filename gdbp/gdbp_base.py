@@ -410,43 +410,18 @@ def si_snr(target, estimate, eps=1e-8):
 #         (jnp.vdot(e_noise , e_noise ).real + eps)
 #     )
 #     return -snr_val    
-
-def si_snr_flattened(
-    target: jnp.ndarray, 
-    estimate: jnp.ndarray,
-    eps: float = 1e-8
-) -> jnp.ndarray:
-    """
-    将( T, 2 )形状(双偏振)的时域信号展开成( 2T, )后,
-    计算单通道意义下的SI-SNR, 返回其负值做loss.
-    """
-
-    # 假设 (T,2)
-    # flatten => (2T,)
-    target_1d = jnp.reshape(target, (-1,))
-    estimate_1d = jnp.reshape(estimate, (-1,))
-
-    # 然后调用和单通道同样的si_snr逻辑
-    dot_product = jnp.sum(target_1d * estimate_1d)
-    target_energy = jnp.sum(target_1d**2) + eps
-    s_target = (dot_product / target_energy) * target_1d
-
-    e_noise = estimate_1d - s_target
-    t_energy = jnp.sum(s_target**2)
-    n_energy = jnp.sum(e_noise**2)
-
-    si_snr_value = 10.0 * jnp.log10((t_energy + eps) / (n_energy + eps))
-    return -si_snr_value
         
-def _evm(target: jnp.ndarray, estimate: jnp.ndarray,
-         eps: float = 1e-8) -> jnp.ndarray:
-    """
-    target, estimate 形状均为 (T,2) — 双偏振符号级数据
-    EVM 定义为 √E{|x-s|²} / √E{|s|²}; 这里返回其平方方便梯度
-    """
-    num = jnp.mean(jnp.abs(estimate - target) ** 2)
-    den = jnp.mean(jnp.abs(target) ** 2) + eps
-    return num / den  
+def evm_ring(tx, rx, eps=1e-8):
+    r = jnp.abs(tx)
+    mask_in  = r < 0.6
+    mask_mid = (r >= 0.6) & (r < 1.1)
+    mask_out = r >= 1.1
+    def _evm(m):     # m: bool mask
+        return jnp.mean(jnp.abs(rx[m]-tx[m])**2) / (jnp.mean(jnp.abs(tx[m])**2)+eps)
+    w_in, w_mid, w_out = 1.0, 1.5, 2.0          # 可调
+    return (w_in  *_evm(mask_in)  +
+            w_mid *_evm(mask_mid) +
+            w_out *_evm(mask_out))
                  
 def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     """幅度|·|，两极化展平后算 α，再平分给两路"""
@@ -457,19 +432,6 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
-        
-def si_snr_cplx_1ch(s, x, eps=1e-8, c=25.0):
-    """复数单极化 -SI-SNR_db / c  (c≈20-30)"""
-    alpha = jnp.vdot(s, x) / (jnp.vdot(s, s) + eps)
-    e     = x - alpha * s
-    num   = jnp.vdot(alpha*s, alpha*s).real + eps
-    den   = jnp.vdot(e, e).real + eps
-    snr_db = 10.*jnp.log10(num/den)
-    return -snr_db / c
-
-def si_snr_pair_cplx(tx, rx, c=25.0):
-    return 0.5*( si_snr_cplx_1ch(tx[:,0], rx[:,0], c=c) +
-                 si_snr_cplx_1ch(tx[:,1], rx[:,1], c=c) )
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -486,7 +448,8 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     # snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = si_snr_pair_cplx(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
