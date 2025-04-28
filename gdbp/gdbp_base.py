@@ -414,7 +414,8 @@ def evm_ring(tx, rx, eps=1e-8,
 
     def _evm(mask):
         num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask) + eps
+        den = jnp.sum(sig2 * mask)
+        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
         return num / den
 
     return (w_in  * _evm(m_in) +
