@@ -460,8 +460,8 @@ def loss_fn(module, params, state,
     snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
     evm_loss   = evm_ring(tx, rx)
     phase_loss = phase_err(tx, rx)
-
-    total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
+    total = alpha * snr_loss + beta1 * evm_loss 
+    # total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
     return total, new_state
 
 
