@@ -395,22 +395,51 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
 
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
+# def evm_ring(tx, rx, eps=1e-8,
+#              thr_in=0.60, thr_mid=1.10,
+#              w_in=1.0, w_mid=1.5, w_out=2.0):
+#     r    = jnp.abs(tx)
+#     err2 = jnp.abs(rx - tx)**2
+#     sig2 = jnp.abs(tx)**2
+
+#     # 0/1 masks — 必须是 float32 / float64，不能用 complex
+#     m_in  = (r < thr_in).astype(jnp.float32)
+#     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+#     m_out = (r >= thr_mid).astype(jnp.float32)
+
+#     def _evm(mask):
+#         num = jnp.sum(err2 * mask)
+#         den = jnp.sum(sig2 * mask)
+#         den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+#         return num / den
+
+#     return (w_in  * _evm(m_in) +
+#             w_mid * _evm(m_mid) +
+#             w_out * _evm(m_out))
+# ★★★ 放在 gdbp_base.py 顶部 util 区域 ★★★
+def evm_ring(tx, rx, *,
+                   thr_in=0.60, thr_mid=1.10,
+                   w_in=1.0, w_mid=1.5, w_out=2.0,
+                   tau=0.02, gamma=2.0, eps=1e-8):
+    """
+    ring-wise EVM² + focal     返回标量实数
+    --------------------------------------------------------
+    • 对外环误差乘 ((|e|²)/tau)^gamma  强化角符号
+    • 三环权重 w_in / w_mid / w_out 可自行调整
+    """
     r    = jnp.abs(tx)
     err2 = jnp.abs(rx - tx)**2
     sig2 = jnp.abs(tx)**2
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    focal = (err2 / tau)**gamma          # (N,2)
+
     m_in  = (r < thr_in).astype(jnp.float32)
     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
     m_out = (r >= thr_mid).astype(jnp.float32)
 
     def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+        num = jnp.sum(err2 * focal * mask)
+        den = jnp.sum(sig2 * mask) + eps
         return num / den
 
     return (w_in  * _evm(m_in) +
