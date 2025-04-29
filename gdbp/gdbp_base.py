@@ -394,11 +394,11 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-# stage_end  = jnp.array([1000, 3000, 4000, 5000])          # int32
-# alpha_tab  = jnp.array([0.8 , 0.6 , 0.6 , 0.6 ])
-# beta1_tab  = jnp.array([0.0 , 0.0 , 0.3 , 0.3 ])
-# beta2_tab  = jnp.array([0.0 , 0.0 , 0.0 , 0.1 ])
-# lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])   
+stage_end  = jnp.array([1000, 3000, 4000, 5000])          # int32
+alpha_tab  = jnp.array([1 , 1 , 0.8 , 0.8 ])
+beta1_tab  = jnp.array([0.0 , 0.0 , 0.03 , 0.03 ])
+beta2_tab  = jnp.array([0.0 , 0.0 , 0.0 , 0.0 ])
+lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])   
 
 def evm_ring(tx, rx, eps=1e-8,
              thr_in=0.60, thr_mid=1.10,
@@ -436,55 +436,54 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
         
-# def loss_fn(module, params, state,
-#             y, x, aux, const, sparams,
-#             step: int):
+def loss_fn(module, params, state,
+            y, x, aux, const, sparams,
+            step: int):
 
-#     # —— 0) 选阶段索引 idx  =  sum(step >= stage_end)
-#     idx = jnp.sum(step >= stage_end).astype(jnp.int32)
+    # —— 0) 选阶段索引 idx  =  sum(step >= stage_end)
+    idx = jnp.sum(step >= stage_end).astype(jnp.int32)
 
-#     alpha  = alpha_tab[idx]
-#     beta1  = beta1_tab[idx]
-#     beta2  = beta2_tab[idx]
+    alpha  = alpha_tab[idx]
+    beta1  = beta1_tab[idx]
+    beta2  = beta2_tab[idx]
 
-#     # —— 1) 前向
-#     p_full = util.dict_merge(params, sparams)
-#     z, new_state = module.apply(
-#         {'params': p_full, 'aux_inputs': aux,
-#          'const': const, **state},
-#         core.Signal(y))
+    # —— 1) 前向
+    p_full = util.dict_merge(params, sparams)
+    z, new_state = module.apply(
+        {'params': p_full, 'aux_inputs': aux,
+         'const': const, **state},
+        core.Signal(y))
 
-#     tx, rx = x[z.t.start:z.t.stop], z.val
+    tx, rx = x[z.t.start:z.t.stop], z.val
 
-#     # —— 2) 三分量损失
-#     snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-#     evm_loss   = evm_ring(tx, rx)
-#     phase_loss = phase_err(tx, rx)
-#     total = snr_loss
-#     # total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
-#     return total, new_state
+    # —— 2) 三分量损失
+    snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
+    evm_loss   = evm_ring(tx, rx)
+    phase_loss = phase_err(tx, rx)
+    total = alpha * snr_loss + beta1 * evm_loss
+    return total, new_state
 
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr = snr + 0.1 * evm_loss
-    return snr, updated_state
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     # y_transformed = apply_combined_transform(y)
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     # phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
+#     snr = snr + 0.01 * evm_loss
+#     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
