@@ -481,7 +481,7 @@ def loss_fn(module: layer.Layer,
     # evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x), tau=0.05, gamma=1.5, w_in=1.0, w_mid=1.2, w_out=1.5)
     # phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr = snr + 0.02 * evm_loss
+    snr = snr + 0.01 * evm_loss
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
