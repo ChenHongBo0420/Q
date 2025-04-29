@@ -459,7 +459,7 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     e  = x - alpha * s
     snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
                               (jnp.vdot(e, e).real + eps) )
-    return -snr_db                     # 这就是 pair-loss，标量
+    return -snr_db                   
         
 
 
@@ -590,7 +590,7 @@ def get_train_batch(ds: gdat.Input,
 
 def train(model: Model,
           data: gdat.Input,
-          batch_size: int = 500,
+          batch_size: int = 2000,
           n_iter = None,
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     ''' training process (1 epoch)
