@@ -504,8 +504,8 @@ def loss_fn(module: layer.Layer,
                         w_in=1.0, w_mid=1.2, w_out=1.5)
 
     # ---- 7) R-Conv L2 正则 ------------------------------------
-    r_w = params['RConv1']['kernel']                  # 若名不同请同步
-    l2_reg = 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
+    r_w = (params.get('RConv',   {}).get('kernel', None) or params.get('RConv1',  {}).get('kernel', None) or params.get('RConv2',  {}).get('kernel', None)) 
+    l2_reg = 0.0 if r_w is None else 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
 
     # ---- 8) 总损失 --------------------------------------------
     total = proj_mse + 0.02 * evm_loss + l2_reg
