@@ -394,11 +394,11 @@ def si_snr(target, estimate, eps=1e-8):
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
     return -si_snr_value 
 
-stage_end  = jnp.array([1000, 3000, 4000, 5000])          # int32
-alpha_tab  = jnp.array([0.8 , 0.6 , 0.6 , 0.6 ])
-beta1_tab  = jnp.array([0.0 , 0.0 , 0.3 , 0.3 ])
-beta2_tab  = jnp.array([0.0 , 0.0 , 0.0 , 0.1 ])
-lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])   
+# stage_end  = jnp.array([1000, 3000, 4000, 5000])          # int32
+# alpha_tab  = jnp.array([0.8 , 0.6 , 0.6 , 0.6 ])
+# beta1_tab  = jnp.array([0.0 , 0.0 , 0.3 , 0.3 ])
+# beta2_tab  = jnp.array([0.0 , 0.0 , 0.0 , 0.1 ])
+# lr_scale_t = jnp.array([1.0 , 0.8 , 0.5 , 0.3 ])   
 
 def evm_ring(tx, rx, eps=1e-8,
              thr_in=0.60, thr_mid=1.10,
@@ -436,55 +436,55 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                     # 这就是 pair-loss，标量
         
-def loss_fn(module, params, state,
-            y, x, aux, const, sparams,
-            step: int):
+# def loss_fn(module, params, state,
+#             y, x, aux, const, sparams,
+#             step: int):
 
-    # —— 0) 选阶段索引 idx  =  sum(step >= stage_end)
-    idx = jnp.sum(step >= stage_end).astype(jnp.int32)
+#     # —— 0) 选阶段索引 idx  =  sum(step >= stage_end)
+#     idx = jnp.sum(step >= stage_end).astype(jnp.int32)
 
-    alpha  = alpha_tab[idx]
-    beta1  = beta1_tab[idx]
-    beta2  = beta2_tab[idx]
+#     alpha  = alpha_tab[idx]
+#     beta1  = beta1_tab[idx]
+#     beta2  = beta2_tab[idx]
 
-    # —— 1) 前向
-    p_full = util.dict_merge(params, sparams)
-    z, new_state = module.apply(
-        {'params': p_full, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+#     # —— 1) 前向
+#     p_full = util.dict_merge(params, sparams)
+#     z, new_state = module.apply(
+#         {'params': p_full, 'aux_inputs': aux,
+#          'const': const, **state},
+#         core.Signal(y))
 
-    tx, rx = x[z.t.start:z.t.stop], z.val
+#     tx, rx = x[z.t.start:z.t.stop], z.val
 
-    # —— 2) 三分量损失
-    snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-    evm_loss   = evm_ring(tx, rx)
-    phase_loss = phase_err(tx, rx)
-    total = snr_loss
-    # total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
-    return total, new_state
+#     # —— 2) 三分量损失
+#     snr_loss   = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
+#     evm_loss   = evm_ring(tx, rx)
+#     phase_loss = phase_err(tx, rx)
+#     total = snr_loss
+#     # total = alpha * snr_loss + beta1 * evm_loss + beta2 * phase_loss
+#     return total, new_state
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     # snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
-#     snr = 0.6 * snr + 0.3 * evm_loss + 0.1 * phase_loss
-#     return snr, updated_state
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    # snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    snr = 0.6 * snr + 0.3 * evm_loss + 0.1 * phase_loss
+    return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
@@ -530,55 +530,55 @@ def loss_fn(module, params, state,
 #     return loss, new_state    
 
 
-# @partial(jit, backend='cpu', static_argnums=(0, 1))
-# def update_step(module: layer.Layer,
-#                 opt: cxopt.Optimizer,
-#                 i: int,
-#                 opt_state: tuple,
-#                 module_state: Dict,
-#                 y: Array,
-#                 x: Array,
-#                 aux: Dict,
-#                 const: Dict,
-#                 sparams: Dict):
-#     ''' single backprop step
-
-#         Args:
-#             model: model returned by `model_init`
-#             opt: optimizer
-#             i: iteration counter
-#             opt_state: optimizer state
-#             module_state: module state
-#             y: transmitted waveforms
-#             x: aligned sent symbols
-#             aux: auxiliary input
-#             const: contants (internal info generated by model)
-#             sparams: static parameters
-
-#         Return:
-#             loss, updated module state
-#     '''
-
-#     params = opt.params_fn(opt_state)
-#     (loss, module_state), grads = value_and_grad(
-#         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-#                                           aux, const, sparams)
-#     opt_state = opt.update_fn(i, grads, opt_state)
-#     return loss, opt_state, module_state
-
 @partial(jit, backend='cpu', static_argnums=(0, 1))
-def update_step(module, opt, i,
-                opt_state, module_state,
-                y, x, aux, const, sparams):
+def update_step(module: layer.Layer,
+                opt: cxopt.Optimizer,
+                i: int,
+                opt_state: tuple,
+                module_state: Dict,
+                y: Array,
+                x: Array,
+                aux: Dict,
+                const: Dict,
+                sparams: Dict):
+    ''' single backprop step
+
+        Args:
+            model: model returned by `model_init`
+            opt: optimizer
+            i: iteration counter
+            opt_state: optimizer state
+            module_state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
+
+        Return:
+            loss, updated module state
+    '''
 
     params = opt.params_fn(opt_state)
     (loss, module_state), grads = value_and_grad(
-        loss_fn, has_aux=True, argnums=1)(
-            module, params, module_state,
-            y, x, aux, const, sparams,
-            step=i)                 # ← 关键：把当前迭代号传进去
+        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
+                                          aux, const, sparams)
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
+
+# @partial(jit, backend='cpu', static_argnums=(0, 1))
+# def update_step(module, opt, i,
+#                 opt_state, module_state,
+#                 y, x, aux, const, sparams):
+
+#     params = opt.params_fn(opt_state)
+#     (loss, module_state), grads = value_and_grad(
+#         loss_fn, has_aux=True, argnums=1)(
+#             module, params, module_state,
+#             y, x, aux, const, sparams,
+#             step=i)                 # ← 关键：把当前迭代号传进去
+#     opt_state = opt.update_fn(i, grads, opt_state)
+#     return loss, opt_state, module_state
 
                         
 def get_train_batch(ds: gdat.Input,
@@ -605,51 +605,28 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-def lr_schedule(step):
-    base = 1e-4
-    idx  = jnp.sum(step >= stage_end).astype(jnp.int32)
-    return base * lr_scale_t[idx]
-
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
-
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
+# def lr_schedule(step):
+#     base = 1e-4
+#     idx  = jnp.sum(step >= stage_end).astype(jnp.int32)
+#     return base * lr_scale_t[idx]
 
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
-          opt: optim.Optimizer = None):
-   
-    if opt is None:
-        opt = optim.adam(lr_schedule) 
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
@@ -664,6 +641,29 @@ def train(model: Model,
                                                    module_state, y, x, aux,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
+
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter = None,
+#           opt: optim.Optimizer = None):
+   
+#     if opt is None:
+#         opt = optim.adam(lr_schedule) 
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+#     for i, (y, x) in tqdm(enumerate(batch_gen),
+#                              total=n_iter, desc='training', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
+#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+#                                                    module_state, y, x, aux,
+#                                                    const, sparams)
+#         yield loss, opt.params_fn(opt_state), module_state
                                      
 def train_once(model_tr, data_tr, 
                batch_size=500, n_iter=3000):
