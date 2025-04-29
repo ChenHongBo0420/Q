@@ -469,40 +469,47 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    # ---------- α (2,) 可学习标量 ---------------------------------
-    if 'alpha' not in state:
-    # 首次迭代，用幅度投影值 warm-start
-        def _alpha(s, x):
-            return jnp.vdot(jnp.abs(s), jnp.abs(x)).real / \
+            sparams: Dict):
+
+    # ---- 1) 合并 params → 前向 --------------------------------
+    p_all = util.dict_merge(params, sparams)
+    z, new_state = module.apply(
+        {'params': p_all, 'aux_inputs': aux,
+         'const': const, **state},
+        core.Signal(y))
+
+    # ---- 2) 对齐 Tx / Rx --------------------------------------
+    tx = x[z.t.start : z.t.stop]          # shape (N,2)
+    rx = z.val                            # shape (N,2)
+
+    # ---- 3) 计算初始 α（幅度投影，两极化各 1 个） --------------
+    def _alpha(s, r):
+        return jnp.vdot(jnp.abs(s), jnp.abs(r)).real / \
                jnp.vdot(jnp.abs(s), jnp.abs(s)).real
-        state['alpha'] = jnp.array([1.0, 1.0], dtype=jnp.float32)  # 临时占位
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    # ---------- 取对齐符号 ---------------------------------------
-    tx = aligned_x
-    rx = z_original.val
-    alpha = state['alpha']                       # (2,)
-    # ---------- 投影-MSE (允许 α 学习) ----------------------------
-    rx_proj = rx / alpha                         # broadcast 到两极化
+    alpha = jnp.array([_alpha(tx[:,0], rx[:,0]),
+                       _alpha(tx[:,1], rx[:,1])])      # (2,)
+
+    # ---- 4) 对 α 做 1 步 SGD（lr 1e-3），仅本 batch 生效 --------
+    grads_a = jax.grad(lambda a:
+        jnp.mean(jnp.abs(rx / a - tx)**2))(alpha)
+    alpha = alpha - 1e-3 * grads_a                    # (2,)
+
+    # ---- 5) 投影-MSE ------------------------------------------
+    rx_proj = rx / alpha                              # broadcast
     proj_mse = jnp.mean(jnp.abs(rx_proj - tx)**2)
 
-    # ---------- Ring-EVM (温和 focal) -----------------------------
-    evm_loss = evm_ring(tx, rx_proj, tau=0.05, gamma=1.5, w_in=1.0, w_mid=1.2, w_out=1.5)
-    # ---------- R-Conv L2 正则 ------------------------------------
-    r_w = params['RConv1']['kernel']             # ← 若你的 RConv 名不同请同步
-    l2_reg = 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
-    # ---------- 总损失 -------------------------------------------
-    total = proj_mse + 0.02 * evm_loss + l2_reg
-    # ---------- 手动更新 α (SGD 1e-3) ----------------------------
-    grads_alpha = jax.grad(lambda a: jnp.mean(jnp.abs(rx / a - tx)**2))(alpha) 
-    state['alpha'] = alpha - 1e-3 * grads_alpha
+    # ---- 6) Ring-EVM (温和 focal) -----------------------------
+    evm_loss = evm_ring(tx, rx_proj,
+                        tau=0.05, gamma=1.5,
+                        w_in=1.0, w_mid=1.2, w_out=1.5)
 
-    return total, updated_state
+    # ---- 7) R-Conv L2 正则 ------------------------------------
+    r_w = params['RConv1']['kernel']                  # 若名不同请同步
+    l2_reg = 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
+
+    # ---- 8) 总损失 --------------------------------------------
+    total = proj_mse + 0.02 * evm_loss + l2_reg
+    return total, new_state
                    
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
