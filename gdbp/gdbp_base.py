@@ -462,6 +462,7 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     return -snr_db                     # 这就是 pair-loss，标量
         
 
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -469,48 +470,18 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict):
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = snr + 0.01 * evm
+    return snr, updated_state
 
-    # ---- 1) 合并 params → 前向 --------------------------------
-    p_all = util.dict_merge(params, sparams)
-    z, new_state = module.apply(
-        {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
-
-    # ---- 2) 对齐 Tx / Rx --------------------------------------
-    tx = x[z.t.start : z.t.stop]          # shape (N,2)
-    rx = z.val                            # shape (N,2)
-
-    # ---- 3) 计算初始 α（幅度投影，两极化各 1 个） --------------
-    def _alpha(s, r):
-        return jnp.vdot(jnp.abs(s), jnp.abs(r)).real / \
-               jnp.vdot(jnp.abs(s), jnp.abs(s)).real
-    alpha = jnp.array([_alpha(tx[:,0], rx[:,0]),
-                       _alpha(tx[:,1], rx[:,1])])      # (2,)
-
-    # ---- 4) 对 α 做 1 步 SGD（lr 1e-3），仅本 batch 生效 --------
-    grads_a = jax.grad(lambda a:
-        jnp.mean(jnp.abs(rx / a - tx)**2))(alpha)
-    alpha = alpha - 1e-2 * grads_a                    # (2,)
-
-    # ---- 5) 投影-MSE ------------------------------------------
-    rx_proj = rx / alpha                              # broadcast
-    proj_mse = jnp.mean(jnp.abs(rx_proj - tx)**2)
-
-    # ---- 6) Ring-EVM (温和 focal) -----------------------------
-    evm_loss = evm_ring(tx, rx_proj,
-                        tau=0.05, gamma=1.5,
-                        w_in=1.0, w_mid=1.2, w_out=1.5)
-
-    # ---- 7) R-Conv L2 正则 ------------------------------------
-    r_w = (params.get('RConv',   {}).get('kernel', None) or params.get('RConv1',  {}).get('kernel', None) or params.get('RConv2',  {}).get('kernel', None)) 
-    l2_reg = 0.0 if r_w is None else 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
-
-    # ---- 8) 总损失 --------------------------------------------
-    total = proj_mse + 0.05 * evm_loss + l2_reg
-    return total, new_state
-                   
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state: Dict,
