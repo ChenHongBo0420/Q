@@ -471,6 +471,13 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
+    # ---------- α (2,) 可学习标量 ---------------------------------
+    if 'alpha' not in state:
+    # 首次迭代，用幅度投影值 warm-start
+        def _alpha(s, x):
+            return jnp.vdot(jnp.abs(s), jnp.abs(x)).real / \
+               jnp.vdot(jnp.abs(s), jnp.abs(s)).real
+        state['alpha'] = jnp.array([1.0, 1.0], dtype=jnp.float32)  # 临时占位
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     # y_transformed = apply_combined_transform(y)
