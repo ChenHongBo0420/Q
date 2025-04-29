@@ -483,7 +483,7 @@ def loss_fn(module: layer.Layer,
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr = 0.7 * snr + 0.3 * evm_loss
+    snr = 0.8 * snr + 0.2 * evm_loss
     return snr, updated_state
                    
 # def loss_fn(module: layer.Layer,
