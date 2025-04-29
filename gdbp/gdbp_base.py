@@ -476,13 +476,26 @@ def loss_fn(module: layer.Layer,
     # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    evm_loss = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x), tau=0.05, gamma=1.5, w_in=1.0, w_mid=1.2, w_out=1.5)
-    # phase_loss = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    snr = snr + 0.01 * evm_loss
-    return snr, updated_state
+    # ---------- 取对齐符号 ---------------------------------------
+    tx = aligned_x
+    rx = z_original.val
+    alpha = state['alpha']                       # (2,)
+    # ---------- 投影-MSE (允许 α 学习) ----------------------------
+    rx_proj = rx / alpha                         # broadcast 到两极化
+    proj_mse = jnp.mean(jnp.abs(rx_proj - tx)**2)
+
+    # ---------- Ring-EVM (温和 focal) -----------------------------
+    evm_loss = evm_ring(tx, rx_proj, tau=0.05, gamma=1.5, w_in=1.0, w_mid=1.2, w_out=1.5)
+    # ---------- R-Conv L2 正则 ------------------------------------
+    r_w = params['RConv1']['kernel']             # ← 若你的 RConv 名不同请同步
+    l2_reg = 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
+    # ---------- 总损失 -------------------------------------------
+    total = proj_mse + 0.02 * evm_loss + l2_reg
+    # ---------- 手动更新 α (SGD 1e-3) ----------------------------
+    grads_alpha = jax.grad(lambda a: jnp.mean(jnp.abs(rx / a - tx)**2))(alpha) 
+    state['alpha'] = alpha - 1e-3 * grads_alpha
+
+    return total, updated_state
                    
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
