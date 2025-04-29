@@ -492,7 +492,7 @@ def loss_fn(module: layer.Layer,
     # ---- 4) 对 α 做 1 步 SGD（lr 1e-3），仅本 batch 生效 --------
     grads_a = jax.grad(lambda a:
         jnp.mean(jnp.abs(rx / a - tx)**2))(alpha)
-    alpha = alpha - 1e-3 * grads_a                    # (2,)
+    alpha = alpha - 1e-2 * grads_a                    # (2,)
 
     # ---- 5) 投影-MSE ------------------------------------------
     rx_proj = rx / alpha                              # broadcast
@@ -508,7 +508,7 @@ def loss_fn(module: layer.Layer,
     l2_reg = 0.0 if r_w is None else 1e-4 * jnp.sum(jnp.square(r_w.real) + jnp.square(r_w.imag))
 
     # ---- 8) 总损失 --------------------------------------------
-    total = proj_mse + 0.02 * evm_loss + l2_reg
+    total = proj_mse + 0.05 * evm_loss + l2_reg
     return total, new_state
                    
 # def loss_fn(module: layer.Layer,
