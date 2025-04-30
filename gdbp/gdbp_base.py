@@ -511,12 +511,15 @@ def loss_fn(module, params, state,
 
     # —— SNR & EVM ————————————————
     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx_n))
-    evm_loss = evm_ring_focal(jnp.abs(tx), jnp.abs(rx_n),
-                              tau=0.05, gamma=2.0,
-                              step=step)          # ★ 传 step
+    evm_loss = evm_loss = evm_ring_focal(jnp.abs(tx), jnp.abs(rx_n),
+                          thr_in = 0.60,     # 固定 0.60
+                          thr_mid = 1.10,    # 固定 1.10
+                          tau = 0.05, gamma = 2.0,
+                          w_in = 1.0, w_mid = 1.3, w_out = 2.0,
+                          step = step)         # ★ 传 step
 
     total = snr_loss + 0.01 * evm_loss
-    return snr_loss, new_state
+    return total, new_state
 
 
 # def loss_fn(module: layer.Layer,
