@@ -417,8 +417,6 @@ def evm_ring(tx, rx, eps=1e-8,
             w_mid * _evm(m_mid) +
             w_out * _evm(m_out))
 
-import jax, jax.numpy as jnp, jax.lax as lax
-
 def phase_err(tx, rx):
     return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
         
@@ -466,14 +464,9 @@ def loss_fn(module, params, state,
     tx = x[z.t.start:z.t.stop]
     rx = z.val
 
-    # —— α 归一化 ————————————————
-    # alpha = jnp.vdot(jnp.abs(tx), jnp.abs(rx)).real / \
-    #         jnp.vdot(jnp.abs(tx), jnp.abs(tx)).real
-    # rx_n  = rx / alpha
-
     # —— SNR & EVM ————————————————
     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-    evm_loss = evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx),
+    evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx),
                           thr_in = 0.60,     # 固定 0.60
                           thr_mid = 1.10,    # 固定 1.10
                           w_in = 1.0, w_mid = 1.3, w_out = 2.0,
