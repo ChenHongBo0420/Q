@@ -419,44 +419,6 @@ def evm_ring(tx, rx, eps=1e-8,
 
 import jax, jax.numpy as jnp, jax.lax as lax
 
-def evm_ring_focal(tx, rx,
-                   tau=0.05, gamma=2.0,
-                   thr_in=None, thr_mid=None,
-                   w_in=1.0, w_mid=1.3, w_out=1.8,
-                   eps=1e-8,
-                   step=None):                 # ← 传 step 进来
-    r    = jnp.abs(tx)
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
-
-    # —— 自动阈值 ————————————————————
-    r_max = jnp.max(r)
-    thr_in  = 0.33*r_max if thr_in  is None else thr_in
-    thr_mid = 0.66*r_max if thr_mid is None else thr_mid
-
-    # —— 仅在 step==0 时打印一次 r 统计 —————
-    def _print(_):
-        jax.debug.print("r min/mean/max = {0:.3f}/{1:.3f}/{2:.3f}",
-                        jnp.min(r), jnp.mean(r), r_max)
-        return 0
-    lax.cond(step==0, _print, lambda _:0, operand=None)
-
-    # —— focal 权重 & masks ————————————
-    focal = (err2 / tau)**gamma
-    m_in  = (r <  thr_in ).astype(jnp.float32)
-    m_mid = ((r>=thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
-
-    def _evm(mask):
-        num = jnp.sum(err2 * focal * mask)
-        den = jnp.sum(sig2 * mask) + eps
-        return num / den
-
-    return (w_in  * _evm(m_in)  +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
-
-
 def phase_err(tx, rx):
     return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
         
@@ -511,7 +473,7 @@ def loss_fn(module, params, state,
 
     # —— SNR & EVM ————————————————
     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx_n))
-    evm_loss = evm_loss = evm_ring_focal(jnp.abs(tx), jnp.abs(rx_n),
+    evm_loss = evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx_n),
                           thr_in = 0.60,     # 固定 0.60
                           thr_mid = 1.10,    # 固定 1.10
                           tau = 0.05, gamma = 2.0,
