@@ -417,29 +417,34 @@ def si_snr(target, estimate, eps=1e-8):
 #             w_mid * _evm(m_mid) +
 #             w_out * _evm(m_out))
 
-def evm_ring(tx, rx, eps=1e-8,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    # 在训练前一次性做：按 tx 振幅排序，取 33%/66% 百分位作为 thr_in, thr_mid
-    r = np.sort(np.abs(constellation_points))
-    thr_in, thr_mid = np.percentile(r, [33, 66])
+constellation_points = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j,
+], dtype=jnp.complex64)
 
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
+radii = jnp.abs(constellation_points)    
+thr_in, thr_mid = jnp.percentile(radii, jnp.array([33, 66]))
+def evm_ring(tx, rx,
+             thr_in=thr_in, thr_mid=thr_mid,
+             w_in=1.0, w_mid=1.5, w_out=2.0, eps=1e-8):
+    r    = jnp.abs(tx)               # (N,)
+    err2 = jnp.abs(rx - tx)**2       # (N,)
+    sig2 = jnp.abs(tx)**2 + eps      # (N,)
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
+    m_in  = (r <  thr_in).astype(r.dtype)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(r.dtype)
+    m_out = (r >= thr_mid).astype(r.dtype)
 
     def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-        return num / den
+        num = (err2 * mask).sum()
+        den = (sig2 * mask).sum()
+        return num / jnp.maximum(den, eps)
 
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
+    return (w_in  * _evm(m_in)
+          + w_mid * _evm(m_mid)
+          + w_out * _evm(m_out))
 
 
 def phase_err(tx, rx):
