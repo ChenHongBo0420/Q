@@ -515,7 +515,7 @@ def loss_fn(module, params, state,
                               tau=0.05, gamma=2.0,
                               step=step)          # ★ 传 step
 
-    total = snr_loss + 0.05 * evm_loss
+    total = snr_loss + 0.01 * evm_loss
     return total, new_state
 
 
