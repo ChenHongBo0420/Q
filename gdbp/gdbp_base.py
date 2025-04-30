@@ -432,48 +432,48 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
         
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     # snr = snr + 0.01 * evm
-#     return snr, updated_state
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    # y_transformed = apply_combined_transform(y)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    # snr = snr + 0.01 * evm
+    return snr, updated_state
 
-def loss_fn(module, params, state,
-            y, x, aux, const, sparams,
-            ):               
+# def loss_fn(module, params, state,
+#             y, x, aux, const, sparams,
+#             ):               
 
-    p_all = util.dict_merge(params, sparams)
-    z, new_state = module.apply(
-        {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+#     p_all = util.dict_merge(params, sparams)
+#     z, new_state = module.apply(
+#         {'params': p_all, 'aux_inputs': aux,
+#          'const': const, **state},
+#         core.Signal(y))
 
-    tx = x[z.t.start:z.t.stop]
-    rx = z.val
+#     tx = x[z.t.start:z.t.stop]
+#     rx = z.val
 
-    # —— SNR & EVM ————————————————
-    snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-    evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx),
-                          thr_in = 0.60,     # 固定 0.60
-                          thr_mid = 1.10,    # 固定 1.10
-                          w_in = 1.0, w_mid = 1.3, w_out = 2.0,
-                          )       
+#     # —— SNR & EVM ————————————————
+#     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
+#     evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx),
+#                           thr_in = 0.60,     # 固定 0.60
+#                           thr_mid = 1.10,    # 固定 1.10
+#                           w_in = 1.0, w_mid = 1.3, w_out = 2.0,
+#                           )       
 
-    total = snr_loss + 0.01 * evm_loss
-    return total, new_state
+#     total = snr_loss + 0.01 * evm_loss
+#     return total, new_state
 
 
 # def loss_fn(module: layer.Layer,
