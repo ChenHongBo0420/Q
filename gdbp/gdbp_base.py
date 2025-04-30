@@ -455,7 +455,7 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 
 def loss_fn(module, params, state,
             y, x, aux, const, sparams,
-            step):                   # ← 新参数
+            ):               
 
     p_all = util.dict_merge(params, sparams)
     z, new_state = module.apply(
