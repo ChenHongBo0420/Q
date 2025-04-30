@@ -399,6 +399,8 @@ def evm_ring(tx, rx, eps=1e-8,
              thr_in=0.60, thr_mid=1.10,
              w_in=1.0, w_mid=1.5, w_out=2.0):
     r    = jnp.abs(tx)
+    r1 = jnp.abs(tx).reshape(-1)
+    print('r min/mean/max:', float(r1.min()), float(r1.mean()), float(r1.max()))
     err2 = jnp.abs(rx - tx)**2
     sig2 = jnp.abs(tx)**2
 
