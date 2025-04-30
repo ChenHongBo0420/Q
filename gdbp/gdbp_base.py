@@ -417,22 +417,29 @@ def si_snr(target, estimate, eps=1e-8):
 #             w_mid * _evm(m_mid) +
 #             w_out * _evm(m_out))
 
-def evm_ring(tx, rx, delta=0.15, eps=1e-8):
-    # 1. 每个符号的 EVM ratio
+def evm_ring(tx, rx, eps=1e-8,
+             w_in=1.0, w_mid=1.5, w_out=2.0):
+    # 在训练前一次性做：按 tx 振幅排序，取 33%/66% 百分位作为 thr_in, thr_mid
+    r = np.sort(np.abs(constellation_points))
+    thr_in, thr_mid = np.percentile(r, [33, 66])
+
     err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2 + eps
-    e = err2 / sig2  # (N,)
+    sig2 = jnp.abs(tx)**2
 
-    # 2. 对应半径归一到 [0,1]
-    r = jnp.abs(tx)
-    r_min, r_max = r.min(), r.max()
-    rn = (r - r_min) / (r_max - r_min + eps)  # 标准化到 [0,1]
+    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    m_in  = (r < thr_in).astype(jnp.float32)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
 
-    # 3. 权重：w = 1 + delta * rn
-    w = 1.0 + delta * rn  # 外环权重大，内环权重近 1
+    def _evm(mask):
+        num = jnp.sum(err2 * mask)
+        den = jnp.sum(sig2 * mask)
+        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+        return num / den
 
-    # 4. 最终 loss
-    return (w * e).mean()
+    return (w_in  * _evm(m_in) +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
 
 
 def phase_err(tx, rx):
