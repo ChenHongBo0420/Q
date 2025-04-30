@@ -395,27 +395,45 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
 
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    r    = jnp.abs(tx)
+# def evm_ring(tx, rx, eps=1e-8,
+#              thr_in=0.60, thr_mid=1.10,
+#              w_in=1.0, w_mid=1.5, w_out=2.0):
+#     r    = jnp.abs(tx)
+#     err2 = jnp.abs(rx - tx)**2
+#     sig2 = jnp.abs(tx)**2
+
+#     # 0/1 masks — 必须是 float32 / float64，不能用 complex
+#     m_in  = (r < thr_in).astype(jnp.float32)
+#     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+#     m_out = (r >= thr_mid).astype(jnp.float32)
+
+#     def _evm(mask):
+#         num = jnp.sum(err2 * mask)
+#         den = jnp.sum(sig2 * mask)
+#         den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+#         return num / den
+
+#     return (w_in  * _evm(m_in) +
+#             w_mid * _evm(m_mid) +
+#             w_out * _evm(m_out))
+
+def evm_ring(tx, rx, delta=0.15, eps=1e-8):
+    # 1. 每个符号的 EVM ratio
     err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
+    sig2 = jnp.abs(tx)**2 + eps
+    e = err2 / sig2  # (N,)
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
+    # 2. 对应半径归一到 [0,1]
+    r = jnp.abs(tx)
+    r_min, r_max = r.min(), r.max()
+    rn = (r - r_min) / (r_max - r_min + eps)  # 标准化到 [0,1]
 
-    def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-        return num / den
+    # 3. 权重：w = 1 + delta * rn
+    w = 1.0 + delta * rn  # 外环权重大，内环权重近 1
 
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
+    # 4. 最终 loss
+    return (w * e).mean()
+
 
 def phase_err(tx, rx):
     return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
@@ -448,7 +466,7 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = snr - 0.01 * evm
+    snr = snr + 0.01 * evm
     return snr, updated_state
 
 # def loss_fn(module, params, state,
