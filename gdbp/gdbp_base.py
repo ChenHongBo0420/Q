@@ -515,8 +515,8 @@ def loss_fn(module, params, state,
                               tau=0.05, gamma=2.0,
                               step=step)          # ★ 传 step
 
-    total = snr_loss + 0.008 * evm_loss
-    return total, new_state
+    total = snr_loss + 0.01 * evm_loss
+    return snr_loss, new_state
 
 
 # def loss_fn(module: layer.Layer,
