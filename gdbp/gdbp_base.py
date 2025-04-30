@@ -417,17 +417,14 @@ def evm_ring(tx, rx, eps=1e-8,
             w_mid * _evm(m_mid) +
             w_out * _evm(m_out))
 
+import jax, jax.numpy as jnp, jax.lax as lax
+
 def evm_ring_focal(tx, rx,
                    tau=0.05, gamma=2.0,
                    thr_in=None, thr_mid=None,
                    w_in=1.0, w_mid=1.3, w_out=1.8,
-                   eps=1e-8, dbg=False):
-    """
-    Ring-wise EVM² + Focal   (JIT-safe, 可打印 r 统计)
-    -------------------------------------------------
-    • 自动用 r.max() 推断中 / 外环阈值
-    • dbg=True 时仅首个 batch 打印统计
-    """
+                   eps=1e-8,
+                   step=None):                 # ← 传 step 进来
     r    = jnp.abs(tx)
     err2 = jnp.abs(rx - tx)**2
     sig2 = jnp.abs(tx)**2
@@ -437,13 +434,15 @@ def evm_ring_focal(tx, rx,
     thr_in  = 0.33*r_max if thr_in  is None else thr_in
     thr_mid = 0.66*r_max if thr_mid is None else thr_mid
 
-    # —— 打印一次统计（dbg=True） ————
-    if dbg:
+    # —— 仅在 step==0 时打印一次 r 统计 —————
+    def _print(_):
         jax.debug.print("r min/mean/max = {0:.3f}/{1:.3f}/{2:.3f}",
-                        jnp.min(r_max), jnp.mean(r), r_max)
+                        jnp.min(r), jnp.mean(r), r_max)
+        return 0
+    lax.cond(step==0, _print, lambda _:0, operand=None)
 
+    # —— focal 权重 & masks ————————————
     focal = (err2 / tau)**gamma
-
     m_in  = (r <  thr_in ).astype(jnp.float32)
     m_mid = ((r>=thr_in) & (r < thr_mid)).astype(jnp.float32)
     m_out = (r >= thr_mid).astype(jnp.float32)
@@ -494,42 +493,31 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 
 def loss_fn(module, params, state,
             y, x, aux, const, sparams,
-            step):
+            step):                   # ← 新参数
 
-    # —— 前向 ————————————————————————
     p_all = util.dict_merge(params, sparams)
     z, new_state = module.apply(
         {'params': p_all, 'aux_inputs': aux,
          'const': const, **state},
         core.Signal(y))
 
-    tx = x[z.t.start:z.t.stop]           # (N,2)
+    tx = x[z.t.start:z.t.stop]
     rx = z.val
 
-    # —— α 归一化（两极化共享） —————————
+    # —— α 归一化 ————————————————
     alpha = jnp.vdot(jnp.abs(tx), jnp.abs(rx)).real / \
             jnp.vdot(jnp.abs(tx), jnp.abs(tx)).real
-    rx_n = rx / alpha
+    rx_n  = rx / alpha
 
-    # —— SNR 与 EVM ————————————————————
+    # —— SNR & EVM ————————————————
     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx_n))
     evm_loss = evm_ring_focal(jnp.abs(tx), jnp.abs(rx_n),
                               tau=0.05, gamma=2.0,
-                              dbg=(step==0))    # 仅首 batch 打印 r 统计
+                              step=step)          # ★ 传 step
 
-    total = snr_loss + 0.05 * evm_loss          # ← 权重 0.05
-
-    # —— Debug: 打印梯度量级 (首 2 batch) —
-    def _grad_norm(f):
-        return jax.tree_util.tree_l2_norm(
-               jax.grad(lambda p: f)(params))
-    if step < 2:
-        g_snr = _grad_norm(lambda p: snr_loss)
-        g_evm = _grad_norm(lambda p: 0.05*evm_loss)
-        jax.debug.print("step {0}  ∥∇snr∥={1:.3e}  ∥∇evm∥={2:.3e}",
-                        step, g_snr, g_evm)
-
+    total = snr_loss + 0.05 * evm_loss
     return total, new_state
+
 
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
