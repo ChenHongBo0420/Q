@@ -395,56 +395,56 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
 
-# def evm_ring(tx, rx, eps=1e-8,
-#              thr_in=0.60, thr_mid=1.10,
-#              w_in=1.0, w_mid=1.5, w_out=2.0):
-#     r    = jnp.abs(tx)
-#     err2 = jnp.abs(rx - tx)**2
-#     sig2 = jnp.abs(tx)**2
+def evm_ring(tx, rx, eps=1e-8,
+             thr_in=0.60, thr_mid=1.10,
+             w_in=1.0, w_mid=1.5, w_out=2.0):
+    r    = jnp.abs(tx)
+    err2 = jnp.abs(rx - tx)**2
+    sig2 = jnp.abs(tx)**2
 
-#     # 0/1 masks — 必须是 float32 / float64，不能用 complex
-#     m_in  = (r < thr_in).astype(jnp.float32)
-#     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-#     m_out = (r >= thr_mid).astype(jnp.float32)
-
-#     def _evm(mask):
-#         num = jnp.sum(err2 * mask)
-#         den = jnp.sum(sig2 * mask)
-#         den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-#         return num / den
-
-#     return (w_in  * _evm(m_in) +
-#             w_mid * _evm(m_mid) +
-#             w_out * _evm(m_out))
-
-constellation_points = jnp.array([
-    -3-3j, -3-1j, -3+3j, -3+1j,
-    -1-3j, -1-1j, -1+3j, -1+1j,
-     3-3j,  3-1j,  3+3j,  3+1j,
-     1-3j,  1-1j,  1+3j,  1+1j,
-], dtype=jnp.complex64)
-
-radii = jnp.abs(constellation_points)    
-thr_in, thr_mid = jnp.percentile(radii, jnp.array([33, 66]))
-def evm_ring(tx, rx,
-             thr_in=thr_in, thr_mid=thr_mid,
-             w_in=1.0, w_mid=1.5, w_out=2.0, eps=1e-8):
-    r    = jnp.abs(tx)               # (N,)
-    err2 = jnp.abs(rx - tx)**2       # (N,)
-    sig2 = jnp.abs(tx)**2 + eps      # (N,)
-
-    m_in  = (r <  thr_in).astype(r.dtype)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(r.dtype)
-    m_out = (r >= thr_mid).astype(r.dtype)
+    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    m_in  = (r < thr_in).astype(jnp.float32)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
 
     def _evm(mask):
-        num = (err2 * mask).sum()
-        den = (sig2 * mask).sum()
-        return num / jnp.maximum(den, eps)
+        num = jnp.sum(err2 * mask)
+        den = jnp.sum(sig2 * mask)
+        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+        return num / den
 
-    return (w_in  * _evm(m_in)
-          + w_mid * _evm(m_mid)
-          + w_out * _evm(m_out))
+    return (w_in  * _evm(m_in) +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
+
+# constellation_points = jnp.array([
+#     -3-3j, -3-1j, -3+3j, -3+1j,
+#     -1-3j, -1-1j, -1+3j, -1+1j,
+#      3-3j,  3-1j,  3+3j,  3+1j,
+#      1-3j,  1-1j,  1+3j,  1+1j,
+# ], dtype=jnp.complex64)
+
+# radii = jnp.abs(constellation_points)    
+# thr_in, thr_mid = jnp.percentile(radii, jnp.array([33, 66]))
+# def evm_ring(tx, rx,
+#              thr_in=thr_in, thr_mid=thr_mid,
+#              w_in=1.0, w_mid=1.5, w_out=2.0, eps=1e-8):
+#     r    = jnp.abs(tx)               # (N,)
+#     err2 = jnp.abs(rx - tx)**2       # (N,)
+#     sig2 = jnp.abs(tx)**2 + eps      # (N,)
+
+#     m_in  = (r <  thr_in).astype(r.dtype)
+#     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(r.dtype)
+#     m_out = (r >= thr_mid).astype(r.dtype)
+
+#     def _evm(mask):
+#         num = (err2 * mask).sum()
+#         den = (sig2 * mask).sum()
+#         return num / jnp.maximum(den, eps)
+
+#     return (w_in  * _evm(m_in)
+#           + w_mid * _evm(m_mid)
+#           + w_out * _evm(m_out))
 
 
 def phase_err(tx, rx):
@@ -478,32 +478,8 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = snr + 0.1 * evm
+    snr = snr + 0.01 * evm
     return snr, updated_state
-
-# def loss_fn(module, params, state,
-#             y, x, aux, const, sparams,
-#             ):               
-
-#     p_all = util.dict_merge(params, sparams)
-#     z, new_state = module.apply(
-#         {'params': p_all, 'aux_inputs': aux,
-#          'const': const, **state},
-#         core.Signal(y))
-
-#     tx = x[z.t.start:z.t.stop]
-#     rx = z.val
-
-#     # —— SNR & EVM ————————————————
-#     snr_loss = si_snr_flat_amp_pair(jnp.abs(tx), jnp.abs(rx))
-#     evm_loss = evm_ring(jnp.abs(tx), jnp.abs(rx),
-#                           thr_in = 0.60,     # 固定 0.60
-#                           thr_mid = 1.10,    # 固定 1.10
-#                           w_in = 1.0, w_mid = 1.3, w_out = 2.0,
-#                           )       
-
-#     total = snr_loss + 0.01 * evm_loss
-#     return total, new_state
 
 
 # def loss_fn(module: layer.Layer,
