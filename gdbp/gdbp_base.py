@@ -416,7 +416,36 @@ def evm_ring(tx, rx, eps=1e-8,
     return (w_in  * _evm(m_in) +
             w_mid * _evm(m_mid) +
             w_out * _evm(m_out))
+                     
+def evm_ring(tx, rx, *,
+                   thr_in=0.60, thr_mid=1.10,      # 固定阈值
+                   w_in=1.0,  w_mid=1.3, w_out=2.0,# 静态权重
+                   tau=0.05, gamma=2.5,            # 焦化系数
+                   eps=1e-8):
+    """
+    Ring-wise EVM²  ×  Focal  —— 适合 16-QAM
+    --------------------------------------------------------
+      • 外环误差再乘 ((|e|²)/tau)^γ   (γ=2.5 推荐)
+      • 使外环梯度 ≈ 内环的 5–10 倍
+    """
+    r     = jnp.abs(tx)
+    err2  = jnp.abs(rx - tx)**2
+    sig2  = jnp.abs(tx)**2
+    focal = (err2 / tau)**gamma            # 焦化放大系数
 
+    m_in  = (r <  thr_in ).astype(jnp.float32)
+    m_mid = ((r>=thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
+
+    def _evm(mask):
+        num = jnp.sum(err2 * focal * mask)
+        den = jnp.sum(sig2 * mask) + eps
+        return num / den
+
+    return (w_in  * _evm(m_in)  +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
+                           
 # constellation_points = jnp.array([
 #     -3-3j, -3-1j, -3+3j, -3+1j,
 #     -1-3j, -1-1j, -1+3j, -1+1j,
