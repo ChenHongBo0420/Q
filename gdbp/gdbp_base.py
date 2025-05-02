@@ -395,27 +395,54 @@ def si_snr(target, estimate, eps=1e-8):
     return -si_snr_value 
 
 
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    r    = jnp.abs(tx)
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
+# def evm_ring(tx, rx, eps=1e-8,
+#              thr_in=0.60, thr_mid=1.10,
+#              w_in=1.0, w_mid=1.5, w_out=2.0):
+#     r    = jnp.abs(tx)
+#     err2 = jnp.abs(rx - tx)**2
+#     sig2 = jnp.abs(tx)**2
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
+#     # 0/1 masks — 必须是 float32 / float64，不能用 complex
+#     m_in  = (r < thr_in).astype(jnp.float32)
+#     m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+#     m_out = (r >= thr_mid).astype(jnp.float32)
 
-    def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-        return num / den
+#     def _evm(mask):
+#         num = jnp.sum(err2 * mask)
+#         den = jnp.sum(sig2 * mask)
+#         den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+#         return num / den
 
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
+#     return (w_in  * _evm(m_in) +
+#             w_mid * _evm(m_mid) +
+#             w_out * _evm(m_out))
+
+def evm_ring(tx, rx, rng_key,
+                   w_in=1.0, w_mid=1.3, w_out=2.0,
+                   gamma=3.0, tau=0.05):
+    r     = jnp.abs(tx)
+    err2  = jnp.abs(rx - tx)**2
+    sig2  = jnp.abs(tx)**2
+    focal = (err2 / tau)**gamma
+
+    m_in  = (r < 0.60)
+    m_mid = ( (r>=0.60) & (r<1.10) )
+    m_out = (r >= 1.10)
+
+    # —— 只随机取 25 % 中/内环 (重采样) ——
+    keep_mid = jax.random.bernoulli(rng_key, p=0.25, shape=m_mid.shape)
+    mask_mid = m_mid & keep_mid
+    keep_in  = jax.random.bernoulli(rng_key, p=0.25, shape=m_in.shape)
+    mask_in  = m_in  & keep_in
+
+    def _evm(mask, w):
+        num = jnp.sum(err2 * focal * mask)
+        den = jnp.sum(sig2 * mask) + 1e-8
+        return w * num / den
+
+    return (_evm(mask_in, w_in)   +
+            _evm(mask_mid,w_mid)  +
+            _evm(m_out,  w_out))
                      
 def phase_err(tx, rx):
     return jnp.mean(jnp.angle(rx) - jnp.angle(tx))**2
@@ -448,7 +475,7 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    # snr = snr + 0.01 * evm
+    snr = snr + 0.01 * evm
     return snr, updated_state
 
 
