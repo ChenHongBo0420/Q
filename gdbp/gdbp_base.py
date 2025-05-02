@@ -444,9 +444,15 @@ def evm_ring(tx, rx, eps=1e-8,
 #             _evm(mask_mid,w_mid)  +
 #             _evm(m_out,  w_out))
                      
-def phase_err(tx, rx):
+def phase_err_cos(tx, rx):
+    """
+    连续相位误差：1 - cos(Δφ)
+    · Δφ = ∠(rx · conj(tx))
+    · 对小抖动近似 0.5·Δφ²，但无 π 跳变
+    """
     delta = jnp.angle(rx * jnp.conj(tx))
-    return 1 - jnp.mean(jnp.cos(delta))      # ≈ 0.5·Δφ² for small Δφ
+    return 1.0 - jnp.mean(jnp.cos(delta))
+
 
         
 def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
@@ -477,7 +483,7 @@ def loss_fn(module: layer.Layer,
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    phase = phase_err(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    phase = phase_err_cos(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
     snr = snr + 0.01 * evm + 0.01 * phase
     return snr, updated_state
 
