@@ -20,103 +20,46 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 ## One ##
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0 = 0.,
-#                      mode: str = 'train'):
-#     '''
-#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
-#     specific initialization method and trainable parameters defined
-#     by trainer.
-
-#     Args:
-#         steps: GDBP steps/layers
-#         dtaps: D-filter length
-#         ntaps: N-filter length
-#         rtaps: R-filter length
-#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-#         mode: 'train' or 'test'
-
-#     Returns:
-#         A layer object
-#     '''
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         # configure mimo to its training mode
-#         mimo_train = True
-#     elif mode == 'test':
-#         # mimo operates at training mode for the first 200000 symbols,
-#         # then switches to tracking mode afterwards
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-        
-#     base = layer.Serial(
-#         layer.FDBP(steps=steps,
-#                    dtaps=dtaps,
-#                    ntaps=ntaps,
-#                    d_init=d_init,
-#                    n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-#         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-#     return base
-
-## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
-                     w0=0.,
+                     w0 = 0.,
                      mode: str = 'train'):
+    '''
+    make base module that derives DBP, FDBP, EDBP, GDBP depending on
+    specific initialization method and trainable parameters defined
+    by trainer.
+
+    Args:
+        steps: GDBP steps/layers
+        dtaps: D-filter length
+        ntaps: N-filter length
+        rtaps: R-filter length
+        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+        mode: 'train' or 'test'
+
+    Returns:
+        A layer object
+    '''
 
     _assert_taps(dtaps, ntaps, rtaps)
 
     d_init, n_init = init_fn
 
     if mode == 'train':
+        # configure mimo to its training mode
         mimo_train = True
     elif mode == 'test':
+        # mimo operates at training mode for the first 200000 symbols,
+        # then switches to tracking mode afterwards
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-
-    # 定义串联的 FDBP 层
-    fdbp_series = layer.Serial(
+        
+    base = layer.Serial(
         layer.FDBP(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init,
-                    name='fdbp1'),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf1',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
-        name='fdbp_series'
-    )
-
-    # 定义原有的串行分支
-    serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
                    d_init=d_init,
@@ -127,22 +70,79 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
-        name='serial_branch'  # 添加名称
-    )
-
-    # 定义基础模块
-    base = layer.Serial(
-        layer.FanOut(num=2),
-        layer.Parallel(
-            fdbp_series,
-            serial_branch
-        ),
-        layer.FanInMean()
-    )
-
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        
     return base
+
+## Two ##
+# def make_base_module(steps: int = 3,
+#                      dtaps: int = 261,
+#                      ntaps: int = 41,
+#                      rtaps: int = 61,
+#                      init_fn: tuple = (core.delta, core.gauss),
+#                      w0=0.,
+#                      mode: str = 'train'):
+
+#     _assert_taps(dtaps, ntaps, rtaps)
+
+#     d_init, n_init = init_fn
+
+#     if mode == 'train':
+#         mimo_train = True
+#     elif mode == 'test':
+#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
+#     else:
+#         raise ValueError('invalid mode %s' % mode)
+
+#     # 定义串联的 FDBP 层
+#     fdbp_series = layer.Serial(
+#         layer.FDBP(steps=steps,
+#                     dtaps=dtaps,
+#                     ntaps=ntaps,
+#                     d_init=d_init,
+#                     n_init=n_init,
+#                     name='fdbp1'),
+#         layer.BatchPowerNorm(mode=mode),
+#         layer.MIMOFOEAf(name='FOEAf1',
+#                         w0=w0,
+#                         train=mimo_train,
+#                         preslicer=core.conv1d_slicer(rtaps),
+#                         foekwargs={}),
+#         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+#         layer.MIMOAF(train=mimo_train),
+#         name='fdbp_series'
+#     )
+
+#     # 定义原有的串行分支
+#     serial_branch = layer.Serial(
+#         layer.FDBP1(steps=steps,
+#                    dtaps=dtaps,
+#                    ntaps=ntaps,
+#                    d_init=d_init,
+#                    n_init=n_init),
+#         layer.BatchPowerNorm(mode=mode),
+#         layer.MIMOFOEAf(name='FOEAf',
+#                         w0=w0,
+#                         train=mimo_train,
+#                         preslicer=core.conv1d_slicer(rtaps),
+#                         foekwargs={}),
+#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+#         layer.MIMOAF(train=mimo_train),
+#         name='serial_branch'  # 添加名称
+#     )
+
+#     # 定义基础模块
+#     base = layer.Serial(
+#         layer.FanOut(num=2),
+#         layer.Parallel(
+#             fdbp_series,
+#             serial_branch
+#         ),
+#         layer.FanInMean()
+#     )
+
+#     return base
 
 ## Three ##
 # def make_base_module(steps: int = 3,
@@ -273,6 +273,33 @@ def make_base_module(steps: int = 3,
 #     #     若仍想和别的分支再并行，也可以，但这里示例是纯单分支。
 #     return fused_branch
 
+# ── ★ 工具 1：估算还能涨多少 Q(dB) ───────────────────────────
+def q_gain_upper(tx, rx):
+    """
+    tx, rx: shape (N,2) complex
+    返回当前链路把结构性误差全部抹掉时，理论还能涨多少 Q(dB)
+    """
+    e      = rx - tx
+    r      = jnp.abs(tx)
+    E_tot  = jnp.mean(jnp.abs(e)**2)
+    # 16‑QAM 下外环(r>=1.1) 基本≈剩余非线性/ISI
+    ΔE     = jnp.mean(jnp.abs(e)[r >= 1.1]**2)
+    return 10 * jnp.log10(1.0 + ΔE / E_tot)
+
+# ── ★ 工具 2：取一次 RConv 每‑tap 梯度 (返回 ndarray) ───────
+def tap_grad_snapshot(module, params, state, y, x):
+    """
+    只做一次前向+反向，返回 RConv kernel 的 L2 梯度向量
+    """
+    def loss_wrt_p(p):
+        z,_ = module.apply({'params': p, **state}, core.Signal(y))
+        tx  = x[z.t.start:z.t.stop]
+        return jnp.mean(jnp.abs(z.val - tx)**2)
+
+    grads = jax.grad(loss_wrt_p)(params)
+    g     = grads['RConv1']['kernel']          # <- 若你叫 RConv  or RConv1 请对齐
+    g_l2  = jnp.sqrt(jnp.sum(g.real**2 + g.imag**2, axis=(1,2)))  # (taps,)
+    return np.asarray(g_l2)                    # 转 numpy 方便画图
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -441,7 +468,6 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    # y_transformed = apply_combined_transform(y)
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
@@ -556,22 +582,44 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter = None,
+#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+#     ''' training process (1 epoch)
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#             data: dataset
+#             batch_size: batch size
+#             opt: optimizer
+
+#         Returns:
+#             yield loss, trained parameters, module state
+#     '''
+
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+#     for i, (y, x) in tqdm(enumerate(batch_gen),
+#                              total=n_iter, desc='training', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
+#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+#                                                    module_state, y, x, aux,
+#                                                    const, sparams)
+#         yield loss, opt.params_fn(opt_state), module_state
+
+
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
-
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -586,8 +634,30 @@ def train(model: Model,
         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
                                                    module_state, y, x, aux,
                                                    const, sparams)
+         # ▶︎ 每 500 iter 打印一次“还能涨多少 Q”
+        if i % 500 == 0:
+            with jax.disable_jit():             # 避免 pollute jit trace
+                z,_ = model.module.apply(
+                    {'params': opt.params_fn(opt_state),
+                     **module_state, 'aux_inputs': aux,
+                     'const': const},
+                    core.Signal(y))
+
+            tx_align = x[z.t.start:z.t.stop]
+            gain_db  = q_gain_upper(tx_align, z.val)
+        　　 print(f"[iter {i:4d}]  Q-上限估计 {gain_db:.3f} dB")
+        if i % 1000 == 0:
+            g_vec = tap_grad_snapshot(
+                    model.module,
+                    opt.params_fn(opt_state),
+                    module_state,
+                    y, x)
+            plt.figure(figsize=(6,2))
+            plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
+            plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
         yield loss, opt.params_fn(opt_state), module_state
-                                     
+
+
 def train_once(model_tr, data_tr, 
                batch_size=500, n_iter=3000):
     """return  params , state_bundle"""
