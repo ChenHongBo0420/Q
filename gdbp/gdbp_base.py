@@ -109,7 +109,7 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
         name='fdbp_series'
     )
@@ -286,27 +286,46 @@ def q_gain_upper(tx, rx):
     ΔE     = jnp.mean(jnp.abs(e)[r >= 1.1]**2)
     return 10 * jnp.log10(1.0 + ΔE / E_tot)
 
-# ── ★ 工具 2：取一次 RConv 每‑tap 梯度 (返回 ndarray) ───────
-# ── 修正版 tap_grad_snapshot ─────────────────────────────
-def tap_grad_snapshot(module, params, state, const, aux, y, x,
-                      rconv_name='RConv'):
+WATCH_CONV_KEYS = ['RConv',        
+                   'RConv1']      
+
+def _collect_watch_kernels(tree, path=()):
     """
-    返回 L2(实+虚) 梯度，shape=(taps,)；不再假定 kernel 维度
+    深度遍历 param/grad 树，返回所有满足
+    “路径中含 WATCH_CONV_KEYS 中任一关键字且有 'kernel' ” 的节点
     """
+    out = []
+    for k, v in tree.items():
+        new_path = path + (k,)
+        if isinstance(v, (dict, flax.core.FrozenDict)):
+            out += _collect_watch_kernels(v, new_path)
+        elif k == 'kernel':
+            joined = '/'.join(new_path)        # e.g. fdbp_series/RConv1/kernel
+            if any(key in joined for key in WATCH_CONV_KEYS):
+                out.append(v)                  # v 是 ndarray
+    return out
+
+
+def tap_grad_snapshot(module, params, state, const, aux, y, x):
     def loss_wrt_p(p):
         z,_ = module.apply({'params': p,
                             **state,
                             'const': const,
                             'aux_inputs': aux},
                            core.Signal(y))
-        tx  = x[z.t.start:z.t.stop]
+        tx = x[z.t.start:z.t.stop]
         return jnp.mean(jnp.abs(z.val - tx)**2)
 
-    g = jax.grad(loss_wrt_p)(params)[rconv_name]['kernel']   # 抓 kernel
-    g2= g.real**2 + g.imag**2
-    # —— 除 tap 维(0) 外全部求和 —— 
-    g_l2 = jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
-    return np.asarray(g_l2)          # (taps,)
+    grads = jax.grad(loss_wrt_p)(params)
+    kernels = _collect_watch_kernels(grads)     # ← 关键变化
+
+    vecs = []
+    for g in kernels:
+        g2  = g.real**2 + g.imag**2
+        g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
+        vecs.append(np.asarray(g_l2))
+    return np.concatenate(vecs)      
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
