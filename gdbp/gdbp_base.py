@@ -286,8 +286,7 @@ def q_gain_upper(tx, rx):
     ΔE     = jnp.mean(jnp.abs(e)[r >= 1.1]**2)
     return 10 * jnp.log10(1.0 + ΔE / E_tot)
 
-WATCH_CONV_KEYS = ['RConv',        
-                   'RConv1']      
+WATCH_CONV_KEYS = ['RConv']      
 
 def _collect_watch_kernels(tree, path=()):
     """
@@ -724,7 +723,7 @@ def train(model: Model,
                       model.module,
                       util.dict_merge(opt.params_fn(opt_state), sparams),
                       module_state, const, aux, y, x,
-                      watch_keys=('RConv', 'RConv1'))   # 想加别的卷积关键字在此列出
+                      watch_keys=('RConv'))   # 想加别的卷积关键字在此列出
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
