@@ -287,19 +287,23 @@ def q_gain_upper(tx, rx):
     return 10 * jnp.log10(1.0 + ΔE / E_tot)
 
 # ── ★ 工具 2：取一次 RConv 每‑tap 梯度 (返回 ndarray) ───────
-def tap_grad_snapshot(module, params, state, y, x):
+# ── 修正版 tap_grad_snapshot ─────────────────────────────
+def tap_grad_snapshot(module, params, state, const, aux, y, x):
     """
-    只做一次前向+反向，返回 RConv kernel 的 L2 梯度向量
+    取一次 per‑tap L2 梯度；需带 const / aux_inputs
     """
     def loss_wrt_p(p):
-        z,_ = module.apply({'params': p, **state}, core.Signal(y))
+        z,_ = module.apply({'params': p,
+                            **state,
+                            'const': const,
+                            'aux_inputs': aux},
+                           core.Signal(y))
         tx  = x[z.t.start:z.t.stop]
         return jnp.mean(jnp.abs(z.val - tx)**2)
 
-    grads = jax.grad(loss_wrt_p)(params)
-    g     = grads['RConv1']['kernel']          # <- 若你叫 RConv  or RConv1 请对齐
-    g_l2  = jnp.sqrt(jnp.sum(g.real**2 + g.imag**2, axis=(1,2)))  # (taps,)
-    return np.asarray(g_l2)                    # 转 numpy 方便画图
+    g = jax.grad(loss_wrt_p)(params)['RConv']['kernel']  # ← 如名不同请同步
+    g = jnp.sqrt(jnp.sum(g.real**2 + g.imag**2, axis=(1,2)))
+    return np.asarray(g)
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -655,9 +659,11 @@ def train(model: Model,
         # ——③  每 1000 iter 画一次梯度热图 ————————————————
         if i % 1000 == 0:
             g_vec = tap_grad_snapshot(
-                      model.module,
-                      util.dict_merge(opt.params_fn(opt_state), sparams),  # ★ merge
-                      module_state, y, x)
+              model.module,
+              util.dict_merge(opt.params_fn(opt_state), sparams),
+              module_state,
+              const, aux,                 # ★ new
+              y, x)
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
