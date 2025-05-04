@@ -284,9 +284,7 @@ def q_gain_upper(tx, rx):
     E_tot  = jnp.mean(jnp.abs(e)**2)
     # 16‑QAM 下外环(r>=1.1) 基本≈剩余非线性/ISI
     ΔE     = jnp.mean(jnp.abs(e)[r >= 1.1]**2)
-    return 10 * jnp.log10(1.0 + ΔE / E_tot)
-
-WATCH_CONV_KEYS = ['RConv']      
+    return 10 * jnp.log10(1.0 + ΔE / E_tot) 
 
 def _collect_watch_kernels(tree, path=()):
     """
@@ -304,28 +302,6 @@ def _collect_watch_kernels(tree, path=()):
                 out.append(v)                  # v 是 ndarray
     return out
 
-# # MSE-LOSS
-# def tap_grad_snapshot(module, params, state, const, aux, y, x):
-#     def loss_wrt_p(p):
-#         z,_ = module.apply({'params': p,
-#                             **state,
-#                             'const': const,
-#                             'aux_inputs': aux},
-#                            core.Signal(y))
-#         tx = x[z.t.start:z.t.stop]
-#         return jnp.mean(jnp.abs(z.val - tx)**2)
-
-#     grads = jax.grad(loss_wrt_p)(params)
-#     kernels = _collect_watch_kernels(grads)     # ← 关键变化
-
-#     vecs = []
-#     for g in kernels:
-#         g2  = g.real**2 + g.imag**2
-#         g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
-#         vecs.append(np.asarray(g_l2))
-#     return np.concatenate(vecs)      
-
-# ---------- util: SNR‑based per‑tap grad snapshot -----------------
 def tap_grad_snapshot(module, params, state, const, aux, y, x,
                       watch_keys=('RConv', 'PostEQ')):
     """
@@ -723,7 +699,7 @@ def train(model: Model,
                       model.module,
                       util.dict_merge(opt.params_fn(opt_state), sparams),
                       module_state, const, aux, y, x,
-                      watch_keys=('RConv'))   # 想加别的卷积关键字在此列出
+                      watch_keys=('DConv'))   # 想加别的卷积关键字在此列出
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
