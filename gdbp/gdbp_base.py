@@ -305,27 +305,69 @@ def _collect_watch_kernels(tree, path=()):
                 out.append(v)                  # v 是 ndarray
     return out
 
+# # MSE-LOSS
+# def tap_grad_snapshot(module, params, state, const, aux, y, x):
+#     def loss_wrt_p(p):
+#         z,_ = module.apply({'params': p,
+#                             **state,
+#                             'const': const,
+#                             'aux_inputs': aux},
+#                            core.Signal(y))
+#         tx = x[z.t.start:z.t.stop]
+#         return jnp.mean(jnp.abs(z.val - tx)**2)
 
-def tap_grad_snapshot(module, params, state, const, aux, y, x):
+#     grads = jax.grad(loss_wrt_p)(params)
+#     kernels = _collect_watch_kernels(grads)     # ← 关键变化
+
+#     vecs = []
+#     for g in kernels:
+#         g2  = g.real**2 + g.imag**2
+#         g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
+#         vecs.append(np.asarray(g_l2))
+#     return np.concatenate(vecs)      
+
+# ---------- util: SNR‑based per‑tap grad snapshot -----------------
+def tap_grad_snapshot(module, params, state, const, aux, y, x,
+                      watch_keys=('RConv', 'PostEQ')):
+    """
+    计算所有含 watch_keys 的 Conv1d‑kernel 的 ‖∇w‖ (SNR 损失)。
+    返回拼接后的 1‑D ndarray；兼容单/多分支。
+    """
+    def si_snr_flat(tx, rx, eps=1e-8):
+        s = jnp.reshape(jnp.abs(tx), (-1,))
+        r = jnp.reshape(jnp.abs(rx), (-1,))
+        α = jnp.vdot(s, r).real / (jnp.vdot(s, s).real + eps)
+        e = r - α*s
+        return -10.*jnp.log10( (jnp.vdot(α*s, α*s).real+eps) /
+                               (jnp.vdot(e,e).real+eps) )
+
     def loss_wrt_p(p):
-        z,_ = module.apply({'params': p,
-                            **state,
-                            'const': const,
-                            'aux_inputs': aux},
+        z,_ = module.apply({'params': p, **state,
+                            'const': const, 'aux_inputs': aux},
                            core.Signal(y))
         tx = x[z.t.start:z.t.stop]
-        return jnp.mean(jnp.abs(z.val - tx)**2)
+        return si_snr_flat(tx, z.val)          # ★ SNR loss
 
     grads = jax.grad(loss_wrt_p)(params)
-    kernels = _collect_watch_kernels(grads)     # ← 关键变化
 
-    vecs = []
+    # ------- 递归收集所有 watch‑kernel ----------------------------
+    def _rec(tree, path=(), out=[]):
+        for k,v in tree.items():
+            newp = path+(k,)
+            if isinstance(v,(dict,flax.core.FrozenDict)):
+                _rec(v,newp,out)
+            elif k=='kernel' and any(key in '/'.join(newp) for key in watch_keys):
+                out.append(v)
+        return out
+    kernels = _rec(grads,())
+
+    # ------- 汇总 L2 ------------------------------------------------
+    vecs=[]
     for g in kernels:
         g2  = g.real**2 + g.imag**2
-        g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
+        g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1,g.ndim))))
         vecs.append(np.asarray(g_l2))
-    return np.concatenate(vecs)      
-
+    return np.concatenate(vecs)
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -654,44 +696,42 @@ def train(model: Model,
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i,(y,x) in tqdm(enumerate(batch_gen),
-                        total=n_iter, desc='train', leave=False):
+    for i,(y,x) in tqdm(enumerate(batch_gen), total=n_iter, desc='train', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
 
-        # ——①  正常梯度更新 ————————————————————————————
+        # ——①  更新 —— #
         loss, opt_state, module_state = update_step(
             model.module, opt, i, opt_state,
             module_state, y, x, aux, const, sparams)
 
-        # ——②  每 500 iter 估算一次 Q 上限 ——————————————
+        # ——②  Q 上限 —— #
         if i % 500 == 0:
             with jax.disable_jit():
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)  # ★ merge
-                z,_   = model.module.apply(
-                          {'params': p_all,
-                           **module_state,
-                           'aux_inputs': aux,
-                           'const': const},
-                          core.Signal(y))
+                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+                z,_   = model.module.apply({'params': p_all,
+                                            **module_state,
+                                            'const': const,
+                                            'aux_inputs': aux},
+                                           core.Signal(y))
             tx_aln = x[z.t.start:z.t.stop]
-            gain   = q_gain_upper(tx_aln, z.val)
+            gain   = q_gain_upper(tx_aln, z.val)   # 同前
             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
-        # ——③  每 1000 iter 画一次梯度热图 ————————————————
+        # ——③  per‑tap 梯度 —— #
         if i % 1000 == 0:
             g_vec = tap_grad_snapshot(
-              model.module,
-              util.dict_merge(opt.params_fn(opt_state), sparams),
-              module_state,
-              const, aux,                 # ★ new
-              y, x)
+                      model.module,
+                      util.dict_merge(opt.params_fn(opt_state), sparams),
+                      module_state, const, aux, y, x,
+                      watch_keys=('RConv', 'RConv1'))   # 想加别的卷积关键字在此列出
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
 
         yield loss, opt.params_fn(opt_state), module_state
+
 
 def train_once(model_tr, data_tr, 
                batch_size=500, n_iter=3000):
