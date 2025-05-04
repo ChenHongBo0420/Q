@@ -288,9 +288,10 @@ def q_gain_upper(tx, rx):
 
 # ── ★ 工具 2：取一次 RConv 每‑tap 梯度 (返回 ndarray) ───────
 # ── 修正版 tap_grad_snapshot ─────────────────────────────
-def tap_grad_snapshot(module, params, state, const, aux, y, x):
+def tap_grad_snapshot(module, params, state, const, aux, y, x,
+                      rconv_name='RConv'):
     """
-    取一次 per‑tap L2 梯度；需带 const / aux_inputs
+    返回 L2(实+虚) 梯度，shape=(taps,)；不再假定 kernel 维度
     """
     def loss_wrt_p(p):
         z,_ = module.apply({'params': p,
@@ -301,9 +302,11 @@ def tap_grad_snapshot(module, params, state, const, aux, y, x):
         tx  = x[z.t.start:z.t.stop]
         return jnp.mean(jnp.abs(z.val - tx)**2)
 
-    g = jax.grad(loss_wrt_p)(params)['RConv']['kernel']  # ← 如名不同请同步
-    g = jnp.sqrt(jnp.sum(g.real**2 + g.imag**2, axis=(1,2)))
-    return np.asarray(g)
+    g = jax.grad(loss_wrt_p)(params)[rconv_name]['kernel']   # 抓 kernel
+    g2= g.real**2 + g.imag**2
+    # —— 除 tap 维(0) 外全部求和 —— 
+    g_l2 = jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g2.ndim))))
+    return np.asarray(g_l2)          # (taps,)
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
