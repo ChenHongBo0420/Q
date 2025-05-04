@@ -619,7 +619,8 @@ def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+          opt: optim.Optimizer = optim.adam(
+                  optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -627,36 +628,40 @@ def train(model: Model,
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
+    for i,(y,x) in tqdm(enumerate(batch_gen),
+                        total=n_iter, desc='train', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-         # ▶︎ 每 500 iter 打印一次“还能涨多少 Q”
+
+        # ——①  正常梯度更新 ————————————————————————————
+        loss, opt_state, module_state = update_step(
+            model.module, opt, i, opt_state,
+            module_state, y, x, aux, const, sparams)
+
+        # ——②  每 500 iter 估算一次“还能涨多少 Q(dB)” ——————
         if i % 500 == 0:
-            with jax.disable_jit():             # 避免 pollute jit trace
+            with jax.disable_jit():
                 z,_ = model.module.apply(
                     {'params': opt.params_fn(opt_state),
-                     **module_state, 'aux_inputs': aux,
-                     'const': const},
+                     **module_state, 'aux_inputs': aux, 'const': const},
                     core.Signal(y))
+            tx_aln = x[z.t.start:z.t.stop]
+            gain   = q_gain_upper(tx_aln, z.val)
+            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
-            tx_align = x[z.t.start:z.t.stop]
-            gain_db  = q_gain_upper(tx_align, z.val)
-        　　 print(f"[iter {i:4d}]  Q-上限估计 {gain_db:.3f} dB")
+        # ——③  每 1000 iter 打一次 per‑tap 梯度柱状图 ————————
         if i % 1000 == 0:
             g_vec = tap_grad_snapshot(
-                    model.module,
-                    opt.params_fn(opt_state),
-                    module_state,
-                    y, x)
+                model.module,
+                opt.params_fn(opt_state),
+                module_state, y, x)
+            import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
-        yield loss, opt.params_fn(opt_state), module_state
 
+        # ——④  把 loss / params / state 迭代器向外抛 ————————
+        yield loss, opt.params_fn(opt_state), module_state
 
 def train_once(model_tr, data_tr, 
                batch_size=500, n_iter=3000):
