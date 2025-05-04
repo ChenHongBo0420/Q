@@ -618,9 +618,9 @@ def get_train_batch(ds: gdat.Input,
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter = None,
+          n_iter=None,
           opt: optim.Optimizer = optim.adam(
-                  optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
+                 optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -638,30 +638,33 @@ def train(model: Model,
             model.module, opt, i, opt_state,
             module_state, y, x, aux, const, sparams)
 
-        # ——②  每 500 iter 估算一次“还能涨多少 Q(dB)” ——————
+        # ——②  每 500 iter 估算一次 Q 上限 ——————————————
         if i % 500 == 0:
             with jax.disable_jit():
-                z,_ = model.module.apply(
-                    {'params': opt.params_fn(opt_state),
-                     **module_state, 'aux_inputs': aux, 'const': const},
-                    core.Signal(y))
+                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)  # ★ merge
+                z,_   = model.module.apply(
+                          {'params': p_all,
+                           **module_state,
+                           'aux_inputs': aux,
+                           'const': const},
+                          core.Signal(y))
             tx_aln = x[z.t.start:z.t.stop]
             gain   = q_gain_upper(tx_aln, z.val)
-            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
-        # ——③  每 1000 iter 打一次 per‑tap 梯度柱状图 ————————
+        # ——③  每 1000 iter 画一次梯度热图 ————————————————
         if i % 1000 == 0:
             g_vec = tap_grad_snapshot(
-                model.module,
-                opt.params_fn(opt_state),
-                module_state, y, x)
+                      model.module,
+                      util.dict_merge(opt.params_fn(opt_state), sparams),  # ★ merge
+                      module_state, y, x)
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
 
-        # ——④  把 loss / params / state 迭代器向外抛 ————————
         yield loss, opt.params_fn(opt_state), module_state
+
 
 def train_once(model_tr, data_tr, 
                batch_size=500, n_iter=3000):
