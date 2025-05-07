@@ -305,7 +305,7 @@ def _collect_watch_kernels(tree, path=()):
 def tap_grad_snapshot(module, params, state, const, aux, y, x,
                       watch_keys=('RConv', 'PostEQ'),
                       split: bool=False,      # ← 是否把不同卷积分开返回
-                      debug: bool=Ture):      # ← 是否打印抓到的 kernel 信息
+                      debug: bool=True):      # ← 是否打印抓到的 kernel 信息
     """
     计算所有含 watch_keys 的 Conv1d-kernel 的 ‖∇w‖ (SNR 损失)
 
