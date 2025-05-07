@@ -715,7 +715,7 @@ def train(model: Model,
                       model.module,
                       util.dict_merge(opt.params_fn(opt_state), sparams),
                       module_state, const, aux, y, x,
-                      watch_keys=('DConv'))   # 想加别的卷积关键字在此列出
+                      watch_keys=('DConv,'))   # 想加别的卷积关键字在此列出
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
