@@ -303,46 +303,62 @@ def _collect_watch_kernels(tree, path=()):
     return out
 
 def tap_grad_snapshot(module, params, state, const, aux, y, x,
-                      watch_keys=('RConv', 'PostEQ')):
+                      watch_keys=('RConv', 'PostEQ'),
+                      split: bool=False,      # ← 是否把不同卷积分开返回
+                      debug: bool=Ture):      # ← 是否打印抓到的 kernel 信息
     """
-    计算所有含 watch_keys 的 Conv1d‑kernel 的 ‖∇w‖ (SNR 损失)。
-    返回拼接后的 1‑D ndarray；兼容单/多分支。
+    计算所有含 watch_keys 的 Conv1d-kernel 的 ‖∇w‖ (SNR 损失)
+
+    返回：
+        split = False ➜ 1-D ndarray  (与旧版保持一致)
+        split = True  ➜  { 'path/to/conv': ndarray, ... }
     """
+    # ---------- SNR-loss -----------------------------
     def si_snr_flat(tx, rx, eps=1e-8):
         s = jnp.reshape(jnp.abs(tx), (-1,))
         r = jnp.reshape(jnp.abs(rx), (-1,))
         α = jnp.vdot(s, r).real / (jnp.vdot(s, s).real + eps)
         e = r - α*s
-        return -10.*jnp.log10( (jnp.vdot(α*s, α*s).real+eps) /
-                               (jnp.vdot(e,e).real+eps) )
+        return -10.*jnp.log10((jnp.vdot(α*s, α*s).real+eps) /
+                              (jnp.vdot(e,e).real+eps))
 
     def loss_wrt_p(p):
         z,_ = module.apply({'params': p, **state,
                             'const': const, 'aux_inputs': aux},
                            core.Signal(y))
         tx = x[z.t.start:z.t.stop]
-        return si_snr_flat(tx, z.val)          # ★ SNR loss
+        return si_snr_flat(tx, z.val)
 
     grads = jax.grad(loss_wrt_p)(params)
 
-    # ------- 递归收集所有 watch‑kernel ----------------------------
-    def _rec(tree, path=(), out=[]):
+    # ---------- 递归收集 kernel -----------------------
+    buckets = {}               # {conv_path: grad_tensor}
+    def _rec(tree, path=()):
         for k,v in tree.items():
-            newp = path+(k,)
+            newp = path + (k,)
             if isinstance(v,(dict,flax.core.FrozenDict)):
-                _rec(v,newp,out)
-            elif k=='kernel' and any(key in '/'.join(newp) for key in watch_keys):
-                out.append(v)
-        return out
-    kernels = _rec(grads,())
+                _rec(v,newp)
+            elif k=='kernel' and any(kwd in '/'.join(newp) for kwd in watch_keys):
+                buckets['/'.join(newp[:-1])] = v       # 去掉最后的 'kernel'
+    _rec(grads)
 
-    # ------- 汇总 L2 ------------------------------------------------
-    vecs=[]
-    for g in kernels:
-        g2  = g.real**2 + g.imag**2
-        g_l2= jnp.sqrt(jnp.sum(g2, axis=tuple(range(1,g.ndim))))
-        vecs.append(np.asarray(g_l2))
-    return np.concatenate(vecs)
+    # ---------- 打印调试信息 --------------------------
+    if debug:
+        print('---- watched kernels ----')
+        for p,g in buckets.items():
+            print(f'{p:<40s}  shape={tuple(g.shape)}')
+        print('total tap bins =', sum(g.shape[0] for g in buckets.values()))
+
+    # ---------- 求每个 tap 的 L2 ----------------------
+    def _l2(g):
+        g2 = g.real**2 + g.imag**2
+        return jnp.sqrt(jnp.sum(g2, axis=tuple(range(1,g.ndim))))
+    if split:
+        return {k: np.asarray(_l2(v)) for k,v in buckets.items()}
+    else:
+        return np.concatenate([np.asarray(_l2(v)) for v in buckets.values()])
+
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
