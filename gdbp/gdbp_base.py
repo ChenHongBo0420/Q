@@ -304,7 +304,7 @@ def _collect_watch_kernels(tree, path=()):
 
 def tap_grad_snapshot(module, params, state, const, aux, y, x,
                       watch_keys=('DConv',),
-                      split: bool=True,      # ← 是否把不同卷积分开返回
+                      split: bool=False,      # ← 是否把不同卷积分开返回
                       debug: bool=True):      # ← 是否打印抓到的 kernel 信息
     """
     计算所有含 watch_keys 的 Conv1d-kernel 的 ‖∇w‖ (SNR 损失)
@@ -715,7 +715,7 @@ def train(model: Model,
                       model.module,
                       util.dict_merge(opt.params_fn(opt_state), sparams),
                       module_state, const, aux, y, x,
-                      watch_keys=('DConv,'))  
+                      watch_keys=('DConv',))  
             import matplotlib.pyplot as plt
             plt.figure(figsize=(6,2))
             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
