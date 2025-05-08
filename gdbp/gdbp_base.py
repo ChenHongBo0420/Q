@@ -273,91 +273,6 @@ def make_base_module(steps: int = 3,
 #     #     若仍想和别的分支再并行，也可以，但这里示例是纯单分支。
 #     return fused_branch
 
-# ── ★ 工具 1：估算还能涨多少 Q(dB) ───────────────────────────
-def q_gain_upper(tx, rx):
-    """
-    tx, rx: shape (N,2) complex
-    返回当前链路把结构性误差全部抹掉时，理论还能涨多少 Q(dB)
-    """
-    e      = rx - tx
-    r      = jnp.abs(tx)
-    E_tot  = jnp.mean(jnp.abs(e)**2)
-    # 16‑QAM 下外环(r>=1.1) 基本≈剩余非线性/ISI
-    ΔE     = jnp.mean(jnp.abs(e)[r >= 1.1]**2)
-    return 10 * jnp.log10(1.0 + ΔE / E_tot) 
-
-def _collect_watch_kernels(tree, path=()):
-    """
-    深度遍历 param/grad 树，返回所有满足
-    “路径中含 WATCH_CONV_KEYS 中任一关键字且有 'kernel' ” 的节点
-    """
-    out = []
-    for k, v in tree.items():
-        new_path = path + (k,)
-        if isinstance(v, (dict, flax.core.FrozenDict)):
-            out += _collect_watch_kernels(v, new_path)
-        elif k == 'kernel':
-            joined = '/'.join(new_path)        # e.g. fdbp_series/RConv1/kernel
-            if any(key in joined for key in WATCH_CONV_KEYS):
-                out.append(v)                  # v 是 ndarray
-    return out
-
-def tap_grad_snapshot(module, params, state, const, aux, y, x,
-                      watch_keys=('DConv',),
-                      split: bool=False,      # ← 是否把不同卷积分开返回
-                      debug: bool=True):      # ← 是否打印抓到的 kernel 信息
-    """
-    计算所有含 watch_keys 的 Conv1d-kernel 的 ‖∇w‖ (SNR 损失)
-
-    返回：
-        split = False ➜ 1-D ndarray  (与旧版保持一致)
-        split = True  ➜  { 'path/to/conv': ndarray, ... }
-    """
-    # ---------- SNR-loss -----------------------------
-    def si_snr_flat(tx, rx, eps=1e-8):
-        s = jnp.reshape(jnp.abs(tx), (-1,))
-        r = jnp.reshape(jnp.abs(rx), (-1,))
-        α = jnp.vdot(s, r).real / (jnp.vdot(s, s).real + eps)
-        e = r - α*s
-        return -10.*jnp.log10((jnp.vdot(α*s, α*s).real+eps) /
-                              (jnp.vdot(e,e).real+eps))
-
-    def loss_wrt_p(p):
-        z,_ = module.apply({'params': p, **state,
-                            'const': const, 'aux_inputs': aux},
-                           core.Signal(y))
-        tx = x[z.t.start:z.t.stop]
-        return si_snr_flat(tx, z.val)
-
-    grads = jax.grad(loss_wrt_p)(params)
-
-    # ---------- 递归收集 kernel -----------------------
-    buckets = {}               # {conv_path: grad_tensor}
-    def _rec(tree, path=()):
-        for k,v in tree.items():
-            newp = path + (k,)
-            if isinstance(v,(dict,flax.core.FrozenDict)):
-                _rec(v,newp)
-            elif k=='kernel' and any(kwd in '/'.join(newp) for kwd in watch_keys):
-                buckets['/'.join(newp[:-1])] = v       # 去掉最后的 'kernel'
-    _rec(grads)
-
-    # ---------- 打印调试信息 --------------------------
-    if debug:
-        print('---- watched kernels ----')
-        for p,g in buckets.items():
-            print(f'{p:<40s}  shape={tuple(g.shape)}')
-        print('total tap bins =', sum(g.shape[0] for g in buckets.values()))
-
-    # ---------- 求每个 tap 的 L2 ----------------------
-    def _l2(g):
-        g2 = g.real**2 + g.imag**2
-        return jnp.sqrt(jnp.sum(g2, axis=tuple(range(1,g.ndim))))
-    if split:
-        return {k: np.asarray(_l2(v)) for k,v in buckets.items()}
-    else:
-        return np.concatenate([np.asarray(_l2(v)) for v in buckets.values()])
-
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
@@ -535,50 +450,6 @@ def loss_fn(module: layer.Layer,
     return snr, updated_state
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
-
-
-#### LMS - LOSS #####
-# def loss_fn(module: layer.Layer,
-#             params: Dict, state: Dict,
-#             y: Array, x: Array,
-#             aux: Dict, const: Dict, sparams: Dict
-#            ) -> Tuple[jnp.ndarray, Dict]:
-#     params = util.dict_merge(params, sparams)
-
-#     # a. RMS‑norm（match sent symbols）
-#     r = _rms(x)
-#     y, x = y / r, x / r
-
-#     # b. 前向
-#     z, new_state = module.apply(
-#         {'params': params, 'aux_inputs': aux,
-#          'const': const, **state},
-#         core.Signal(y))
-
-#     x_aligned = x[z.t.start:z.t.stop]
-
-#     # c. 投影‑MSE
-#     # loss = _proj_mse(z.val, x_aligned)
-#     loss = si_snr(jnp.abs(z.val), jnp.abs(x_aligned)) 
-#     return loss, new_state    
-
-
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -641,97 +512,22 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
-
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
-
-
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter=None,
-#           opt: optim.Optimizer = optim.adam(
-#                  optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i,(y,x) in tqdm(enumerate(batch_gen), total=n_iter, desc='train', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-
-#         # ——①  更新 —— #
-#         loss, opt_state, module_state = update_step(
-#             model.module, opt, i, opt_state,
-#             module_state, y, x, aux, const, sparams)
-
-#         # ——②  Q 上限 —— #
-#         if i % 500 == 0:
-#             with jax.disable_jit():
-#                 p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-#                 z,_   = model.module.apply({'params': p_all,
-#                                             **module_state,
-#                                             'const': const,
-#                                             'aux_inputs': aux},
-#                                            core.Signal(y))
-#             tx_aln = x[z.t.start:z.t.stop]
-#             gain   = q_gain_upper(tx_aln, z.val)   # 同前
-#             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
-
-#         # ——③  per‑tap 梯度 —— #
-#         if i % 1000 == 0:
-#             g_vec = tap_grad_snapshot(
-#                       model.module,
-#                       util.dict_merge(opt.params_fn(opt_state), sparams),
-#                       module_state, const, aux, y, x,
-#                       watch_keys=('NConv',))  
-#             import matplotlib.pyplot as plt
-#             plt.figure(figsize=(6,2))
-#             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
-#             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
-
-#         yield loss, opt.params_fn(opt_state), module_state
-# ---- 直接覆盖 gdbp_base.py 里的旧 train() ----
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter=None,
-          opt: optim.Optimizer = optim.adam(
-                 optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6])),
-          *,                             # ★ 新增可选项
-          grad_keys=('DConv',),          # 想看的卷积关键字
-          split_grad=True):             # True → 每个 kernel 单独画
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -739,81 +535,16 @@ def train(model: Model,
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
-                           desc='train', leave=False):
-        if i >= n_iter:
-            break
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-
-        # ——①  参数更新 ————————————————————————————————
-        loss, opt_state, module_state = update_step(
-            model.module, opt, i, opt_state,
-            module_state, y, x, aux, const, sparams)
-
-        # ——②  每 500 iter 打一次 Q-gain 上限 ——————————
-        if i % 500 == 0:
-            with jax.disable_jit():
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-                z, _  = model.module.apply(
-                    {'params': p_all, **module_state,
-                     'const': const, 'aux_inputs': aux},
-                    core.Signal(y))
-            gain = q_gain_upper(x[z.t.start:z.t.stop], z.val)
-            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
-
-        # ——③  每 1000 iter 可视化梯度 ————————————————
-        if i % 1000 == 0:
-            g_out = tap_grad_snapshot(
-                model.module,
-                util.dict_merge(opt.params_fn(opt_state), sparams),
-                module_state, const, aux, y, x,
-                watch_keys=grad_keys,
-                split=split_grad, debug=not split_grad)
-
-            import matplotlib.pyplot as plt
-            if split_grad:        # 多张子图
-                for name, vec in g_out.items():
-                    plt.figure(figsize=(6, 1.8))
-                    plt.bar(range(len(vec)), vec)
-                    plt.yscale('log')
-                    plt.title(f"iter {i}   {name}")
-                    plt.tight_layout(); plt.show()
-            else:                 # 一张整体图
-                plt.figure(figsize=(6, 2))
-                plt.bar(range(len(g_out)), g_out)
-                plt.yscale('log')
-                plt.title(f"iter {i}  per-tap ∥∇w∥")
-                plt.tight_layout(); plt.show()
-
-        # ——④  把 loss / params / state 向外抛 —————————
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
 
-
-def train_once(model_tr, data_tr, 
-               batch_size=500, n_iter=3000):
-    """return  params , state_bundle"""
-    params, module_state, aux, const, sparams = model_tr.initvar
-
-    # ——优化器
-    opt = optim.adam(
-            optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))
-    opt_state = opt.init_fn(params)
-
-    # ——batch 生成
-    n_batch, batch_gen = get_train_batch(
-        data_tr, batch_size, model_tr.overlaps)
-
-    for i,(y,x) in tqdm(enumerate(batch_gen),
-                        total=min(n_iter,n_batch), desc='train', leave=False):
-        if i >= n_iter: break
-        aux = core.dict_replace(aux, {'truth': x})   # 保存真符号
-        loss, opt_state, module_state = update_step(
-            model_tr.module, opt, i, opt_state,
-            module_state, y, x, aux, const, sparams)
-
-    params = opt.params_fn(opt_state)
-    state_bundle = (module_state, aux, const, sparams)
-    return params, state_bundle        
+   
                        
 def test(model: Model,
          params: Dict,
@@ -850,61 +581,3 @@ def test(model: Model,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
-                 
-def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
-              eval_range=(300_000, -20_000), metric_fn=comm.qamqot):
-    module_state, aux, const, sparams = state_bundle
-    aux = core.dict_replace(aux, {'truth': data.x})
-
-    z,_ = jax.jit(model.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(data.y))
-                      
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
-
-                      
-def equalize_dataset(model_te, params, state_bundle, data):
-    module_state, aux, const, sparams = state_bundle
-    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **module_state},
-        core.Signal(data.y))
-
-    start, stop = z.t.start, z.t.stop
-    z_eq  = np.asarray(z.val[:,0])          # equalized
-    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
-    return z_eq, s_ref
-
-                
-##### LMS - LOSS #####
-# def test(model: Model,
-#          params: Dict,
-#          data: gdat.Input,
-#          eval_range: tuple=(300000, -20000),
-#          metric_fn=comm.qamqot):
-
-#     state, aux, const, sparams = model.initvar[1:]
-#     aux = core.dict_replace(aux, {'truth': data.x})
-#     if params is None:
-#       params = model.initvar[0]
-            
-#     r = np.sqrt(np.mean(np.abs(data.x)**2))
-#     y_norm = data.y / r
-#     x_norm = data.x / r
-#     z, _ = jit(model.module.apply,
-#                backend='cpu')({
-#                    'params': util.dict_merge(params, sparams),
-#                    'aux_inputs': aux,
-#                    'const': const,
-#                    **state
-#                }, core.Signal(y_norm))
-#     metric = metric_fn(z.val,
-#                        x_norm[z.t.start:z.t.stop],
-#                        scale=np.sqrt(10),
-#                        eval_range=eval_range)
-#     return metric, z
