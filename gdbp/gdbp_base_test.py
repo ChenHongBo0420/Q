@@ -144,135 +144,6 @@ def make_base_module(steps: int = 3,
 
     return base
 
-## Three ##
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0=0.,
-#                      mode: str = 'train'):
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         mimo_train = True
-#     elif mode == 'test':
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-
-#     # first tree
-#     fdbp_series = layer.Serial(
-#         layer.FDBP(steps=steps,
-#                    dtaps=dtaps,
-#                    ntaps=ntaps,
-#                    d_init=d_init,
-#                    n_init=n_init,
-#                    name='fdbp1'),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf1',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train),
-#         name='fdbp_series'
-#     )
-
-#     # second tree
-#     serial_branch = layer.Serial(
-#         layer.FDBP1(steps=steps,
-#                     dtaps=dtaps,
-#                     ntaps=ntaps,
-#                     d_init=d_init,
-#                     n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train),
-#         name='serial_branch'
-#     )
-
-#     # third three
-#     another_branch = layer.Serial(
-#         layer.FDBP2(steps=steps,
-#                     dtaps=dtaps,
-#                     ntaps=ntaps,
-#                     d_init=d_init,
-#                     n_init=n_init,
-#                     name='fdbp2'),
-#         layer.BatchPowerNorm1(mode=mode),
-#         layer.MIMOFOEAf1(name='FOEAf2',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d1)(name='RConv2', taps=rtaps),
-#         layer.MIMOAF1(train=mimo_train),
-#         name='another_branch'
-#     )
-#     base = layer.Serial(
-#         layer.FanOut(num=3),
-#         layer.Parallel(
-#             fdbp_series,
-#             serial_branch,
-#             another_branch
-#         ),
-#         layer.FanInMean()
-#     )
-
-#     return base
-
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0=0.,
-#                      mode: str = 'train'):
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         mimo_train = True
-#     elif mode == 'test':
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-
-#     # (A) 我们只定义一个“融合后”的 FDBP 分支 (包含 fdbp + fdbp1 + bridge)
-#     fused_branch = layer.Serial(
-#         layer.FDBP(steps=steps, 
-#                             dtaps=dtaps,
-#                             ntaps=ntaps,
-#                             ixpm_window=7,
-#                             d_init=d_init,
-#                             n_init=n_init,
-#                             name='fdbp2branches'),   # 见下文如何包装
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-#         layer.MIMOAF(train=mimo_train),
-#         name='fused_all_in_one'
-#     )
-
-#     # (B) 直接返回这条单分支即可
-#     #     若仍想和别的分支再并行，也可以，但这里示例是纯单分支。
-#     return fused_branch
-
 # ── ★ 工具 1：估算还能涨多少 Q(dB) ───────────────────────────
 def q_gain_upper(tx, rx):
     """
@@ -302,61 +173,94 @@ def _collect_watch_kernels(tree, path=()):
                 out.append(v)                  # v 是 ndarray
     return out
 
-def tap_grad_snapshot(module, params, state, const, aux, y, x,
-                      watch_keys=('DConv',),
-                      split: bool=False,      # ← 是否把不同卷积分开返回
-                      debug: bool=True):      # ← 是否打印抓到的 kernel 信息
-    """
-    计算所有含 watch_keys 的 Conv1d-kernel 的 ‖∇w‖ (SNR 损失)
+def _snr_loss(tx, rx, eps=1e-8):
+    """跟主 loss 同式的 SNR-loss，用于反向求梯度"""
+    s = jnp.reshape(jnp.abs(tx), (-1,))
+    r = jnp.reshape(jnp.abs(rx), (-1,))
+    α = jnp.vdot(s, r).real / (jnp.vdot(s, s).real + eps)
+    e = r - α * s
+    return -10. * jnp.log10((jnp.vdot(α * s, α * s).real + eps) /
+                            (jnp.vdot(e, e).real + eps))
 
-    返回：
-        split = False ➜ 1-D ndarray  (与旧版保持一致)
-        split = True  ➜  { 'path/to/conv': ndarray, ... }
+def tap_grad_snapshot(module, params, state, const,
+                      aux, y, x, *, watch_keys=('DConv',),
+                      split=False, debug=True):
     """
-    # ---------- SNR-loss -----------------------------
-    def si_snr_flat(tx, rx, eps=1e-8):
-        s = jnp.reshape(jnp.abs(tx), (-1,))
-        r = jnp.reshape(jnp.abs(rx), (-1,))
-        α = jnp.vdot(s, r).real / (jnp.vdot(s, s).real + eps)
-        e = r - α*s
-        return -10.*jnp.log10((jnp.vdot(α*s, α*s).real+eps) /
-                              (jnp.vdot(e,e).real+eps))
-
-    def loss_wrt_p(p):
-        z,_ = module.apply({'params': p, **state,
-                            'const': const, 'aux_inputs': aux},
-                           core.Signal(y))
+    返回选中 kernel 的逐-tap L2 梯度
+    split=False → np.ndarray 1-D
+    split=True  → {path: ndarray}
+    """
+    def _loss(p):
+        z, _ = module.apply({'params': p, **state,
+                             'const': const,
+                             'aux_inputs': aux}, core.Signal(y))
         tx = x[z.t.start:z.t.stop]
-        return si_snr_flat(tx, z.val)
+        return _snr_loss(tx, z.val)
 
-    grads = jax.grad(loss_wrt_p)(params)
+    grads = jax.grad(_loss)(params)
 
-    # ---------- 递归收集 kernel -----------------------
-    buckets = {}               # {conv_path: grad_tensor}
+    # ---- 递归抓取 ----------------------------------------------------------
+    bucket = {}
     def _rec(tree, path=()):
-        for k,v in tree.items():
+        for k, v in tree.items():
             newp = path + (k,)
-            if isinstance(v,(dict,flax.core.FrozenDict)):
-                _rec(v,newp)
-            elif k=='kernel' and any(kwd in '/'.join(newp) for kwd in watch_keys):
-                buckets['/'.join(newp[:-1])] = v       # 去掉最后的 'kernel'
+            if isinstance(v, (dict, flax.core.FrozenDict)):
+                _rec(v, newp)
+            elif k == 'kernel' and any(kwd in '/'.join(newp) for kwd in watch_keys):
+                bucket['/'.join(newp[:-1])] = v
     _rec(grads)
 
-    # ---------- 打印调试信息 --------------------------
     if debug:
         print('---- watched kernels ----')
-        for p,g in buckets.items():
-            print(f'{p:<40s}  shape={tuple(g.shape)}')
-        print('total tap bins =', sum(g.shape[0] for g in buckets.values()))
+        for p, g in bucket.items():
+            print(f'{p:<45s}  shape={tuple(g.shape)}')
+        print('total tap bins =', sum(g.shape[0] for g in bucket.values()))
 
-    # ---------- 求每个 tap 的 L2 ----------------------
     def _l2(g):
-        g2 = g.real**2 + g.imag**2
-        return jnp.sqrt(jnp.sum(g2, axis=tuple(range(1,g.ndim))))
+        g2 = g.real ** 2 + g.imag ** 2
+        return jnp.sqrt(jnp.sum(g2, axis=tuple(range(1, g.ndim))))
+
     if split:
-        return {k: np.asarray(_l2(v)) for k,v in buckets.items()}
-    else:
-        return np.concatenate([np.asarray(_l2(v)) for v in buckets.values()])
+        return {k: np.asarray(_l2(v)) for k, v in bucket.items()}
+    return np.concatenate([np.asarray(_l2(v)) for v in bucket.values()])
+
+
+def plot_impulse_response(model: Model, params_bundle, taps=4096):
+    """直接看补偿后 |h[n]| 主瓣拖尾"""
+    params, state, aux, const, _ = params_bundle
+    imp = np.zeros(taps); imp[taps // 2] = 1.0
+    z, _ = model.module.apply({'params': params, **state,
+                               'const': const, 'aux_inputs': aux},
+                              core.Signal(imp))
+    plt.figure(); plt.plot(np.abs(np.asarray(z.val[:, 0])))
+    plt.title('|h[n]| after D-Conv'); plt.show()
+
+def show_grad_stat(grad_log):
+    """画 Var / Mean 随迭代的变化"""
+    var = [np.var(g) for _, g in grad_log]
+    mean = [np.mean(g) for _, g in grad_log]
+    iters = [step for step, _ in grad_log]
+
+    plt.figure(); plt.semilogy(iters, var, '.-')
+    plt.title('Var(||∇w||) vs iter'); plt.xlabel('iter'); plt.grid(); plt.show()
+
+    plt.figure(); plt.semilogy(iters, mean, '.-')
+    plt.title('Mean(||∇w||) vs iter'); plt.xlabel('iter'); plt.grid(); plt.show()
+
+def gamma_sweep(model: Model, base_params_bundle,
+                ds_val: gdat.Input, scales=(0.5, 1.0, 1.5)):
+    """检查 γ (=N-Conv kernel) 灵敏度"""
+    params, state, aux, const, sparams = base_params_bundle
+    base = util.dict_merge(params, sparams)
+
+    def _scale_gamma(tree, k):
+        return util.tree_map(lambda v:
+                             v * k if v.shape == (1, 2, 2) else v, tree)
+
+    for k in scales:
+        new_p = _scale_gamma(base, k)
+        q, _ = test(model, new_p, ds_val)[0]
+        print(f'γ × {k:<4}: Q = {q.QSq.total:5.3f} dB')
 
 
 
@@ -535,24 +439,6 @@ def loss_fn(module: layer.Layer,
     return snr, updated_state
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     # y_transformed = apply_combined_transform(y)
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     return snr, updated_state
-
-
 #### LMS - LOSS #####
 # def loss_fn(module: layer.Layer,
 #             params: Dict, state: Dict,
@@ -674,119 +560,69 @@ def get_train_batch(ds: gdat.Input,
 #         yield loss, opt.params_fn(opt_state), module_state
 
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter=None,
-#           opt: optim.Optimizer = optim.adam(
-#                  optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i,(y,x) in tqdm(enumerate(batch_gen), total=n_iter, desc='train', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-
-#         # ——①  更新 —— #
-#         loss, opt_state, module_state = update_step(
-#             model.module, opt, i, opt_state,
-#             module_state, y, x, aux, const, sparams)
-
-#         # ——②  Q 上限 —— #
-#         if i % 500 == 0:
-#             with jax.disable_jit():
-#                 p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-#                 z,_   = model.module.apply({'params': p_all,
-#                                             **module_state,
-#                                             'const': const,
-#                                             'aux_inputs': aux},
-#                                            core.Signal(y))
-#             tx_aln = x[z.t.start:z.t.stop]
-#             gain   = q_gain_upper(tx_aln, z.val)   # 同前
-#             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
-
-#         # ——③  per‑tap 梯度 —— #
-#         if i % 1000 == 0:
-#             g_vec = tap_grad_snapshot(
-#                       model.module,
-#                       util.dict_merge(opt.params_fn(opt_state), sparams),
-#                       module_state, const, aux, y, x,
-#                       watch_keys=('NConv',))  
-#             import matplotlib.pyplot as plt
-#             plt.figure(figsize=(6,2))
-#             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
-#             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
-
-#         yield loss, opt.params_fn(opt_state), module_state
-# ---- 直接覆盖 gdbp_base.py 里的旧 train() ----
-def train(model: Model,
-          data: gdat.Input,
+def train(model: Model, data: gdat.Input,
           batch_size: int = 500,
-          n_iter=None,
+          n_iter: int | None = None,
           opt: optim.Optimizer = optim.adam(
-                 optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6])),
-          *,                             # ★ 新增可选项
-          grad_keys=('DConv',),          # 想看的卷积关键字
-          split_grad=True):             # True → 每个 kernel 单独画
-
-    params, module_state, aux, const, sparams = model.initvar
+                optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
+          *,                       # 新增可选项
+          grad_keys=('DConv',),     # 想监控哪些卷积
+          split_grad=False):        # True → 每 kernel 单独画
+    """
+    直接覆盖原 train()，其余代码 *不需要* 改。
+    """
+    params, state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
+    grad_log = []          # ← 收集梯度向量做统计
     for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
                            desc='train', leave=False):
-        if i >= n_iter:
-            break
+        if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
 
-        # ——①  参数更新 ————————————————————————————————
-        loss, opt_state, module_state = update_step(
+        # --- 更新 ----------------------------------------------------------------
+        loss, opt_state, state = update_step(
             model.module, opt, i, opt_state,
-            module_state, y, x, aux, const, sparams)
+            state, y, x, aux, const, sparams)
 
-        # ——②  每 500 iter 打一次 Q-gain 上限 ——————————
+        # --- Q-gain 上限 ----------------------------------------------------------
         if i % 500 == 0:
-            with jax.disable_jit():
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-                z, _  = model.module.apply(
-                    {'params': p_all, **module_state,
-                     'const': const, 'aux_inputs': aux},
-                    core.Signal(y))
-            gain = q_gain_upper(x[z.t.start:z.t.stop], z.val)
+            p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+            z, _ = model.module.apply({'params': p_all, **state,
+                                       'const': const, 'aux_inputs': aux},
+                                      core.Signal(y))
+            gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
-        # ——③  每 1000 iter 可视化梯度 ————————————————
+        # --- 梯度可视化 -----------------------------------------------------------
         if i % 1000 == 0:
             g_out = tap_grad_snapshot(
                 model.module,
                 util.dict_merge(opt.params_fn(opt_state), sparams),
-                module_state, const, aux, y, x,
+                state, const, aux, y, x,
                 watch_keys=grad_keys,
                 split=split_grad, debug=not split_grad)
 
-            import matplotlib.pyplot as plt
-            if split_grad:        # 多张子图
+            if split_grad:
                 for name, vec in g_out.items():
-                    plt.figure(figsize=(6, 1.8))
+                    plt.figure(figsize=(6, 1.6))
                     plt.bar(range(len(vec)), vec)
-                    plt.yscale('log')
-                    plt.title(f"iter {i}   {name}")
+                    plt.yscale('log'); plt.title(f'iter {i}  {name}')
                     plt.tight_layout(); plt.show()
-            else:                 # 一张整体图
+                grad_log.append((i, np.concatenate(list(g_out.values()))))
+            else:
                 plt.figure(figsize=(6, 2))
                 plt.bar(range(len(g_out)), g_out)
-                plt.yscale('log')
-                plt.title(f"iter {i}  per-tap ∥∇w∥")
+                plt.yscale('log'); plt.title(f'iter {i}  per-tap ∥∇w∥')
                 plt.tight_layout(); plt.show()
+                grad_log.append((i, g_out))
 
-        # ——④  把 loss / params / state 向外抛 —————————
-        yield loss, opt.params_fn(opt_state), module_state
+        yield loss, opt.params_fn(opt_state), state
+
+    return grad_log   # ← 方便后处理
 
 
 def train_once(model_tr, data_tr, 
