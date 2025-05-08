@@ -641,45 +641,22 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
-
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
-
-
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter=None,
-          opt: optim.Optimizer = optim.adam(
-                 optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -687,41 +664,64 @@ def train(model: Model,
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i,(y,x) in tqdm(enumerate(batch_gen), total=n_iter, desc='train', leave=False):
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-
-        # ——①  更新 —— #
-        loss, opt_state, module_state = update_step(
-            model.module, opt, i, opt_state,
-            module_state, y, x, aux, const, sparams)
-
-        # ——②  Q 上限 —— #
-        if i % 500 == 0:
-            with jax.disable_jit():
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-                z,_   = model.module.apply({'params': p_all,
-                                            **module_state,
-                                            'const': const,
-                                            'aux_inputs': aux},
-                                           core.Signal(y))
-            tx_aln = x[z.t.start:z.t.stop]
-            gain   = q_gain_upper(tx_aln, z.val)   # 同前
-            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
-
-        # ——③  per‑tap 梯度 —— #
-        if i % 1000 == 0:
-            g_vec = tap_grad_snapshot(
-                      model.module,
-                      util.dict_merge(opt.params_fn(opt_state), sparams),
-                      module_state, const, aux, y, x,
-                      watch_keys=('DConv',))  
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(6,2))
-            plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
-            plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
-
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
+
+
+# def train(model: Model,
+#           data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter=None,
+#           opt: optim.Optimizer = optim.adam(
+#                  optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
+
+#     params, module_state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
+
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+#     for i,(y,x) in tqdm(enumerate(batch_gen), total=n_iter, desc='train', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
+
+#         # ——①  更新 —— #
+#         loss, opt_state, module_state = update_step(
+#             model.module, opt, i, opt_state,
+#             module_state, y, x, aux, const, sparams)
+
+#         # ——②  Q 上限 —— #
+#         if i % 500 == 0:
+#             with jax.disable_jit():
+#                 p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+#                 z,_   = model.module.apply({'params': p_all,
+#                                             **module_state,
+#                                             'const': const,
+#                                             'aux_inputs': aux},
+#                                            core.Signal(y))
+#             tx_aln = x[z.t.start:z.t.stop]
+#             gain   = q_gain_upper(tx_aln, z.val)   # 同前
+#             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+
+#         # ——③  per‑tap 梯度 —— #
+#         if i % 1000 == 0:
+#             g_vec = tap_grad_snapshot(
+#                       model.module,
+#                       util.dict_merge(opt.params_fn(opt_state), sparams),
+#                       module_state, const, aux, y, x,
+#                       watch_keys=('DConv',))  
+#             import matplotlib.pyplot as plt
+#             plt.figure(figsize=(6,2))
+#             plt.bar(range(len(g_vec)), g_vec); plt.yscale('log')
+#             plt.title(f'iter {i}  per‑tap ∥∇w∥'); plt.show()
+
+#         yield loss, opt.params_fn(opt_state), module_state
 
 
 def train_once(model_tr, data_tr, 
