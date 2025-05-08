@@ -15,6 +15,7 @@ from sklearn.neighbors import KernelDensity
 from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
+import matplotlib.pyplot as plt
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
