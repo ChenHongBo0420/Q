@@ -226,15 +226,22 @@ def tap_grad_snapshot(module, params, state, const,
     return np.concatenate([np.asarray(_l2(v)) for v in bucket.values()])
 
 
-def plot_impulse_response(model: Model, params_bundle, taps=4096):
-    """直接看补偿后 |h[n]| 主瓣拖尾"""
+def plot_impulse_response(model: gb.Model, params_bundle, taps=4096):
     params, state, aux, const, _ = params_bundle
-    imp = np.zeros(taps); imp[taps // 2] = 1.0
+
+    # --- 改这里：做 2-pol 复数冲激 -------------------------
+    imp = np.zeros((taps, 2), dtype=np.complex64)
+    imp[taps // 2, :] = 1.0 + 0j                   # 中心 Dirac，双极化同振幅
+    # -----------------------------------------------------
+
     z, _ = model.module.apply({'params': params, **state,
                                'const': const, 'aux_inputs': aux},
                               core.Signal(imp))
-    plt.figure(); plt.plot(np.abs(np.asarray(z.val[:, 0])))
-    plt.title('|h[n]| after D-Conv'); plt.show()
+    plt.figure(figsize=(6,2))
+    plt.plot(np.abs(np.asarray(z.val[:, 0])), label='pol-0')
+    plt.plot(np.abs(np.asarray(z.val[:, 1])), '--', label='pol-1')
+    plt.title('|h[n]| after D-Conv'); plt.legend(); plt.tight_layout(); plt.show()
+
 
 def show_grad_stat(grad_log):
     """画 Var / Mean 随迭代的变化"""
