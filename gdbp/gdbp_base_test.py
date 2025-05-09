@@ -255,20 +255,27 @@ def show_grad_stat(grad_log):
     plt.figure(); plt.semilogy(iters, mean, '.-')
     plt.title('Mean(||∇w||) vs iter'); plt.xlabel('iter'); plt.grid(); plt.show()
 
-def gamma_sweep(model: Model, base_params_bundle,
-                ds_val: gdat.Input, scales=(0.5, 1.0, 1.5)):
-    """检查 γ (=N-Conv kernel) 灵敏度"""
+def gamma_sweep(model: gb.Model,
+                base_params_bundle,
+                ds_val: gdat.Input,
+                scales=(0.5, 1.0, 1.5)):
+    """
+    把 N-Conv (= γ) 整体乘以 scale，测试 Q-factor 灵敏度
+    """
     params, state, aux, const, sparams = base_params_bundle
     base = util.dict_merge(params, sparams)
 
     def _scale_gamma(tree, k):
+        # N-Conv kernel 形状固定为 (1,2,2)
         return util.tree_map(lambda v:
-                             v * k if v.shape == (1, 2, 2) else v, tree)
+                             v * k if v.shape == (1, 2, 2) else v,
+                             tree)
 
     for k in scales:
-        new_p = _scale_gamma(base, k)
-        q, _ = test(model, new_p, ds_val)[0]
-        print(f'γ × {k:<4}: Q = {q.QSq.total:5.3f} dB')
+        new_p = _scale_gamma(base, k)            # 更新 γ
+        metric, _ = test(model, new_p, ds_val)   # ← 直接接住两个返回值
+        print(f"γ × {k:<4}:  Q = {metric.QSq.total:5.3f} dB")
+
 
 
 
