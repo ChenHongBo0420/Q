@@ -255,7 +255,7 @@ def show_grad_stat(grad_log):
     plt.figure(); plt.semilogy(iters, mean, '.-')
     plt.title('Mean(||∇w||) vs iter'); plt.xlabel('iter'); plt.grid(); plt.show()
 
-def gamma_sweep(model: gb.Model,
+def gamma_sweep(model: Model,
                 base_params_bundle,
                 ds_val: gdat.Input,
                 scales=(0.5, 1.0, 1.5)):
