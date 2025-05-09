@@ -226,7 +226,7 @@ def tap_grad_snapshot(module, params, state, const,
     return np.concatenate([np.asarray(_l2(v)) for v in bucket.values()])
 
 
-def plot_impulse_response(model: gb.Model, params_bundle, taps=4096):
+def plot_impulse_response(model: Model, params_bundle, taps=4096):
     params, state, aux, const, _ = params_bundle
 
     # --- 改这里：做 2-pol 复数冲激 -------------------------
