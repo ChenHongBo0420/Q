@@ -622,7 +622,11 @@ def train(model: Model, data: gdat.Input,
                 grad_log.append((i, g_out))
 
         yield loss, opt.params_fn(opt_state), state
-
+    if split_grad and bucket:                      # split=True 时
+        last_g = np.concatenate(list(bucket.values()))
+    else:
+        last_g = g_out if 'g_out' in locals() else None
+    grad_log.append((i, last_g, opt.params_fn(opt_state)))
     return grad_log   # ← 方便后处理
 
 
