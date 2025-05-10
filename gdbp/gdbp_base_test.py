@@ -651,8 +651,8 @@ def train(model: Model, data: gdat.Input,
           opt: optim.Optimizer = optim.adam(
                 optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
           *,                       # 新增可选项
-          grad_keys=('RConv1','RConv2','RConv3','RConv4',),     # 想监控哪些卷积
-          split_grad=True):        # True → 每 kernel 单独画
+          grad_keys=('RConv1',),     # 想监控哪些卷积
+          split_grad=False):        # True → 每 kernel 单独画
     """
     直接覆盖原 train()，其余代码 *不需要* 改。
     """
