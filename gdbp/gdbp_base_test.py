@@ -779,38 +779,67 @@ def train_once(model_tr, data_tr,
     state_bundle = (module_state, aux, const, sparams)
     return params, state_bundle        
                        
+# def test(model: Model,
+#          params: Dict,
+#          data: gdat.Input,
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+#     ''' testing, a simple forward pass
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#         data: dataset
+#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+#             BER, Q, SER and more metrics.
+
+#         Returns:
+#             evaluated matrics and equalized symbols
+#     '''
+
+#     state, aux, const, sparams = model.initvar[1:]
+#     aux = core.dict_replace(aux, {'truth': data.x})
+#     if params is None:
+#       params = model.initvar[0]
+
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(data.y))
+#     metric = metric_fn(z.val,
+#                        data.x[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
+#                        eval_range=eval_range)
+#     return metric, z
+
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
+         eval_range=(300_000, -20_000),
          metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
+    z, _ = jax.jit(model.module.apply, backend='cpu')(
+        {'params'     : util.dict_merge(params, sparams),
+         'aux_inputs' : aux,
+         'const'      : const,
+         **state},
+        core.Signal(data.y))
+
+    # -------- NEW: 裁成相同长度 ---------------------------------
+    x_ref = data.x[z.t.start : z.t.stop]
+    L = min(z.val.shape[0], x_ref.shape[0])
+    z_aln = z.val[:L]
+    x_aln = x_ref[:L]
+    # ------------------------------------------------------------
+
+    metric = metric_fn(z_aln, x_aln,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
