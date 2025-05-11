@@ -522,44 +522,30 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 #     return snr, updated_state
 # ----------  loss_fn  (drop-in 替换原函数)  -----------------
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict):
-    """SNR-amp + 0.01·EVM_ring
+def loss_fn(module: layer.Layer, params, state,
+            y, x, aux, const, sparams):
 
-    - 把 params 和 sparams 合并
-    - 前向得到 z (= equalized waveform) 以及新 state
-    - **裁成同一长度** 再算指标，避免 shape mismatch
-    """
-    # -- 1) 合并可训练 + 静态权重 ---------------------------------
     params_all = util.dict_merge(params, sparams)
 
-    # -- 2) 前向 ---------------------------------------------------
     z_sig, new_state = module.apply(
         {'params': params_all,
          'aux_inputs': aux,
-         'const'     : const,
+         'const': const,
          **state},
         core.Signal(y))
 
-    # -- 3) 对齐 sent-symbol --------------------------------------
-    x_ref = x[z_sig.t.start : z_sig.t.stop]      # (≠ z_sig.val 长度)
-    # 统一长度（取最短），防止 dot_general 形状不匹配
+    # --- 对齐 sent-symbol ---
+    x_ref = x[z_sig.t.start: z_sig.t.stop]
     L = min(z_sig.val.shape[0], x_ref.shape[0])
     z_val = z_sig.val[:L]
     x_val = x_ref   [:L]
 
-    # -- 4) 计算 loss (= -SNR + 0.01·EVM) -------------------------
+    # --- loss = -SNR + 0.01·EVM ---
     snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
-    evm = evm_ring           (jnp.abs(z_val), jnp.abs(x_val))
+    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val))
     loss = snr + 0.01 * evm
-
     return loss, new_state
+
 # ---------------------------------------------------------------
 
 
@@ -654,34 +640,59 @@ def get_train_batch(ds: gdat.Input,
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
+          n_iter: int | None = None,
+          opt: optim.Optimizer = optim.adam(
+              optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
+          *,                    # 下面两个是新增调试开关，可省略
+          debug_first_iter=True,
+          debug_every=0):
+    """
+    1-epoch 训练生成器  
+    每迭代返回 (loss, params, module_state)
 
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
-
-    params, module_state, aux, const, sparams = model.initvar
+    ⚙️ 额外调试：
+      • debug_first_iter=True  ➜ 第 0 个 batch 打印一次齐头对齐检查
+      • debug_every=N          ➜ 每 N 步再打印一次（0 表示只首批）
+    """
+    params, mod_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
     for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
-        if i >= n_iter: break
+                          total=n_iter, desc='train', leave=False):
+        if i >= n_iter:
+            break
+
+        # 把真符号塞进 aux 供模块内部自适应 (FOE / MIMO 等) 用
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-        yield loss, opt.params_fn(opt_state), module_state
+
+        # ---- ① 反向传播一步 ------------------------------------------------
+        loss, opt_state, mod_state = update_step(
+            model.module, opt, i, opt_state,
+            mod_state, y, x, aux, const, sparams)
+
+        # ---- ② 可选调试：对齐长度 / NaN 检查 -------------------------------
+        if (debug_first_iter and i == 0) or (debug_every and i % debug_every == 0):
+            with jax.disable_jit():                      # 避免重复编译
+                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+                z_dbg, _ = model.module.apply(
+                    {'params': p_all,
+                     'aux_inputs': aux,
+                     'const': const,
+                     **mod_state},
+                    core.Signal(y))
+                x_dbg = x[z_dbg.t.start: z_dbg.t.stop]
+                L = min(z_dbg.val.shape[0], x_dbg.shape[0])
+                print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}  "
+                      f"x_len={x_dbg.shape[0]}  L={L}  "
+                      f"finite(z)={jnp.isfinite(z_dbg.val).all()}  "
+                      f"finite(x)={jnp.isfinite(x_dbg).all()}")
+        # --------------------------------------------------------------------
+
+        yield loss, opt.params_fn(opt_state), mod_state
+
 
 
 # def train(model: Model, data: gdat.Input,
@@ -816,14 +827,19 @@ def train_once(model_tr, data_tr,
 #     return metric, z
 
 def test(model: Model,
-         params: Dict,
+         params: Dict | None,
          data: gdat.Input,
-         eval_range=(300_000, -20_000),
-         metric_fn=comm.qamqot):
+         eval_range: tuple = (300_000, -20_000),
+         metric_fn = comm.qamqot,
+         *,                     # 新增
+         verbose=False):
+    """
+    单次前向 + QoT 评估
+    如果 verbose=True，会打印对齐后的长度与有限性检查。
+    """
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-        params = model.initvar[0]
+    params = model.initvar[0] if params is None else params
 
     z, _ = jax.jit(model.module.apply, backend='cpu')(
         {'params'     : util.dict_merge(params, sparams),
@@ -832,17 +848,22 @@ def test(model: Model,
          **state},
         core.Signal(data.y))
 
-    # -------- NEW: 裁成相同长度 ---------------------------------
+    # ---- 裁成相同长度 ------------------------------------------------------
     x_ref = data.x[z.t.start : z.t.stop]
     L = min(z.val.shape[0], x_ref.shape[0])
-    z_aln = z.val[:L]
-    x_aln = x_ref[:L]
-    # ------------------------------------------------------------
+    z_aln, x_aln = z.val[:L], x_ref[:L]
 
+    if verbose:
+        print(f"[TEST]  z_len={z.val.shape[0]}  x_len={x_ref.shape[0]}  "
+              f"L={L}  finite(z)={jnp.isfinite(z_aln).all()}  "
+              f"finite(x)={jnp.isfinite(x_aln).all()}")
+
+    # -----------------------------------------------------------------------
     metric = metric_fn(z_aln, x_aln,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
+
                  
 def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
               eval_range=(300_000, -20_000), metric_fn=comm.qamqot):
