@@ -831,38 +831,30 @@ def test(model: Model,
          data: gdat.Input,
          eval_range: tuple = (300_000, -20_000),
          metric_fn = comm.qamqot,
-         *,                     # 新增
+         *,
          verbose=False):
-    """
-    单次前向 + QoT 评估
-    如果 verbose=True，会打印对齐后的长度与有限性检查。
-    """
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    params = model.initvar[0] if params is None else params
 
-    z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'     : util.dict_merge(params, sparams),
-         'aux_inputs' : aux,
-         'const'      : const,
-         **state},
-        core.Signal(data.y))
-
-    # ---- 裁成相同长度 ------------------------------------------------------
+    ...
+    # -------- NEW: 裁成相同长度 ---------------------------------
     x_ref = data.x[z.t.start : z.t.stop]
     L = min(z.val.shape[0], x_ref.shape[0])
     z_aln, x_aln = z.val[:L], x_ref[:L]
+
+    # ----------★ 自动缩小 eval_range ----------------------------
+    if L <= eval_range[0]:          # 可选长度不够
+        eval_range = (0, 0)         # 直接全段评估
+    # ------------------------------------------------------------
 
     if verbose:
         print(f"[TEST]  z_len={z.val.shape[0]}  x_len={x_ref.shape[0]}  "
               f"L={L}  finite(z)={jnp.isfinite(z_aln).all()}  "
               f"finite(x)={jnp.isfinite(x_aln).all()}")
 
-    # -----------------------------------------------------------------------
     metric = metric_fn(z_aln, x_aln,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
+
 
                  
 def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
