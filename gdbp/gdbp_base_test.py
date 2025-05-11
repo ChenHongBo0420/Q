@@ -503,6 +503,25 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
         
 
 
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,):
+#     params = util.dict_merge(params, sparams)
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+#     snr = snr + 0.01 * evm
+#     return snr, updated_state
+# ----------  loss_fn  (drop-in 替换原函数)  -----------------
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -510,16 +529,38 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = snr + 0.01 * evm
-    return snr, updated_state
+            sparams: Dict):
+    """SNR-amp + 0.01·EVM_ring
+
+    - 把 params 和 sparams 合并
+    - 前向得到 z (= equalized waveform) 以及新 state
+    - **裁成同一长度** 再算指标，避免 shape mismatch
+    """
+    # -- 1) 合并可训练 + 静态权重 ---------------------------------
+    params_all = util.dict_merge(params, sparams)
+
+    # -- 2) 前向 ---------------------------------------------------
+    z_sig, new_state = module.apply(
+        {'params': params_all,
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
+        core.Signal(y))
+
+    # -- 3) 对齐 sent-symbol --------------------------------------
+    x_ref = x[z_sig.t.start : z_sig.t.stop]      # (≠ z_sig.val 长度)
+    # 统一长度（取最短），防止 dot_general 形状不匹配
+    L = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_val = z_sig.val[:L]
+    x_val = x_ref   [:L]
+
+    # -- 4) 计算 loss (= -SNR + 0.01·EVM) -------------------------
+    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
+    evm = evm_ring           (jnp.abs(z_val), jnp.abs(x_val))
+    loss = snr + 0.01 * evm
+
+    return loss, new_state
+# ---------------------------------------------------------------
 
 
 #### LMS - LOSS #####
