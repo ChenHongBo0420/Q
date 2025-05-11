@@ -834,26 +834,40 @@ def test(model: Model,
          *,
          verbose=False):
 
-    ...
-    # -------- NEW: 裁成相同长度 ---------------------------------
-    x_ref = data.x[z.t.start : z.t.stop]
-    L = min(z.val.shape[0], x_ref.shape[0])
-    z_aln, x_aln = z.val[:L], x_ref[:L]
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+        params = model.initvar[0]
 
-    # ----------★ 自动缩小 eval_range ----------------------------
-    if L <= eval_range[0]:          # 可选长度不够
-        eval_range = (0, 0)         # 直接全段评估
-    # ------------------------------------------------------------
+    # -------- forward -------------------------------------------------
+    z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
+        {'params'     : util.dict_merge(params, sparams),
+         'aux_inputs' : aux,
+         'const'      : const,
+         **state},
+        core.Signal(data.y))
+
+    # -------- 裁成相同长度 --------------------------------------------
+    x_ref = data.x[z_sig.t.start : z_sig.t.stop]           # ← new name z_sig
+    L     = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_aln = z_sig.val[:L]
+    x_aln = x_ref   [:L]
+
+    # ----------★ 自动缩小 eval_range ---------------------------------
+    if L <= eval_range[0]:
+        eval_range = (0, 0)
 
     if verbose:
-        print(f"[TEST]  z_len={z.val.shape[0]}  x_len={x_ref.shape[0]}  "
+        print(f"[TEST]  z_len={z_sig.val.shape[0]}  x_len={x_ref.shape[0]}  "
               f"L={L}  finite(z)={jnp.isfinite(z_aln).all()}  "
               f"finite(x)={jnp.isfinite(x_aln).all()}")
 
+    # -------- metric --------------------------------------------------
     metric = metric_fn(z_aln, x_aln,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
-    return metric, z
+    return metric, z_sig
+
 
 
                  
