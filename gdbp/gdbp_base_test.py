@@ -713,13 +713,13 @@ def train(model: Model, data: gdat.Input,
             state, y, x, aux, const, sparams)
 
         # --- Q-gain 上限 ----------------------------------------------------------
-        if i % 500 == 0:
-            p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-            z, _ = model.module.apply({'params': p_all, **state,
-                                       'const': const, 'aux_inputs': aux},
-                                      core.Signal(y))
-            gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
-            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+        # if i % 500 == 0:
+        #     p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+        #     z, _ = model.module.apply({'params': p_all, **state,
+        #                                'const': const, 'aux_inputs': aux},
+        #                               core.Signal(y))
+        #     gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
+        #     print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
         # --- 梯度可视化 -----------------------------------------------------------
         if i % 1000 == 0:
