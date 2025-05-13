@@ -520,33 +520,34 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 #     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
 #     snr = snr + 0.01 * evm
 #     return snr, updated_state
-# ----------  loss_fn  (drop-in 替换原函数)  -----------------
 
-def loss_fn(module: layer.Layer, params, state,
-            y, x, aux, const, sparams):
-
-    params_all = util.dict_merge(params, sparams)
-
+def loss_fn(module: layer.Layer,
+            params: Dict, state: Dict,
+            y: Array, x_sym: Array,
+            aux: Dict, const: Dict, sparams: Dict,
+            eps=1e-8):
+    # ---- 合并参数 & 前向 ------------------------------------------
+    p_all = util.dict_merge(params, sparams)
     z_sig, new_state = module.apply(
-        {'params': params_all,
-         'aux_inputs': aux,
-         'const': const,
-         **state},
+        {'params': p_all, 'aux_inputs': aux,
+         'const': const, **state},
         core.Signal(y))
 
-    # --- 对齐 sent-symbol ---
-    x_ref = x[z_sig.t.start: z_sig.t.stop]
-    L = min(z_sig.val.shape[0], x_ref.shape[0])
-    z_val = z_sig.val[:L]
-    x_val = x_ref   [:L]
+    # ---- 发送符号重复 sps=2 → 与波形同采样 --------------------------
+    sps   = z_sig.t.sps                        # =2
+    x_rep = jnp.repeat(x_sym, sps, axis=0)     # (N_sym*sps, 2)
 
-    # --- loss = -SNR + 0.01·EVM ---
-    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
-    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val))
+    # ---- 对齐 & 截短 ---------------------------------------------
+    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
+    L     = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_val = z_sig.val[:L]
+    x_val = x_ref  [:L]
+
+    # ---- SNR-amp + 0.01·EVM_ring ---------------------------------
+    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
+    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
     loss = snr + 0.01 * evm
     return loss, new_state
-
-# ---------------------------------------------------------------
 
 
 #### LMS - LOSS #####
@@ -829,9 +830,8 @@ def train_once(model_tr, data_tr,
 def test(model: Model,
          params: Dict | None,
          data: gdat.Input,
-         eval_range: tuple = (300_000, -20_000),
+         eval_range=(300_000, -20_000),
          metric_fn = comm.qamqot,
-         *,
          verbose=False):
 
     state, aux, const, sparams = model.initvar[1:]
@@ -839,35 +839,31 @@ def test(model: Model,
     if params is None:
         params = model.initvar[0]
 
-    # -------- forward -------------------------------------------------
+    # -------- forward ------------------------------------------------
     z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'     : util.dict_merge(params, sparams),
-         'aux_inputs' : aux,
-         'const'      : const,
-         **state},
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y))
 
-    # -------- 裁成相同长度 --------------------------------------------
-    x_ref = data.x[z_sig.t.start : z_sig.t.stop]           # ← new name z_sig
-    L     = min(z_sig.val.shape[0], x_ref.shape[0])
-    z_aln = z_sig.val[:L]
-    x_aln = x_ref   [:L]
+    # -------- repeat sent-symbols -----------------------------------
+    sps   = z_sig.t.sps
+    x_rep = jnp.repeat(data.x, sps, axis=0)       # 波形采样率
+    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
 
-    # ----------★ 自动缩小 eval_range ---------------------------------
+    L     = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_aln, x_aln = z_sig.val[:L], x_ref[:L]
+
     if L <= eval_range[0]:
         eval_range = (0, 0)
 
     if verbose:
-        print(f"[TEST]  z_len={z_sig.val.shape[0]}  x_len={x_ref.shape[0]}  "
-              f"L={L}  finite(z)={jnp.isfinite(z_aln).all()}  "
+        print(f"[TEST] z_len={z_sig.val.shape[0]}  x_len={x_ref.shape[0]} "
+              f"L={L} finite(z)={jnp.isfinite(z_aln).all()} "
               f"finite(x)={jnp.isfinite(x_aln).all()}")
 
-    # -------- metric --------------------------------------------------
-    metric = metric_fn(z_aln, x_aln,
-                       scale=np.sqrt(10),
+    metric = metric_fn(z_aln, x_aln, scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z_sig
-
 
 
                  
