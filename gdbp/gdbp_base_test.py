@@ -638,131 +638,131 @@ def get_train_batch(ds: gdat.Input,
     return n_batches, zip(ds_y, ds_x)
 
 
-def train(model: Model,
-          data: gdat.Input,
-          batch_size: int = 500,
-          n_iter: int | None = None,
-          opt: optim.Optimizer = optim.adam(
-              optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
-          *,                    # 下面两个是新增调试开关，可省略
-          debug_first_iter=True,
-          debug_every=0):
-    """
-    1-epoch 训练生成器  
-    每迭代返回 (loss, params, module_state)
-
-    ⚙️ 额外调试：
-      • debug_first_iter=True  ➜ 第 0 个 batch 打印一次齐头对齐检查
-      • debug_every=N          ➜ 每 N 步再打印一次（0 表示只首批）
-    """
-    params, mod_state, aux, const, sparams = model.initvar
-    opt_state = opt.init_fn(params)
-
-    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                          total=n_iter, desc='train', leave=False):
-        if i >= n_iter:
-            break
-
-        # 把真符号塞进 aux 供模块内部自适应 (FOE / MIMO 等) 用
-        aux = core.dict_replace(aux, {'truth': x})
-
-        # ---- ① 反向传播一步 ------------------------------------------------
-        loss, opt_state, mod_state = update_step(
-            model.module, opt, i, opt_state,
-            mod_state, y, x, aux, const, sparams)
-
-        # ---- ② 可选调试：对齐长度 / NaN 检查 -------------------------------
-        if (debug_first_iter and i == 0) or (debug_every and i % debug_every == 0):
-            with jax.disable_jit():                      # 避免重复编译
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-                z_dbg, _ = model.module.apply(
-                    {'params': p_all,
-                     'aux_inputs': aux,
-                     'const': const,
-                     **mod_state},
-                    core.Signal(y))
-                x_dbg = x[z_dbg.t.start: z_dbg.t.stop]
-                L = min(z_dbg.val.shape[0], x_dbg.shape[0])
-                print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}  "
-                      f"x_len={x_dbg.shape[0]}  L={L}  "
-                      f"finite(z)={jnp.isfinite(z_dbg.val).all()}  "
-                      f"finite(x)={jnp.isfinite(x_dbg).all()}")
-        # --------------------------------------------------------------------
-
-        yield loss, opt.params_fn(opt_state), mod_state
-
-
-
-# def train(model: Model, data: gdat.Input,
+# def train(model: Model,
+#           data: gdat.Input,
 #           batch_size: int = 500,
 #           n_iter: int | None = None,
 #           opt: optim.Optimizer = optim.adam(
-#                 optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
-#           *,                       # 新增可选项
-#           grad_keys=('RConv1',),     # 想监控哪些卷积
-#           split_grad=False):        # True → 每 kernel 单独画
+#               optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
+#           *,                    # 下面两个是新增调试开关，可省略
+#           debug_first_iter=True,
+#           debug_every=0):
 #     """
-#     直接覆盖原 train()，其余代码 *不需要* 改。
+#     1-epoch 训练生成器  
+#     每迭代返回 (loss, params, module_state)
+
+#     ⚙️ 额外调试：
+#       • debug_first_iter=True  ➜ 第 0 个 batch 打印一次齐头对齐检查
+#       • debug_every=N          ➜ 每 N 步再打印一次（0 表示只首批）
 #     """
-#     params, state, aux, const, sparams = model.initvar
+#     params, mod_state, aux, const, sparams = model.initvar
 #     opt_state = opt.init_fn(params)
 
 #     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
 #     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-#     grad_log = []          # ← 收集梯度向量做统计
-#     for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
-#                            desc='train', leave=False):
-#         if i >= n_iter: break
+#     for i, (y, x) in tqdm(enumerate(batch_gen),
+#                           total=n_iter, desc='train', leave=False):
+#         if i >= n_iter:
+#             break
+
+#         # 把真符号塞进 aux 供模块内部自适应 (FOE / MIMO 等) 用
 #         aux = core.dict_replace(aux, {'truth': x})
 
-#         # --- 更新 ----------------------------------------------------------------
-#         loss, opt_state, state = update_step(
+#         # ---- ① 反向传播一步 ------------------------------------------------
+#         loss, opt_state, mod_state = update_step(
 #             model.module, opt, i, opt_state,
-#             state, y, x, aux, const, sparams)
+#             mod_state, y, x, aux, const, sparams)
 
-#         # --- Q-gain 上限 ----------------------------------------------------------
-#         if i % 500 == 0:
-#             p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-#             z, _ = model.module.apply({'params': p_all, **state,
-#                                        'const': const, 'aux_inputs': aux},
-#                                       core.Signal(y))
-#             gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
-#             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+#         # ---- ② 可选调试：对齐长度 / NaN 检查 -------------------------------
+#         if (debug_first_iter and i == 0) or (debug_every and i % debug_every == 0):
+#             with jax.disable_jit():                      # 避免重复编译
+#                 p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+#                 z_dbg, _ = model.module.apply(
+#                     {'params': p_all,
+#                      'aux_inputs': aux,
+#                      'const': const,
+#                      **mod_state},
+#                     core.Signal(y))
+#                 x_dbg = x[z_dbg.t.start: z_dbg.t.stop]
+#                 L = min(z_dbg.val.shape[0], x_dbg.shape[0])
+#                 print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}  "
+#                       f"x_len={x_dbg.shape[0]}  L={L}  "
+#                       f"finite(z)={jnp.isfinite(z_dbg.val).all()}  "
+#                       f"finite(x)={jnp.isfinite(x_dbg).all()}")
+#         # --------------------------------------------------------------------
 
-#         # --- 梯度可视化 -----------------------------------------------------------
-#         if i % 1000 == 0:
-#             g_out = tap_grad_snapshot(
-#                 model.module,
-#                 util.dict_merge(opt.params_fn(opt_state), sparams),
-#                 state, const, aux, y, x,
-#                 watch_keys=grad_keys,
-#                 split=split_grad, debug=not split_grad)
+#         yield loss, opt.params_fn(opt_state), mod_state
 
-#             if split_grad:
-#                 for name, vec in g_out.items():
-#                     plt.figure(figsize=(6, 1.6))
-#                     plt.bar(range(len(vec)), vec)
-#                     plt.yscale('log'); plt.title(f'iter {i}  {name}')
-#                     plt.tight_layout(); plt.show()
-#                 grad_log.append((i, np.concatenate(list(g_out.values()))))
-#             else:
-#                 plt.figure(figsize=(6, 2))
-#                 plt.bar(range(len(g_out)), g_out)
-#                 plt.yscale('log'); plt.title(f'iter {i}  per-tap ∥∇w∥')
-#                 plt.tight_layout(); plt.show()
-#                 grad_log.append((i, g_out))
 
-#         yield loss, opt.params_fn(opt_state), state
-#     if split_grad and bucket:                      # split=True 时
-#         last_g = np.concatenate(list(bucket.values()))
-#     else:
-#         last_g = g_out if 'g_out' in locals() else None
-#     grad_log.append((i, last_g, opt.params_fn(opt_state)))
-#     return grad_log   # ← 方便后处理
+
+def train(model: Model, data: gdat.Input,
+          batch_size: int = 500,
+          n_iter: int | None = None,
+          opt: optim.Optimizer = optim.adam(
+                optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
+          *,                       # 新增可选项
+          grad_keys=('RConv1',),     # 想监控哪些卷积
+          split_grad=False):        # True → 每 kernel 单独画
+    """
+    直接覆盖原 train()，其余代码 *不需要* 改。
+    """
+    params, state, aux, const, sparams = model.initvar
+    opt_state = opt.init_fn(params)
+
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+    grad_log = []          # ← 收集梯度向量做统计
+    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
+                           desc='train', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+
+        # --- 更新 ----------------------------------------------------------------
+        loss, opt_state, state = update_step(
+            model.module, opt, i, opt_state,
+            state, y, x, aux, const, sparams)
+
+        # --- Q-gain 上限 ----------------------------------------------------------
+        if i % 500 == 0:
+            p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+            z, _ = model.module.apply({'params': p_all, **state,
+                                       'const': const, 'aux_inputs': aux},
+                                      core.Signal(y))
+            gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
+            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+
+        # --- 梯度可视化 -----------------------------------------------------------
+        if i % 1000 == 0:
+            g_out = tap_grad_snapshot(
+                model.module,
+                util.dict_merge(opt.params_fn(opt_state), sparams),
+                state, const, aux, y, x,
+                watch_keys=grad_keys,
+                split=split_grad, debug=not split_grad)
+
+            if split_grad:
+                for name, vec in g_out.items():
+                    plt.figure(figsize=(6, 1.6))
+                    plt.bar(range(len(vec)), vec)
+                    plt.yscale('log'); plt.title(f'iter {i}  {name}')
+                    plt.tight_layout(); plt.show()
+                grad_log.append((i, np.concatenate(list(g_out.values()))))
+            else:
+                plt.figure(figsize=(6, 2))
+                plt.bar(range(len(g_out)), g_out)
+                plt.yscale('log'); plt.title(f'iter {i}  per-tap ∥∇w∥')
+                plt.tight_layout(); plt.show()
+                grad_log.append((i, g_out))
+
+        yield loss, opt.params_fn(opt_state), state
+    if split_grad and bucket:                      # split=True 时
+        last_g = np.concatenate(list(bucket.values()))
+    else:
+        last_g = g_out if 'g_out' in locals() else None
+    grad_log.append((i, last_g, opt.params_fn(opt_state)))
+    return grad_log   # ← 方便后处理
 
 
 def train_once(model_tr, data_tr, 
