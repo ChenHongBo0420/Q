@@ -549,32 +549,41 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 #     loss = snr + 0.01 * evm
 #     return loss, new_state
 
-def _match_amp(z, x, eps=1e-12):
-    """把 z 按最小二乘投影到 x 的幅度，再返回缩放后 z 与比例系数 k"""
+def _proj_amp(z, x, eps=1e-12):
+    """
+    最小二乘把 z 投影到 x 的幅度：
+        z' = z / k,   k = <z,x>/<x,x>
+    返回 (z', k)；这样 |z'| 与 |x| 基本同量纲
+    """
     k = jnp.vdot(z, x) / (jnp.vdot(x, x) + eps)
     return z / k, k
 
-# ------------ loss -------------------------------------------------
-def loss_fn(module, params, state,
-            y, x_sym, aux, const, sparams, eps=1e-8):
 
+def loss_fn(module, params, state,
+            y, x_sym, aux, const, sparams,
+            eps=1e-8):
+    # ---- forward -------------------------------------------------
     p_all = util.dict_merge(params, sparams)
     z_sig, new_state = module.apply(
         {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state},
+         'const' : const, **state},
         core.Signal(y))
 
-    x_ref = x_sym[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_ref.shape[0])
-    z_val = z_sig.val[:L]
-    x_val = x_ref   [:L]
+    # ---- 对齐 & 重复 sent-symbol 到采样率 -------------------------
+    sps   = z_sig.t.sps                # =2
+    x_rep = jnp.repeat(x_sym, sps, 0)
+    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
 
-    # -- ★ 自动把 z 的幅度投影到 x -------------------------------
-    z_val, _ = _match_amp(z_val, x_val, eps)
+    L = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_val, x_val = z_sig.val[:L], x_ref[:L]
+
+    # ---- ★ 投影幅度 ------------------------------------------------
+    z_val, _ = _proj_amp(z_val, x_val, eps)
 
     snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
     evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
     return snr + 1e-2 * evm, new_state
+
 
 
 #### LMS - LOSS #####
@@ -924,7 +933,8 @@ def train_once(model_tr, data_tr,
 #     return metric, z_sig
 
 def test(model, params, data,
-         eval_range=(300_000, -20_000), metric_fn=comm.qamqot,
+         eval_range=(300_000, -20_000),
+         metric_fn = comm.qamqot,
          verbose=False):
 
     state, aux, const, sparams = model.initvar[1:]
@@ -932,19 +942,23 @@ def test(model, params, data,
     if params is None:
         params = model.initvar[0]
 
-    z_sig, _ = jit(model.module.apply, backend='cpu')(
+    z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y))
 
-    x_ref = data.x[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_ref.shape[0])
+    # -- repeat sent-symbols 到采样率 --------------------------------
+    sps   = z_sig.t.sps
+    x_rep = jnp.repeat(data.x, sps, 0)
+    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
+
+    L = min(z_sig.val.shape[0], x_ref.shape[0])
     z_val, x_val = z_sig.val[:L], x_ref[:L]
 
-    # -- ★ 幅度投影 -------------------------------------------------
-    z_val, k = _match_amp(z_val, x_val)
+    # -- ★ 幅度投影 --------------------------------------------------
+    z_val, k = _proj_amp(z_val, x_val)
     if verbose:
-        print(f"[TEST] proj-gain = {20*np.log10(np.abs(k))+0:.2f} dB")
+        print(f"[TEST] projection gain  = {20*np.log10(np.abs(k))+0:.2f} dB")
 
     if L <= eval_range[0]:
         eval_range = (0, 0)
@@ -952,6 +966,7 @@ def test(model, params, data,
     metric = metric_fn(z_val, x_val, scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z_sig
+
                  
 def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
               eval_range=(300_000, -20_000), metric_fn=comm.qamqot):
