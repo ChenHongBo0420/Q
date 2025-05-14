@@ -696,73 +696,73 @@ def get_train_batch(ds: gdat.Input,
 
 
 
-def train(model: Model, data: gdat.Input,
-          batch_size: int = 500,
-          n_iter: int | None = None,
-          opt: optim.Optimizer = optim.adam(
-                optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
-          *,                       # 新增可选项
-          grad_keys=('RConv1',),     # 想监控哪些卷积
-          split_grad=False):        # True → 每 kernel 单独画
-    """
-    直接覆盖原 train()，其余代码 *不需要* 改。
-    """
-    params, state, aux, const, sparams = model.initvar
-    opt_state = opt.init_fn(params)
+# def train(model: Model, data: gdat.Input,
+#           batch_size: int = 500,
+#           n_iter: int | None = None,
+#           opt: optim.Optimizer = optim.adam(
+#                 optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
+#           *,                       # 新增可选项
+#           grad_keys=('RConv1',),     # 想监控哪些卷积
+#           split_grad=False):        # True → 每 kernel 单独画
+#     """
+#     直接覆盖原 train()，其余代码 *不需要* 改。
+#     """
+#     params, state, aux, const, sparams = model.initvar
+#     opt_state = opt.init_fn(params)
 
-    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    grad_log = []          # ← 收集梯度向量做统计
-    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
-                           desc='train', leave=False):
-        if i >= n_iter: break
-        aux = core.dict_replace(aux, {'truth': x})
+#     grad_log = []          # ← 收集梯度向量做统计
+#     for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter,
+#                            desc='train', leave=False):
+#         if i >= n_iter: break
+#         aux = core.dict_replace(aux, {'truth': x})
 
-        # --- 更新 ----------------------------------------------------------------
-        loss, opt_state, state = update_step(
-            model.module, opt, i, opt_state,
-            state, y, x, aux, const, sparams)
+#         # --- 更新 ----------------------------------------------------------------
+#         loss, opt_state, state = update_step(
+#             model.module, opt, i, opt_state,
+#             state, y, x, aux, const, sparams)
 
-        # --- Q-gain 上限 ----------------------------------------------------------
-        if i % 500 == 0:
-            p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-            z, _ = model.module.apply({'params': p_all, **state,
-                                       'const': const, 'aux_inputs': aux},
-                                      core.Signal(y))
-            gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
-            print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
+#         # --- Q-gain 上限 ----------------------------------------------------------
+#         if i % 500 == 0:
+#             p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
+#             z, _ = model.module.apply({'params': p_all, **state,
+#                                        'const': const, 'aux_inputs': aux},
+#                                       core.Signal(y))
+#             gain = q_gain_upper(x[z.t.start: z.t.stop], z.val)
+#             print(f"[{i:4d}]  当前 Q 上限 ≈ +{gain:.3f} dB")
 
-        # --- 梯度可视化 -----------------------------------------------------------
-        if i % 1000 == 0:
-            g_out = tap_grad_snapshot(
-                model.module,
-                util.dict_merge(opt.params_fn(opt_state), sparams),
-                state, const, aux, y, x,
-                watch_keys=grad_keys,
-                split=split_grad, debug=not split_grad)
+#         # --- 梯度可视化 -----------------------------------------------------------
+#         if i % 1000 == 0:
+#             g_out = tap_grad_snapshot(
+#                 model.module,
+#                 util.dict_merge(opt.params_fn(opt_state), sparams),
+#                 state, const, aux, y, x,
+#                 watch_keys=grad_keys,
+#                 split=split_grad, debug=not split_grad)
 
-            if split_grad:
-                for name, vec in g_out.items():
-                    plt.figure(figsize=(6, 1.6))
-                    plt.bar(range(len(vec)), vec)
-                    plt.yscale('log'); plt.title(f'iter {i}  {name}')
-                    plt.tight_layout(); plt.show()
-                grad_log.append((i, np.concatenate(list(g_out.values()))))
-            else:
-                plt.figure(figsize=(6, 2))
-                plt.bar(range(len(g_out)), g_out)
-                plt.yscale('log'); plt.title(f'iter {i}  per-tap ∥∇w∥')
-                plt.tight_layout(); plt.show()
-                grad_log.append((i, g_out))
+#             if split_grad:
+#                 for name, vec in g_out.items():
+#                     plt.figure(figsize=(6, 1.6))
+#                     plt.bar(range(len(vec)), vec)
+#                     plt.yscale('log'); plt.title(f'iter {i}  {name}')
+#                     plt.tight_layout(); plt.show()
+#                 grad_log.append((i, np.concatenate(list(g_out.values()))))
+#             else:
+#                 plt.figure(figsize=(6, 2))
+#                 plt.bar(range(len(g_out)), g_out)
+#                 plt.yscale('log'); plt.title(f'iter {i}  per-tap ∥∇w∥')
+#                 plt.tight_layout(); plt.show()
+#                 grad_log.append((i, g_out))
 
-        yield loss, opt.params_fn(opt_state), state
-    if split_grad and bucket:                      # split=True 时
-        last_g = np.concatenate(list(bucket.values()))
-    else:
-        last_g = g_out if 'g_out' in locals() else None
-    grad_log.append((i, last_g, opt.params_fn(opt_state)))
-    return grad_log   # ← 方便后处理
+#         yield loss, opt.params_fn(opt_state), state
+#     if split_grad and bucket:                      # split=True 时
+#         last_g = np.concatenate(list(bucket.values()))
+#     else:
+#         last_g = g_out if 'g_out' in locals() else None
+#     grad_log.append((i, last_g, opt.params_fn(opt_state)))
+#     return grad_log   # ← 方便后处理
 
 
 def train_once(model_tr, data_tr, 
