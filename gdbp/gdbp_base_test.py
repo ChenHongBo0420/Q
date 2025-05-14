@@ -822,79 +822,79 @@ def train_once(model_tr, data_tr,
     state_bundle = (module_state, aux, const, sparams)
     return params, state_bundle        
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
-
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
-
 # def test(model: Model,
-#          params: Dict | None,
+#          params: Dict,
 #          data: gdat.Input,
-#          eval_range=(300_000, -20_000),
-#          metric_fn = comm.qamqot,
-#          verbose=False):
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+#     ''' testing, a simple forward pass
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#         data: dataset
+#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+#             BER, Q, SER and more metrics.
+
+#         Returns:
+#             evaluated matrics and equalized symbols
+#     '''
 
 #     state, aux, const, sparams = model.initvar[1:]
 #     aux = core.dict_replace(aux, {'truth': data.x})
 #     if params is None:
-#         params = model.initvar[0]
+#       params = model.initvar[0]
 
-#     # -------- forward ------------------------------------------------
-#     z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
-#         {'params': util.dict_merge(params, sparams),
-#          'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(data.y))
-
-#     # -------- repeat sent-symbols -----------------------------------
-#     sps   = z_sig.t.sps
-#     x_rep = jnp.repeat(data.x, sps, axis=0)       # 波形采样率
-#     x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
-
-#     L     = min(z_sig.val.shape[0], x_ref.shape[0])
-#     z_aln, x_aln = z_sig.val[:L], x_ref[:L]
-
-#     if L <= eval_range[0]:
-#         eval_range = (0, 0)
-
-#     if verbose:
-#         print(f"[TEST] z_len={z_sig.val.shape[0]}  x_len={x_ref.shape[0]} "
-#               f"L={L} finite(z)={jnp.isfinite(z_aln).all()} "
-#               f"finite(x)={jnp.isfinite(x_aln).all()}")
-
-#     metric = metric_fn(z_aln, x_aln, scale=np.sqrt(10),
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(data.y))
+#     metric = metric_fn(z.val,
+#                        data.x[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
 #                        eval_range=eval_range)
-#     return metric, z_sig
+#     return metric, z
+
+def test(model: Model,
+         params: Dict | None,
+         data: gdat.Input,
+         eval_range=(300_000, -20_000),
+         metric_fn = comm.qamqot,
+         verbose=False):
+
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+        params = model.initvar[0]
+
+    # -------- forward ------------------------------------------------
+    z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **state},
+        core.Signal(data.y))
+
+    # -------- repeat sent-symbols -----------------------------------
+    sps   = z_sig.t.sps
+    x_rep = jnp.repeat(data.x, sps, axis=0)       # 波形采样率
+    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
+
+    L     = min(z_sig.val.shape[0], x_ref.shape[0])
+    z_aln, x_aln = z_sig.val[:L], x_ref[:L]
+
+    if L <= eval_range[0]:
+        eval_range = (0, 0)
+
+    if verbose:
+        print(f"[TEST] z_len={z_sig.val.shape[0]}  x_len={x_ref.shape[0]} "
+              f"L={L} finite(z)={jnp.isfinite(z_aln).all()} "
+              f"finite(x)={jnp.isfinite(x_aln).all()}")
+
+    metric = metric_fn(z_aln, x_aln, scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z_sig
 
 
                  
