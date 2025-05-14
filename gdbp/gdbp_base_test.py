@@ -637,7 +637,38 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
 
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
+    params, module_state, aux, const, sparams = model.initvar
+    opt_state = opt.init_fn(params)
+
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
+                               
 # def train(model: Model,
 #           data: gdat.Input,
 #           batch_size: int = 500,
