@@ -551,13 +551,13 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
 
 def _proj_amp(z, x, eps=1e-12):
     """
-    最小二乘把 z 投影到 x 的幅度：
-        z' = z / k,   k = <z,x>/<x,x>
-    返回 (z', k)；这样 |z'| 与 |x| 基本同量纲
+    最小二乘把 z 投影到 x 的幅度 (只调幅，不改相)。
+    返回  (z_proj , k) ，其中 k 是实数>0。
     """
-    k = jnp.vdot(z, x) / (jnp.vdot(x, x) + eps)
+    # dot → 复数；只取实部保证 k 为正实数
+    k = jnp.vdot(z, x).real / (jnp.vdot(x, x).real + eps)
+    k = jnp.where(k == 0., 1., k)          # 护栏，防 0
     return z / k, k
-
 
 def loss_fn(module, params, state,
             y, x_sym, aux, const, sparams,
