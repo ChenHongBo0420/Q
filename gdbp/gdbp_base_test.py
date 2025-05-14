@@ -503,51 +503,51 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
         
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     snr = snr + 0.01 * evm
-#     return snr, updated_state
-
 def loss_fn(module: layer.Layer,
-            params: Dict, state: Dict,
-            y: Array, x_sym: Array,
-            aux: Dict, const: Dict, sparams: Dict,
-            eps=1e-8):
-    # ---- 合并参数 & 前向 ------------------------------------------
-    p_all = util.dict_merge(params, sparams)
-    z_sig, new_state = module.apply(
-        {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = snr + 0.01 * evm
+    return snr, updated_state
 
-    # ---- 发送符号重复 sps=2 → 与波形同采样 --------------------------
-    sps   = z_sig.t.sps                        # =2
-    x_rep = jnp.repeat(x_sym, sps, axis=0)     # (N_sym*sps, 2)
+# def loss_fn(module: layer.Layer,
+#             params: Dict, state: Dict,
+#             y: Array, x_sym: Array,
+#             aux: Dict, const: Dict, sparams: Dict,
+#             eps=1e-8):
+#     # ---- 合并参数 & 前向 ------------------------------------------
+#     p_all = util.dict_merge(params, sparams)
+#     z_sig, new_state = module.apply(
+#         {'params': p_all, 'aux_inputs': aux,
+#          'const': const, **state},
+#         core.Signal(y))
 
-    # ---- 对齐 & 截短 ---------------------------------------------
-    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_ref.shape[0])
-    z_val = z_sig.val[:L]
-    x_val = x_ref  [:L]
+#     # ---- 发送符号重复 sps=2 → 与波形同采样 --------------------------
+#     sps   = z_sig.t.sps                        # =2
+#     x_rep = jnp.repeat(x_sym, sps, axis=0)     # (N_sym*sps, 2)
 
-    # ---- SNR-amp + 0.01·EVM_ring ---------------------------------
-    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
-    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
-    loss = snr + 0.01 * evm
-    return loss, new_state
+#     # ---- 对齐 & 截短 ---------------------------------------------
+#     x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
+#     L     = min(z_sig.val.shape[0], x_ref.shape[0])
+#     z_val = z_sig.val[:L]
+#     x_val = x_ref  [:L]
+
+#     # ---- SNR-amp + 0.01·EVM_ring ---------------------------------
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
+#     evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
+#     loss = snr + 0.01 * evm
+#     return loss, new_state
 
 
 #### LMS - LOSS #####
