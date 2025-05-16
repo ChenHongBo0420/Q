@@ -213,6 +213,16 @@ def make_base_module(steps: int = 3,
 #     )
 
 #     return base
+
+def print_pol_energy(step, z_sig, x_ref):
+    """
+    打印两极化（或通道）RMS 能量，方便发现一路空能量导致的 -inf / NaN.
+    z_sig, x_ref: shape (L, C) complex
+    """
+    rms_z = jnp.sqrt(jnp.mean(jnp.abs(z_sig) ** 2, axis=0))
+    rms_x = jnp.sqrt(jnp.mean(jnp.abs(x_ref) ** 2, axis=0))
+    print(f"[ENERGY] step={step:4d}  ‖z‖={np.asarray(rms_z)}  ‖x‖={np.asarray(rms_x)}")
+  
 # ── ★ 工具 1：估算还能涨多少 Q(dB) ───────────────────────────
 def q_gain_upper(tx, rx):
     """
@@ -501,6 +511,34 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
         
+def si_snr_flat_amp_pair(tx, rx, eps: float = 1e-8):
+    """
+    幅度 |·|，两极化展平后算 α，再平分给两路。
+    做了 3 处护栏：
+      • 若参考信号能量≈0 直接返回 0dB（避免 -inf）
+      • 计算 α 时对能量加 eps
+      • log10 分子/分母都加 eps
+    """
+    # ---- 展平成 1-D ----
+    s = jnp.reshape(jnp.abs(tx), (-1,))
+    x = jnp.reshape(jnp.abs(rx), (-1,))
+
+    s_pow = jnp.vdot(s, s).real
+    x_pow = jnp.vdot(x, x).real
+
+    # ★ 若参考基本为 0，返回 0 dB
+    def _safe_zero():  # pylint: disable=unused-variable
+        return 0.0
+
+    def _calc():      # pylint: disable=unused-variable
+        alpha = jnp.vdot(s, x).real / (s_pow + eps)
+        e     = x - alpha * s
+        num   = jnp.vdot(alpha * s, alpha * s).real + eps
+        den   = jnp.vdot(e, e).real            + eps
+        return 10.0 * jnp.log10(num / den)
+
+    snr_db = jax.lax.cond(s_pow < eps, _safe_zero, _calc)
+    return -snr_db        # 返回数值越低越好 → 用作 loss
 
 
 # def loss_fn(module: layer.Layer,
@@ -700,23 +738,24 @@ def get_train_batch(ds: gdat.Input,
 #                                                    module_state, y, x, aux,
 #                                                    const, sparams)
 #         yield loss, opt.params_fn(opt_state), module_state
-                               
+                              
+
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter: int | None = None,
           opt: optim.Optimizer = optim.adam(
               optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
-          *,                    # 下面两个是新增调试开关，可省略
-          debug_first_iter=True,
-          debug_every=0):
+          *,
+          debug_first_iter: bool = True,
+          debug_every: int = 0):
     """
-    1-epoch 训练生成器  
-    每迭代返回 (loss, params, module_state)
+    1-epoch 训练生成器
+    每次 yield (loss, params, module_state)
 
-    ⚙️ 额外调试：
-      • debug_first_iter=True  ➜ 第 0 个 batch 打印一次齐头对齐检查
-      • debug_every=N          ➜ 每 N 步再打印一次（0 表示只首批）
+    额外 debug：
+      • debug_first_iter=True  → 第 0 个 batch 打印能量 + 对齐检查
+      • debug_every=N          → 每 N 步再打印一次（0=只首批）
     """
     params, mod_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -729,35 +768,31 @@ def train(model: Model,
         if i >= n_iter:
             break
 
-        # 把真符号塞进 aux 供模块内部自适应 (FOE / MIMO 等) 用
-        aux = core.dict_replace(aux, {'truth': x})
+        aux = core.dict_replace(aux, {'truth': x})      # 真符号给 FOE/MIMO
 
-        # ---- ① 反向传播一步 ------------------------------------------------
+        # --- ① 反向传播 ---
         loss, opt_state, mod_state = update_step(
             model.module, opt, i, opt_state,
             mod_state, y, x, aux, const, sparams)
 
-        # ---- ② 可选调试：对齐长度 / NaN 检查 -------------------------------
+        # --- ② 调试输出 ----
         if (debug_first_iter and i == 0) or (debug_every and i % debug_every == 0):
-            with jax.disable_jit():                      # 避免重复编译
+            with jax.disable_jit():
                 p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
                 z_dbg, _ = model.module.apply(
-                    {'params': p_all,
-                     'aux_inputs': aux,
-                     'const': const,
-                     **mod_state},
+                    {'params': p_all, 'aux_inputs': aux,
+                     'const': const, **mod_state},
                     core.Signal(y))
                 x_dbg = x[z_dbg.t.start: z_dbg.t.stop]
                 L = min(z_dbg.val.shape[0], x_dbg.shape[0])
-                print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}  "
-                      f"x_len={x_dbg.shape[0]}  L={L}  "
-                      f"finite(z)={jnp.isfinite(z_dbg.val).all()}  "
-                      f"finite(x)={jnp.isfinite(x_dbg).all()}")
-        # --------------------------------------------------------------------
+                print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}"
+                      f"  x_len={x_dbg.shape[0]}  L={L}"
+                      f"  finite(z)={jnp.isfinite(z_dbg.val).all()}"
+                      f"  finite(x)={jnp.isfinite(x_dbg).all()}")
+                # ★ 打印能量
+                print_pol_energy(i, z_dbg.val[:L], x_dbg[:L])
 
         yield loss, opt.params_fn(opt_state), mod_state
-
-
 
 # def train(model: Model, data: gdat.Input,
 #           batch_size: int = 500,
