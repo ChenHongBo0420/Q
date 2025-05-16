@@ -213,15 +213,6 @@ def make_base_module(steps: int = 3,
 #     )
 
 #     return base
-
-def print_pol_energy(step, z_sig, x_ref):
-    """
-    打印两极化（或通道）RMS 能量，方便发现一路空能量导致的 -inf / NaN.
-    z_sig, x_ref: shape (L, C) complex
-    """
-    rms_z = jnp.sqrt(jnp.mean(jnp.abs(z_sig) ** 2, axis=0))
-    rms_x = jnp.sqrt(jnp.mean(jnp.abs(x_ref) ** 2, axis=0))
-    print(f"[ENERGY] step={step:4d}  ‖z‖={np.asarray(rms_z)}  ‖x‖={np.asarray(rms_x)}")
   
 # ── ★ 工具 1：估算还能涨多少 Q(dB) ───────────────────────────
 def q_gain_upper(tx, rx):
@@ -512,82 +503,23 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     return -snr_db                   
 
 
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,):
-#     params = util.dict_merge(params, sparams)
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-#     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-#     snr = snr + 0.01 * evm
-#     return snr, updated_state
-
-# def loss_fn(module: layer.Layer,
-#             params: Dict, state: Dict,
-#             y: Array, x_sym: Array,
-#             aux: Dict, const: Dict, sparams: Dict,
-#             eps=1e-8):
-#     # ---- 合并参数 & 前向 ------------------------------------------
-#     p_all = util.dict_merge(params, sparams)
-#     z_sig, new_state = module.apply(
-#         {'params': p_all, 'aux_inputs': aux,
-#          'const': const, **state},
-#         core.Signal(y))
-
-#     # ---- 发送符号重复 sps=2 → 与波形同采样 --------------------------
-#     sps   = z_sig.t.sps                        # =2
-#     x_rep = jnp.repeat(x_sym, sps, axis=0)     # (N_sym*sps, 2)
-
-#     # ---- 对齐 & 截短 ---------------------------------------------
-#     x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
-#     L     = min(z_sig.val.shape[0], x_ref.shape[0])
-#     z_val = z_sig.val[:L]
-#     x_val = x_ref  [:L]
-
-#     # ---- SNR-amp + 0.01·EVM_ring ---------------------------------
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
-#     evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val), eps=eps)
-#     loss = snr + 0.01 * evm
-#     return loss, new_state
-
-def proj_amp(z, x, eps=1e-12):
-    """
-    把复波形 z 投影到参考 x 的“最佳实数缩放”.
-    只调幅不调相；返回 (z_scaled , k) 其中 k > 0 (实数)。
-    """
-    k = jnp.vdot(z, x).real / (jnp.vdot(x, x).real + eps)   # 取实部 !
-    k = jnp.where(k <= 0., 1., k)                           # 护栏
-    return z / k, k
-
-def loss_fn(module, params, state,
-            y, x_sym, aux, const, sparams, eps=1e-8):
-
-    z_sig, state = module.apply(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
-
-    # sent-symbols up-sample sps=2
-    sps = z_sig.t.sps
-    x_rep = jnp.repeat(x_sym, sps, axis=0)
-    x_aln = x_rep[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_aln.shape[0])
-    z_val, x_val = z_sig.val[:L], x_aln[:L]
-
-    # ★ 幅度归一化
-    z_val, _ = proj_amp(z_val, x_val)
-
-    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val), eps)
-    evm = evm_ring           (jnp.abs(z_val), jnp.abs(x_val), eps)
-    return snr + 0.01*evm , state
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
+    snr = snr + 0.01 * evm
+    return snr, updated_state
 
 
 
@@ -678,92 +610,39 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-# def train(model: Model,
-#           data: gdat.Input,
-#           batch_size: int = 500,
-#           n_iter = None,
-#           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-#     ''' training process (1 epoch)
-
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#             data: dataset
-#             batch_size: batch size
-#             opt: optimizer
-
-#         Returns:
-#             yield loss, trained parameters, module state
-#     '''
-
-#     params, module_state, aux, const, sparams = model.initvar
-#     opt_state = opt.init_fn(params)
-
-#     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
-#     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
-
-#     for i, (y, x) in tqdm(enumerate(batch_gen),
-#                              total=n_iter, desc='training', leave=False):
-#         if i >= n_iter: break
-#         aux = core.dict_replace(aux, {'truth': x})
-#         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-#                                                    module_state, y, x, aux,
-#                                                    const, sparams)
-#         yield loss, opt.params_fn(opt_state), module_state
-                              
-
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter: int | None = None,
-          opt: optim.Optimizer = optim.adam(
-              optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])),
-          *,
-          debug_first_iter: bool = True,
-          debug_every: int = 0):
-    """
-    1-epoch 训练生成器
-    每次 yield (loss, params, module_state)
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
 
-    额外 debug：
-      • debug_first_iter=True  → 第 0 个 batch 打印能量 + 对齐检查
-      • debug_every=N          → 每 N 步再打印一次（0=只首批）
-    """
-    params, mod_state, aux, const, sparams = model.initvar
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
+    params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
     for i, (y, x) in tqdm(enumerate(batch_gen),
-                          total=n_iter, desc='train', leave=False):
-        if i >= n_iter:
-            break
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
+                              
 
-        aux = core.dict_replace(aux, {'truth': x})      # 真符号给 FOE/MIMO
-
-        # --- ① 反向传播 ---
-        loss, opt_state, mod_state = update_step(
-            model.module, opt, i, opt_state,
-            mod_state, y, x, aux, const, sparams)
-
-        # --- ② 调试输出 ----
-        if (debug_first_iter and i == 0) or (debug_every and i % debug_every == 0):
-            with jax.disable_jit():
-                p_all = util.dict_merge(opt.params_fn(opt_state), sparams)
-                z_dbg, _ = model.module.apply(
-                    {'params': p_all, 'aux_inputs': aux,
-                     'const': const, **mod_state},
-                    core.Signal(y))
-                x_dbg = x[z_dbg.t.start: z_dbg.t.stop]
-                L = min(z_dbg.val.shape[0], x_dbg.shape[0])
-                print(f"[DEBUG] step={i:4d}  z_len={z_dbg.val.shape[0]}"
-                      f"  x_len={x_dbg.shape[0]}  L={L}"
-                      f"  finite(z)={jnp.isfinite(z_dbg.val).all()}"
-                      f"  finite(x)={jnp.isfinite(x_dbg).all()}")
-                # ★ 打印能量
-                print_pol_energy(i, z_dbg.val[:L], x_dbg[:L])
-
-        yield loss, opt.params_fn(opt_state), mod_state
 
 # def train(model: Model, data: gdat.Input,
 #           batch_size: int = 500,
@@ -860,41 +739,41 @@ def train_once(model_tr, data_tr,
     state_bundle = (module_state, aux, const, sparams)
     return params, state_bundle        
                        
-# def test(model: Model,
-#          params: Dict,
-#          data: gdat.Input,
-#          eval_range: tuple=(300000, -20000),
-#          metric_fn=comm.qamqot):
-#     ''' testing, a simple forward pass
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-#         Args:
-#             model: Model namedtuple return by `model_init`
-#         data: dataset
-#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-#             BER, Q, SER and more metrics.
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
 
-#         Returns:
-#             evaluated matrics and equalized symbols
-#     '''
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
 
-#     state, aux, const, sparams = model.initvar[1:]
-#     aux = core.dict_replace(aux, {'truth': data.x})
-#     if params is None:
-#       params = model.initvar[0]
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+      params = model.initvar[0]
 
-#     z, _ = jit(model.module.apply,
-#                backend='cpu')({
-#                    'params': util.dict_merge(params, sparams),
-#                    'aux_inputs': aux,
-#                    'const': const,
-#                    **state
-#                }, core.Signal(data.y))
-#     metric = metric_fn(z.val,
-#                        data.x[z.t.start:z.t.stop],
-#                        scale=np.sqrt(10),
-#                        eval_range=eval_range)
-#     return metric, z
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
 
 # def test(model: Model,
 #          params: Dict | None,
@@ -933,36 +812,6 @@ def train_once(model_tr, data_tr,
 #     metric = metric_fn(z_aln, x_aln, scale=np.sqrt(10),
 #                        eval_range=eval_range)
 #     return metric, z_sig
-
-def test(model, params, data,
-         eval_range=(300_000,-20_000), metric_fn=comm.qamqot, verbose=False):
-
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None: params = model.initvar[0]
-
-    z_sig,_ = model.module.apply(
-        {'params': util.dict_merge(params,sparams),
-         'aux_inputs':aux,'const':const,**state},
-        core.Signal(data.y))
-
-    sps = z_sig.t.sps
-    x_rep = jnp.repeat(data.x, sps, axis=0)
-    x_ref = x_rep[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_ref.shape[0])
-    z_val , x_val  = z_sig.val[:L], x_ref[:L]
-
-    # ★ 幅度归一化
-    z_val , _ = proj_amp(z_val, x_val)
-
-    if L <= eval_range[0]:
-        eval_range = (0,0)
-
-    metric = metric_fn(z_val, x_val, scale=np.sqrt(10), eval_range=eval_range)
-    if verbose:
-        print(f"[TEST] L={L}  Q={metric.QSq.total:.3f} dB")
-    return metric , z_sig
-
 
                  
 def test_once(model: Model, params: Dict, state_bundle, data: gdat.Input,
