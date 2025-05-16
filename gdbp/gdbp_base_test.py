@@ -513,32 +513,31 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
         
 def si_snr_flat_amp_pair(tx, rx, eps: float = 1e-8):
     """
-    幅度 |·|，两极化展平后算 α，再平分给两路。
-    做了 3 处护栏：
-      • 若参考信号能量≈0 直接返回 0dB（避免 -inf）
-      • 计算 α 时对能量加 eps
-      • log10 分子/分母都加 eps
+    |tx|, |rx| 展平成一维后计算 SNR(dB)，再取负号当 loss。
+    额外做两件事：
+      • ratio = num/den 先用 clip_lower 限制最小值，避免 log10(0)
+      • clip_lower 选 1e-20，对 float32/64 都安全
     """
-    # ---- 展平成 1-D ----
     s = jnp.reshape(jnp.abs(tx), (-1,))
     x = jnp.reshape(jnp.abs(rx), (-1,))
 
     s_pow = jnp.vdot(s, s).real
-    x_pow = jnp.vdot(x, x).real
-
-    # ★ 若参考基本为 0，返回 0 dB
-    def _safe_zero():  # pylint: disable=unused-variable
+    # 若参考能量太低，直接返回 0dB（loss=0）
+    def _zero():  # pylint: disable=unused-variable
         return 0.0
 
-    def _calc():      # pylint: disable=unused-variable
+    def _snr():   # pylint: disable=unused-variable
         alpha = jnp.vdot(s, x).real / (s_pow + eps)
         e     = x - alpha * s
         num   = jnp.vdot(alpha * s, alpha * s).real + eps
-        den   = jnp.vdot(e, e).real            + eps
-        return 10.0 * jnp.log10(num / den)
+        den   = jnp.vdot(e, e).real              + eps
+        ratio = num / den
+        ratio = jnp.maximum(ratio, 1e-20)        # ★ 护栏
+        return 10. * jnp.log10(ratio)
 
-    snr_db = jax.lax.cond(s_pow < eps, _safe_zero, _calc)
-    return -snr_db        # 返回数值越低越好 → 用作 loss
+    snr_db = jax.lax.cond(s_pow < eps, _zero, _snr)
+    return -snr_db
+
 
 
 # def loss_fn(module: layer.Layer,
