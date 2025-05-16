@@ -510,34 +510,6 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
     snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
-        
-def si_snr_flat_amp_pair(tx, rx, eps: float = 1e-8):
-    """
-    |tx|, |rx| 展平成一维后计算 SNR(dB)，再取负号当 loss。
-    额外做两件事：
-      • ratio = num/den 先用 clip_lower 限制最小值，避免 log10(0)
-      • clip_lower 选 1e-20，对 float32/64 都安全
-    """
-    s = jnp.reshape(jnp.abs(tx), (-1,))
-    x = jnp.reshape(jnp.abs(rx), (-1,))
-
-    s_pow = jnp.vdot(s, s).real
-    # 若参考能量太低，直接返回 0dB（loss=0）
-    def _zero():  # pylint: disable=unused-variable
-        return 0.0
-
-    def _snr():   # pylint: disable=unused-variable
-        alpha = jnp.vdot(s, x).real / (s_pow + eps)
-        e     = x - alpha * s
-        num   = jnp.vdot(alpha * s, alpha * s).real + eps
-        den   = jnp.vdot(e, e).real              + eps
-        ratio = num / den
-        ratio = jnp.maximum(ratio, 1e-20)        # ★ 护栏
-        return 10. * jnp.log10(ratio)
-
-    snr_db = jax.lax.cond(s_pow < eps, _zero, _snr)
-    return -snr_db
-
 
 
 # def loss_fn(module: layer.Layer,
