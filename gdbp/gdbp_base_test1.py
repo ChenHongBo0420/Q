@@ -336,7 +336,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            β_ce: float = 0.4):               # ← CE 权重，可按需要调
+            β_ce: float = 0.6):               # ← CE 权重，可按需要调
     params = util.dict_merge(params, sparams)
 
     z_original, updated_state = module.apply(
