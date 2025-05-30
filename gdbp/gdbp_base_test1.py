@@ -300,7 +300,34 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
+CONST_16QAM = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j
+], dtype=jnp.complex64) / jnp.sqrt(10.)
 
+# 2. CE-loss helper  (可 jit / vmap)
+def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    """
+    pred_sym : [N] complex  — 网络输出符号
+    true_sym : [N] complex  — 对齐后的发送符号
+    return    : 标量 cross-entropy 损失
+    """
+    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
+    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+
+    # 每个真实符号对应的 QAM 点下标
+    label_idx = jnp.argmin(
+        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
+        axis=-1)                                                      # [N]
+
+    # softmax-cross-entropy:
+    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
+
+    return ce.mean()
+        
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -308,16 +335,30 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
+            sparams: Dict,
+            β_ce: float = 0.1):               # ← CE 权重，可按需要调
     params = util.dict_merge(params, sparams)
+
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+        {'params': params, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y))
+
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    evm = evm_ring(jnp.abs(z_original.val), jnp.abs(aligned_x)) 
-    snr = snr + 0.01 * evm
-    return snr, updated_state   
+
+    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
+    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
+                               jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_original.val),
+                   jnp.abs(aligned_x))
+    snr_evm_loss = snr + 0.01 * evm      # ←↙ 你原来的权重
+
+    # ——— 2) CE 分量 ———
+    ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
+
+    # ——— 3) 合并总损失（仍然 “越小越好”） ———
+    total_loss = snr_evm_loss + β_ce * ce_loss
+
+    return total_loss, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
