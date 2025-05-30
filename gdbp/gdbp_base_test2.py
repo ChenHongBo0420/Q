@@ -301,6 +301,12 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
+CONST_16QAM = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j
+], dtype=jnp.complex64) / jnp.sqrt(10.)
 
 _bits = (
     (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
