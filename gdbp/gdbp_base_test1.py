@@ -1,3 +1,4 @@
+# CE/BCE loss
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
