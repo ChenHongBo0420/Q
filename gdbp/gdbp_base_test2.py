@@ -547,14 +547,49 @@ def test(model: Model,
     return metric, z
 
                       
-def equalize_dataset(model_te, params, state_bundle, data):
-    module_state, aux, const, sparams = state_bundle
-    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+# ── 放到 utils 或和 _bit_bce_loss_16qam 同一文件 ────────────────
+def calc_logits(pred_sym: Array,
+                const_points: Array = CONST_16QAM) -> Array:
+    """
+    pred_sym     : 1-D 或 2-D 复向量 (N 或 N×pol)
+    const_points : [16] 复向量，16-QAM 星座
+    return       : logits [N,16]  (负欧氏距离平方)
+    """
+    pred_flat = jnp.reshape(pred_sym, (-1,))          # [N]
+    logits = -jnp.square(jnp.abs(
+                pred_flat[:, None] - const_points[None, :]))  # [N,16]
+    return logits
+
+def test_with_logits(model: Model,
+                     params: Dict,
+                     data: gdat.Input,
+                     eval_range=(300000, -20000)):
+    """
+    与原 test() 几乎一致，但额外返回 logits & llr
+    """
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+        params = model.initvar[0]
+
+    z, _ = jax.jit(model.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **module_state},
+         'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y))
 
+    # ① 截取有效段
     start, stop = z.t.start, z.t.stop
-    z_eq  = np.asarray(z.val[:,0])          # equalized
-    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
-    return z_eq, s_ref
+    y_hat = z.val                       # [T,pol] complex
+    x_ref = data.x[start:stop]          # [T,pol] complex
+
+    # ② 统计前-FEC metrics（沿用原 qamqot）
+    metrics = qamqot(y_hat, x_ref, L=16,
+                     scale=np.sqrt(10), eval_range=eval_range)
+
+    # ③ logits & llr
+    logits = calc_logits(y_hat[:, 0])   # 若 PDM 两极化，按需对每一路分别算
+    llr    = llr_from_logits(logits)    # [N,4]
+    llr    = np.asarray(llr).reshape(-1)   # 转 numpy, 展平
+
+    return metrics, logits, llr
+
