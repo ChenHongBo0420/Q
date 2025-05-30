@@ -327,7 +327,69 @@ def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
 
     return ce.mean()
+
+_bits = (
+    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
+    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
+    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
+    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
+)
+BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
+
+def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    """返回 4-bit BCE 平均损失"""
+    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))  # [N,16]
+
+    # softmax 得到 P(symbol=k | pred)
+    log_probs = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)  # [N,16]
+    probs     = jnp.exp(log_probs)                                         # [N,16]
+
+    # 计算每 bit 的预测概率：P(bit=1) = Σ_k P(k)·b_k
+    p_bit1 = (probs @ BIT_MAP)                            # [N,4]
+    p_bit0 = 1.0 - p_bit1
+
+    # 真值 bits
+    label_idx = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)  # [N]
+    bits_true = BIT_MAP[label_idx]                                          # [N,4]
+
+    # BCE =  – ( y·log p1 + (1–y)·log p0 )
+    eps = 1e-12
+    bce = -( bits_true * jnp.log(p_bit1 + eps) +
+             (1. - bits_true) * jnp.log(p_bit0 + eps) )
+    return bce.mean()
         
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,
+#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
+#     params = util.dict_merge(params, sparams)
+
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
+#         core.Signal(y))
+
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+
+#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
+#                                jnp.abs(aligned_x))
+#     evm = evm_ring(jnp.abs(z_original.val),
+#                    jnp.abs(aligned_x))
+#     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
+
+#     # ——— 2) CE 分量 ———
+#     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
+#     # ——— 3) 合并总损失（仍然 “越小越好”） ———
+#     total_loss = snr_evm_loss + β_ce * ce_loss
+
+#     return total_loss, updated_state
+
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -353,13 +415,10 @@ def loss_fn(module: layer.Layer,
     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
 
     # ——— 2) CE 分量 ———
-    ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
-
-    # ——— 3) 合并总损失（仍然 “越小越好”） ———
-    total_loss = snr_evm_loss + β_ce * ce_loss
+    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
+    total_loss = snr_evm_loss + β_ce * bit_bce
 
     return total_loss, updated_state
-
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
