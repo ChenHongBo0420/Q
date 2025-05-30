@@ -336,7 +336,7 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
+            β_ce: float = 0.1):               # ← CE 权重，可按需要调
     params = util.dict_merge(params, sparams)
 
     z_original, updated_state = module.apply(
@@ -350,7 +350,7 @@ def loss_fn(module: layer.Layer,
                                jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_original.val),
                    jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.01 * evm      # ←↙ 你原来的权重
+    snr_evm_loss = snr     # ←↙ 你原来的权重
 
     # ——— 2) CE 分量 ———
     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
