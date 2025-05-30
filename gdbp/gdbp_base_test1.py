@@ -350,7 +350,7 @@ def loss_fn(module: layer.Layer,
                                jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_original.val),
                    jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.1 * EVM   # ←↙ 你原来的权重
+    snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
 
     # ——— 2) CE 分量 ———
     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
