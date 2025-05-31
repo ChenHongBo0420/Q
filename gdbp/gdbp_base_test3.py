@@ -473,19 +473,9 @@ def get_train_batch(ds: gdat.Input,
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
-
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
+          n_iter=None,
+          opt: optim.Optimizer = optim.adam(
+              optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
 
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
@@ -494,44 +484,38 @@ def train(model: Model,
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
     for i, (y, x) in tqdm(enumerate(batch_gen),
-                      total=n_iter, desc='training', leave=False):
-    if i >= n_iter:
-        break
-    aux = core.dict_replace(aux, {'truth': x})
+                          total=n_iter, desc='training', leave=False):
+        if i >= n_iter:
+            break
+        aux = core.dict_replace(aux, {'truth': x})
 
-    # ------- 调用 update_step 返回 logits -------
-    params_cur = opt.params_fn(opt_state)
-    (loss, module_state), grads = value_and_grad(
-        loss_fn, argnums=1, has_aux=True)(
-        model.module, params_cur, module_state, y, x,
-        aux, const, sparams)
+        # ——— 1. 前向+反传 ———
+        params_cur = opt.params_fn(opt_state)
+        (loss, module_state), grads = value_and_grad(
+            loss_fn, argnums=1, has_aux=True)(
+            model.module, params_cur, module_state, y, x,
+            aux, const, sparams)
 
-    # (1) 更新 optimizer
-    opt_state = opt.update_fn(i, grads, opt_state)
-    yield loss, opt.params_fn(opt_state), module_state
+        opt_state = opt.update_fn(i, grads, opt_state)
+        yield loss, opt.params_fn(opt_state), module_state
 
-    # (2) 收集 logits & bits   (在 Python 域，用 JAX→numpy)
-    with jax.disable_jit():
-        z_pred, _ = model.module.apply(
-            {'params': util.dict_merge(params_cur, sparams),
-             'aux_inputs': aux, 'const': const, **module_state},
-            core.Signal(y))
-        aligned_x = x[z_pred.t.start: z_pred.t.stop]
+        # ——— 2. 收集 logits / bits （Python 域） ———
+        with jax.disable_jit():
+            z_pred, _ = model.module.apply(
+                {'params': util.dict_merge(params_cur, sparams),
+                 'aux_inputs': aux, 'const': const, **module_state},
+                core.Signal(y))
+            aligned_x = x[z_pred.t.start: z_pred.t.stop]
 
-        logits_np = np.asarray(
-            -np.square(np.abs(z_pred.val[..., None] - CONST_16QAM)))
-        bits_np   = np.asarray(BIT_MAP[
-            np.argmin(np.square(
-                np.abs(aligned_x[..., None] - CONST_16QAM)), axis=-1)])
+            logit_buf.append(np.asarray(
+                -np.square(np.abs(z_pred.val[..., None] - CONST_16QAM))))
+            bits_buf.append(np.asarray(
+                BIT_MAP[np.argmin(np.square(
+                    np.abs(aligned_x[..., None]-CONST_16QAM)), axis=-1)]))
 
-    logit_buf.append(logits_np)
-    bits_buf.append(bits_np)
-
-    # (3) 每 MI_UPD_EVERY step 更新一次权重
-    if (i + 1) % MI_UPD_EVERY == 0:
-        update_bit_weights()
-
-                                
+        # ——— 3. 定期更新 BIT_WEIGHTS ———
+        if (i + 1) % MI_UPD_EVERY == 0:
+            _update_bit_weights()                       
                        
 def test(model: Model,
          params: Dict,
