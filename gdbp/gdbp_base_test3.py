@@ -396,7 +396,7 @@ def loss_fn(module: layer.Layer,
             const : Dict,
             sparams: Dict,
             β_ce : float = 0.5,
-            λ_kl : float = 2e-4):             # ← IB-KL 权重
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
     params_net = util.dict_merge(params, sparams)
 
