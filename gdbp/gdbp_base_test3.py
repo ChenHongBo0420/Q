@@ -386,35 +386,44 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 #     return total_loss, updated_state
 
 
+# ------------------ loss_fn  with IB-KL ------------------
 def loss_fn(module: layer.Layer,
             params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
             sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
-    params = util.dict_merge(params, sparams)
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
+    params_net = util.dict_merge(params, sparams)
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # ── 前向 ──────────────────────────────────────────
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
 
-    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-                               jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_original.val),
-                   jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    loss_main = snr + 0.15 * evm
 
-    return total_loss, updated_state
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    loss_main += β_ce * bit_bce
+
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    total_loss = loss_main + λ_kl * kl_ib
+
+    return total_loss, state_new
+# ---------------------------------------------------------
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
