@@ -336,24 +336,7 @@ _bits = (
     (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
 )
 BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
-# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.9, 0.8], dtype=jnp.float32)
 
-def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
-    probs   = jnp.exp(logp)                                             # [N,16]
-
-    # bit 概率 & 真值
-    p1 = (probs @ BIT_MAP)                    # P(bit=1)
-    p0 = 1.0 - p1
-
-    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits = BIT_MAP[idx]                       # 真值 bits
-
-    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
-    return (bce * BIT_WEIGHTS).mean()          # 加权平均
-        
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state: Dict,
