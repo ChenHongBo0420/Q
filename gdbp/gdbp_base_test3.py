@@ -356,7 +356,6 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-# ------------------ loss_fn  with IB-KL ------------------
 # def loss_fn(module: layer.Layer,
 #             params: Dict,
 #             state : Dict,
@@ -392,12 +391,6 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 #     total_loss = loss_main + λ_kl * kl_ib
 
 #     return total_loss, state_new
-# ---------------------------------------------------------
-
-# ────────────────────────────────────────────────────────────
-# 依赖：jax, jnp, BIT_MAP, CONST_16QAM, si_snr_flat_amp_pair, evm_ring
-#       以及你的 module.apply / state 等其余逻辑保持不变
-# ────────────────────────────────────────────────────────────
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -409,7 +402,7 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,
             β_bce : float = 0.5,
             γ_foc : float = 2.0,      # focal γ  (2≈常用)
-            T     : float = 0.7,      # 温度 (T<1 → logits 放大)
+            T     : float = 0.5,      # 温度 (T<1 → logits 放大)
             λ_kl  : float = 1e-4):
 
     params_net = util.dict_merge(params, sparams)
