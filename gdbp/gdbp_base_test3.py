@@ -229,6 +229,13 @@ def model_init(data: gdat.Input,
     state = v0['af_state']
     aux = v0['aux_inputs']
     const = v0['const']
+    sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+    state, aux, const = v0['af_state'], v0['aux_inputs'], v0['const']
+
+    if 'bitw' not in params:                    
+        params = util.dict_merge(params,
+                 {'bitw': jnp.zeros(4, dtype=jnp.float32)})
+
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
