@@ -402,7 +402,7 @@ def loss_fn(module: layer.Layer,
             sparams: Dict,
             β_bce : float = 0.5,
             γ_foc : float = 2.0,      # focal γ  (2≈常用)
-            T     : float = 0.5,      # 温度 (T<1 → logits 放大)
+            T     : float = 0.9,      # 温度 (T<1 → logits 放大)
             λ_kl  : float = 1e-4):
 
     params_net = util.dict_merge(params, sparams)
