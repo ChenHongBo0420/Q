@@ -354,39 +354,51 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,
-#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
-#     params = util.dict_merge(params, sparams)
-
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(y))
-
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-
-#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-#                                jnp.abs(aligned_x))
-#     evm = evm_ring(jnp.abs(z_original.val),
-#                    jnp.abs(aligned_x))
-#     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
-
-#     # ——— 2) CE 分量 ———
-#     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
-#     # ——— 3) 合并总损失（仍然 “越小越好”） ———
-#     total_loss = snr_evm_loss + β_ce * ce_loss
-
-#     return total_loss, updated_state
 
 
 # ------------------ loss_fn  with IB-KL ------------------
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state : Dict,
+#             y     : Array,
+#             x     : Array,
+#             aux   : Dict,
+#             const : Dict,
+#             sparams: Dict,
+#             β_ce : float = 0.5,
+#             λ_kl : float = 1e-4):             # ← IB-KL 权重
+
+#     params_net = util.dict_merge(params, sparams)
+
+#     # ── 前向 ──────────────────────────────────────────
+#     z_out, state_new = module.apply(
+#         {'params': params_net, 'aux_inputs': aux,
+#          'const': const, **state}, core.Signal(y))
+
+#     aligned_x = x[z_out.t.start:z_out.t.stop]
+
+#     # ── (1) SNR + EVM  ───────────────────────────────
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+#     evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+#     loss_main = snr + 0.1 * evm
+
+#     # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+#     bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+#     loss_main += β_ce * bit_bce
+
+#     # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+#     # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+#     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+#     total_loss = loss_main + λ_kl * kl_ib
+
+#     return total_loss, state_new
+# ---------------------------------------------------------
+
+# ────────────────────────────────────────────────────────────
+# 依赖：jax, jnp, BIT_MAP, CONST_16QAM, si_snr_flat_amp_pair, evm_ring
+#       以及你的 module.apply / state 等其余逻辑保持不变
+# ────────────────────────────────────────────────────────────
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state : Dict,
@@ -395,35 +407,49 @@ def loss_fn(module: layer.Layer,
             aux   : Dict,
             const : Dict,
             sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
+            β_bce : float = 0.5,
+            γ_foc : float = 2.0,      # focal γ  (2≈常用)
+            T     : float = 0.7,      # 温度 (T<1 → logits 放大)
+            λ_kl  : float = 1e-4):
 
     params_net = util.dict_merge(params, sparams)
 
     # ── 前向 ──────────────────────────────────────────
-    z_out, state_new = module.apply(
+    z, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
          'const': const, **state}, core.Signal(y))
+    x_align = x[z.t.start:z.t.stop]
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
+    # ── (1) 物理域损失：SNR + EVM ────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z.val), jnp.abs(x_align))
+    evm = evm_ring(jnp.abs(z.val), jnp.abs(x_align))
+    loss_phys = snr + 0.10 * evm
 
-    # ── (1) SNR + EVM  ───────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    loss_main = snr + 0.1 * evm
+    # ── (2) Bit-BCE  +  温度缩放 + Focal ───────────────
+    logits = -jnp.square(jnp.abs(z.val[..., None] - CONST_16QAM)) / T  # ← 温度
+    logp   = logits - jax.nn.logsumexp(logits, -1, keepdims=True)
+    probs  = jnp.exp(logp)
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
-    loss_main += β_ce * bit_bce
+    p1     = probs @ BIT_MAP                 # [N,4]
+    p0     = 1. - p1
+    idx    = jnp.argmin(
+              jnp.square(jnp.abs(x_align[..., None] - CONST_16QAM)), -1)
+    bits   = BIT_MAP[idx]                   # [N,4] 0/1 真值
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # focal α_t = (1-P_t)ᵞ
+    pt     = jnp.where(bits == 1, p1, p0)   # 正确概率
+    focal  = jnp.power(1. - pt, γ_foc)
+
+    bce    = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
+    bit_loss = (focal * bce).mean()         # 平均 4bit ×N
+
+    loss_main = loss_phys + β_bce * bit_loss
+
+    # ── (3) IB-KL (可关) ──────────────────────────────
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
-# ---------------------------------------------------------
-
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
