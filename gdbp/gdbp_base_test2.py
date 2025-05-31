@@ -337,7 +337,7 @@ _bits = (
 )
 BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
 # 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.9, 0.8], dtype=jnp.float32)
+BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
 
 def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
