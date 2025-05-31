@@ -141,28 +141,14 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
+            sparams: Dict,):
     params = util.dict_merge(params, sparams)
-
     z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
-
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
     aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
 
-    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-                               jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_original.val),
-                   jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
-
-    # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
-
-    return total_loss, updated_state
+    return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
