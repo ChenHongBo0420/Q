@@ -20,6 +20,9 @@ import matplotlib.pyplot as plt
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
+BIT_WEIGHTS = jnp.ones(4, dtype=jnp.float32)   # 初始 1,1,1,1
+MI_UPD_EVERY = 256        # 每 256 个 mini-batch 更新一次
+
 
 ## One ##
 # def make_base_module(steps: int = 3,
@@ -337,59 +340,20 @@ _bits = (
 )
 BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
 
-def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    """返回 4-bit BCE 平均损失"""
+def _bit_bce_loss_16qam(pred_sym: Array,
+                        true_sym: Array) -> Array:
     logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))  # [N,16]
+    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    probs  = jnp.exp(logp)
 
-    # softmax 得到 P(symbol=k | pred)
-    log_probs = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)  # [N,16]
-    probs     = jnp.exp(log_probs)                                         # [N,16]
+    p1   = probs @ BIT_MAP      # [N,4]
+    p0   = 1. - p1
+    idx  = jnp.argmin(jnp.square(
+           jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
+    bits = BIT_MAP[idx]
 
-    # 计算每 bit 的预测概率：P(bit=1) = Σ_k P(k)·b_k
-    p_bit1 = (probs @ BIT_MAP)                            # [N,4]
-    p_bit0 = 1.0 - p_bit1
-
-    # 真值 bits
-    label_idx = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)  # [N]
-    bits_true = BIT_MAP[label_idx]                                          # [N,4]
-
-    # BCE =  – ( y·log p1 + (1–y)·log p0 )
-    eps = 1e-12
-    bce = -( bits_true * jnp.log(p_bit1 + eps) +
-             (1. - bits_true) * jnp.log(p_bit0 + eps) )
-    return bce.mean()
-        
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,
-#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
-#     params = util.dict_merge(params, sparams)
-
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(y))
-
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-
-#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-#                                jnp.abs(aligned_x))
-#     evm = evm_ring(jnp.abs(z_original.val),
-#                    jnp.abs(aligned_x))
-#     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
-
-#     # ——— 2) CE 分量 ———
-#     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
-#     # ——— 3) 合并总损失（仍然 “越小越好”） ———
-#     total_loss = snr_evm_loss + β_ce * ce_loss
-
-#     return total_loss, updated_state
-
+    bce  = -(bits*jnp.log(p1+1e-12) + (1-bits)*jnp.log(p0+1e-12))  # [N,4]
+    return (bce * BIT_WEIGHTS).mean()
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -420,6 +384,30 @@ def loss_fn(module: layer.Layer,
     total_loss = snr_evm_loss + β_ce * bit_bce
 
     return total_loss, updated_state
+                    
+# ---------- MI 缓存 ----------
+logit_buf, bits_buf = [], []
+
+def update_bit_weights():
+    """根据缓存里的一个 epoch (≈MI_UPD_EVERY batch) 重新估计互信息 → 更新 BIT_WEIGHTS"""
+    global BIT_WEIGHTS
+    if not logit_buf:        # 缓冲为空直接跳过
+        return
+
+    logits_np = np.concatenate(logit_buf, axis=0)      # [M,16]
+    bits_np   = np.concatenate(bits_buf,  axis=0)      # [M,4]
+    logp      = logits_np - logsumexp(logits_np, axis=-1, keepdims=True)
+    prob1     = np.exp(logsumexp(logp + np.log(BIT_MAP), axis=1))  # [M,4]
+
+    # 互信息上界估计: I(b;ŷ) ≈ 1 - H(bit|ŷ)
+    H_cond = -( bits_np* np.log(prob1+1e-12)
+              + (1-bits_np)*np.log(1-prob1+1e-12)).mean(axis=0) / np.log(2)
+    I_hat  = 1 - H_cond                       # [4]
+    w      = I_hat.max() / (I_hat + 1e-6)     # 倒数
+    BIT_WEIGHTS = jnp.clip(jnp.asarray(w, jnp.float32), 0.8, 1.5)
+
+    # 清空缓存
+    logit_buf.clear(); bits_buf.clear()
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -506,13 +494,43 @@ def train(model: Model,
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
     for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
-        if i >= n_iter: break
-        aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-        yield loss, opt.params_fn(opt_state), module_state
+                      total=n_iter, desc='training', leave=False):
+    if i >= n_iter:
+        break
+    aux = core.dict_replace(aux, {'truth': x})
+
+    # ------- 调用 update_step 返回 logits -------
+    params_cur = opt.params_fn(opt_state)
+    (loss, module_state), grads = value_and_grad(
+        loss_fn, argnums=1, has_aux=True)(
+        model.module, params_cur, module_state, y, x,
+        aux, const, sparams)
+
+    # (1) 更新 optimizer
+    opt_state = opt.update_fn(i, grads, opt_state)
+    yield loss, opt.params_fn(opt_state), module_state
+
+    # (2) 收集 logits & bits   (在 Python 域，用 JAX→numpy)
+    with jax.disable_jit():
+        z_pred, _ = model.module.apply(
+            {'params': util.dict_merge(params_cur, sparams),
+             'aux_inputs': aux, 'const': const, **module_state},
+            core.Signal(y))
+        aligned_x = x[z_pred.t.start: z_pred.t.stop]
+
+        logits_np = np.asarray(
+            -np.square(np.abs(z_pred.val[..., None] - CONST_16QAM)))
+        bits_np   = np.asarray(BIT_MAP[
+            np.argmin(np.square(
+                np.abs(aligned_x[..., None] - CONST_16QAM)), axis=-1)])
+
+    logit_buf.append(logits_np)
+    bits_buf.append(bits_np)
+
+    # (3) 每 MI_UPD_EVERY step 更新一次权重
+    if (i + 1) % MI_UPD_EVERY == 0:
+        update_bit_weights()
+
                                 
                        
 def test(model: Model,
