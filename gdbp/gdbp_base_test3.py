@@ -387,34 +387,47 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 
 
 def loss_fn(module: layer.Layer,
-            params: Dict,
+            params: Dict,       # ← 含 bitw
             state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
-    params = util.dict_merge(params, sparams)
+            y: Array, x: Array,
+            aux: Dict, const: Dict, sparams: Dict,
+            β_bce: float = 0.5, λ_reg: float = 1e-4):
 
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
+    params_net = util.dict_merge(params, sparams)          # 网络 + 静参
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # ——— 网络前向 ———
+    z, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
+    aligned_x = x[z.t.start:z.t.stop]
 
-    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-                               jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_original.val),
-                   jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+    # ——— 可学习 bit-weight ———
+    w_raw = params['bitw']                   # [4]  trainable
+    bit_w = jax.nn.softplus(w_raw)           # 正值；≈log(1+e^x)
+                                             # 你可 print(bit_w) 观察
+    # ——— BCE with weights ———
+    logits = -jnp.square(jnp.abs(z.val[...,None]-CONST_16QAM))
+    logp   = logits - jax.nn.logsumexp(logits, -1, keepdims=True)
+    probs  = jnp.exp(logp)
+    p1     = probs @ BIT_MAP
+    p0     = 1. - p1
+    idx    = jnp.argmin(jnp.square(
+              jnp.abs(aligned_x[...,None]-CONST_16QAM)), -1)
+    bits   = BIT_MAP[idx]
 
-    # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
+    BCE = -(bits*jnp.log(p1+1e-12) + (1-bits)*jnp.log(p0+1e-12))
+    bce_loss = (BCE * bit_w).mean()
 
-    return total_loss, updated_state
+    # ——— 你原来的 SNR+EVM ———
+    snr = si_snr_flat_amp_pair(jnp.abs(z.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z.val), jnp.abs(aligned_x))
+    main_loss = snr + 0.1*evm + β_bce * bce_loss
+
+    # ——— 正则 (可选) ———
+    reg = λ_reg * jnp.sum(w_raw ** 2)
+
+    return main_loss + reg, state_new
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
