@@ -593,3 +593,14 @@ def test_with_logits(model: Model,
 
     return metrics, logits, llr
 
+def equalize_dataset(model_te, params, state_bundle, data):
+    module_state, aux, const, sparams = state_bundle
+    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **module_state},
+        core.Signal(data.y))
+
+    start, stop = z.t.start, z.t.stop
+    z_eq  = np.asarray(z.val[:,0])          # equalized
+    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
+    return z_eq, s_ref
