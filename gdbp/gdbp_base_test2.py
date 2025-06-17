@@ -354,38 +354,6 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,
-#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
-#     params = util.dict_merge(params, sparams)
-
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(y))
-
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-
-#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-#                                jnp.abs(aligned_x))
-#     evm = evm_ring(jnp.abs(z_original.val),
-#                    jnp.abs(aligned_x))
-#     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
-
-#     # ——— 2) CE 分量 ———
-#     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
-#     # ——— 3) 合并总损失（仍然 “越小越好”） ———
-#     total_loss = snr_evm_loss + β_ce * ce_loss
-
-#     return total_loss, updated_state
-
-
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -408,13 +376,45 @@ def loss_fn(module: layer.Layer,
                                jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_original.val),
                    jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+    snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
 
     # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
+    ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
+    # ——— 3) 合并总损失（仍然 “越小越好”） ———
+    total_loss = snr_evm_loss + β_ce * ce_loss
 
     return total_loss, updated_state
+
+
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,
+#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
+#     params = util.dict_merge(params, sparams)
+
+#     z_original, updated_state = module.apply(
+#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
+#         core.Signal(y))
+
+#     aligned_x = x[z_original.t.start:z_original.t.stop]
+
+#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
+#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
+#                                jnp.abs(aligned_x))
+#     evm = evm_ring(jnp.abs(z_original.val),
+#                    jnp.abs(aligned_x))
+#     snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+
+#     # ——— 2) CE 分量 ———
+#     bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
+#     total_loss = snr_evm_loss + β_ce * bit_bce
+
+#     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
