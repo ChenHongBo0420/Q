@@ -299,56 +299,47 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 
     bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
-        
-def loss_fn(module: layer.Layer,
-            params : Dict,
-            state  : Dict,
-            y      : Array,
-            x      : Array,
-            aux    : Dict,
-            const  : Dict,
-            sparams: Dict,
-            β_ce   : float = 0.5,
-            λ_kl   : float = 1e-4):
-    """
-    total_loss = (SNR + 0.1·EVM + β_ce·Bit-BCE) + λ_kl·KL_IB
-    - 只用 z_out 前 C 维与 aligned_x 做比较；
-    - KL_IB 对 z_out 全 2C 维约束（bottleneck regularizer）。
-    """
 
-    # ── 0. 合并可学 + 静态参数 ───────────────────────────────
+# ─────────────────── new helper in your utils ──────────────────
+def gram_triu_vec(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    x : [T,C] 复符号  →  g_vec : [T,K]  K=C(C+1)/2
+    """
+    g = jnp.einsum('tc,td->tcd', x, x)          # [T,C,C]
+    i, j = jnp.triu_indices(g.shape[-1])
+    return g[:, i, j] / jnp.sqrt(x.shape[-1])
+
+def loss_fn(module: layer.Layer,
+            params : Dict,  state: Dict,
+            y: Array,       x: Array,
+            aux: Dict,      const: Dict,
+            sparams: Dict,
+            λ_kl: float = 1e-4):
+
     params_net = util.dict_merge(params, sparams)
 
-    # ── 1. 前向推理 ───────────────────────────────────────────
+    # ── 前向 ─────────────────────────────────────────
     z_out, state_new = module.apply(
-        {'params': params_net,
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
+        {'params': params_net, 'aux_inputs': aux,
+         'const' : const, **state},
         core.Signal(y)
-    )
+    )                                        # z_out.val : [T,K]
 
-    aligned_x = x[z_out.t.start : z_out.t.stop]   # [T, C]  复符号
-    C         = aligned_x.shape[-1]               # 真·通道数
+    # 参考符号 → Gram 向量
+    x_ref = x[z_out.t.start : z_out.t.stop]          # [T,C]
+    g_ref = gram_triu_vec(x_ref)                     # [T,K]
 
-    # z_main : 取前 C 维作为“估计符号”；其余 C 维是方差信息
-    z_main = z_out.val[..., :C]                   # [T, C]  复符号
+    # ── 指标：SNR(Gram) + MSE ───────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(g_ref))
+    mse = jnp.mean(jnp.square(jnp.abs(z_out.val - g_ref)))
+    loss_main = snr + 0.05 * mse                    # 0.05 可自行微调
 
-    # ── 2. 物理指标 (SNR/EVM) ────────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_main), jnp.abs(aligned_x))
-    evm = evm_ring            (jnp.abs(z_main), jnp.abs(aligned_x))
-    loss_main = snr + 0.1 * evm
-
-    # ── 3. Bit-BCE (16 QAM) ─────────────────────────────────
-    bit_bce = _bit_bce_loss_16qam(z_main, aligned_x)
-    loss_main += β_ce * bit_bce
-
-    # ── 4. 信息瓶颈 KL 正则  (对 2C 维都生效) ───────────────
+    # ── 信息瓶颈 KL ────────────────────────────────
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
-                    
+
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -443,40 +434,30 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
+def test(model: Model, params: Dict, data: gdat.Input,
+         eval_range: tuple = (300000, -20000)):
 
-    # ── 拉 state / params ─────────────────────────────
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
-    # ── 前向 ──────────────────────────────────────────
     z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'    : util.dict_merge(params, sparams),
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y)
     )
 
-    # ── 均值分量 & 参考对齐 ───────────────────────────
-    x_ref = data.x[z.t.start : z.t.stop]      # [T,  C]
-    C     = x_ref.shape[-1]
-    z_main = z.val[..., :C]                   # [T,  C]
+    x_ref = data.x[z.t.start : z.t.stop]
+    g_ref = gram_triu_vec(x_ref)
 
-    # ── 计算 QoT/BER/Q-factor ────────────────────────
-    metric = metric_fn(
-        z_main,
-        x_ref,
-        scale=np.sqrt(10),
-        eval_range=eval_range
-    )
+    # 直接算 SNR / MSE 等，示例：
+    snr = util.to_numpy(-si_snr_flat_amp_pair(jnp.abs(z.val), jnp.abs(g_ref)))
+    mse = util.to_numpy(jnp.mean(jnp.square(jnp.abs(z.val - g_ref))))
+    metric = {'Gram-SNR[dB]': snr, 'Gram-MSE': mse}
+
     return metric, z
+
 
 
                 
