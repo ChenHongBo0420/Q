@@ -324,7 +324,7 @@ def loss_fn(module: layer.Layer,
     # ── (1) SNR + EVM  ───────────────────────────────
     snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    loss_main = snr + 0.1 * evm
+    loss_main = snr + 0.15 * evm
 
     # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
     bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
