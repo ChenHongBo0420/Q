@@ -21,61 +21,6 @@ Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
-## One ##
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0 = 0.,
-#                      mode: str = 'train'):
-#     '''
-#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
-#     specific initialization method and trainable parameters defined
-#     by trainer.
-
-#     Args:
-#         steps: GDBP steps/layers
-#         dtaps: D-filter length
-#         ntaps: N-filter length
-#         rtaps: R-filter length
-#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-#         mode: 'train' or 'test'
-
-#     Returns:
-#         A layer object
-#     '''
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         # configure mimo to its training mode
-#         mimo_train = True
-#     elif mode == 'test':
-#         # mimo operates at training mode for the first 200000 symbols,
-#         # then switches to tracking mode afterwards
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-        
-#     base = layer.Serial(
-#         layer.FDBP(steps=steps,
-#                    dtaps=dtaps,
-#                    ntaps=ntaps,
-#                    d_init=d_init,
-#                    n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-#         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-#     return base
 
 ## Two ##
 def make_base_module(steps: int = 3,
@@ -354,37 +299,55 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
-
 def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
+            params : Dict,
+            state  : Dict,
+            y      : Array,
+            x      : Array,
+            aux    : Dict,
+            const  : Dict,
             sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
-    params = util.dict_merge(params, sparams)
+            β_ce   : float = 0.5,
+            λ_kl   : float = 1e-4):
+    """
+    total_loss = (SNR + 0.1·EVM + β_ce·Bit-BCE) + λ_kl·KL_IB
+    - 只用 z_out 前 C 维与 aligned_x 做比较；
+    - KL_IB 对 z_out 全 2C 维约束（bottleneck regularizer）。
+    """
 
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
+    # ── 0. 合并可学 + 静态参数 ───────────────────────────────
+    params_net = util.dict_merge(params, sparams)
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # ── 1. 前向推理 ───────────────────────────────────────────
+    z_out, state_new = module.apply(
+        {'params': params_net,
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
+        core.Signal(y)
+    )
 
-    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-                               jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_original.val),
-                   jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+    aligned_x = x[z_out.t.start : z_out.t.stop]   # [T, C]  复符号
+    C         = aligned_x.shape[-1]               # 真·通道数
 
-    # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
+    # z_main : 取前 C 维作为“估计符号”；其余 C 维是方差信息
+    z_main = z_out.val[..., :C]                   # [T, C]  复符号
 
-    return total_loss, updated_state
+    # ── 2. 物理指标 (SNR/EVM) ────────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_main), jnp.abs(aligned_x))
+    evm = evm_ring            (jnp.abs(z_main), jnp.abs(aligned_x))
+    loss_main = snr + 0.1 * evm
 
+    # ── 3. Bit-BCE (16 QAM) ─────────────────────────────────
+    bit_bce = _bit_bce_loss_16qam(z_main, aligned_x)
+    loss_main += β_ce * bit_bce
+
+    # ── 4. 信息瓶颈 KL 正则  (对 2C 维都生效) ───────────────
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    total_loss = loss_main + λ_kl * kl_ib
+
+    return total_loss, state_new
+                    
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
