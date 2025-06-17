@@ -87,7 +87,7 @@ def make_base_module(steps: int = 3,
             serial_branch
         ),
         layer.FanInMean()
-        lyaer.Gram()
+        layer.Gram()
     )
 
     return base
