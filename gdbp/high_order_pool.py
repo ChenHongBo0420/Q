@@ -438,34 +438,48 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                                 
-                       
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range=(300000, -20000),
-         metric_fn=comm.qamqot):
+         eval_range: tuple = (300000, -20000),
+         metric_fn = comm.qamqot):
+    """
+    • 若 metric_fn 是 comm.qamqot → 只用符号域 [T,C]
+    • 否则                     → 传完整 [T,2C]（假定用户自定义）
+    """
 
+    # ── 前向 ──────────────────────────────────────────
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
     z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **state},
+        {'params'    : util.dict_merge(params, sparams),
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
         core.Signal(data.y)
-    )                                             # z.val : [T,2C]
+    )                                                # z.val : [T,2C]
 
-    # 参考扩到 2C
-    x_ref  = data.x[z.t.start : z.t.stop]         # [T,C]
-    x_ext  = extend_truth(x_ref)                  # [T,2C]
+    # ── 参考符号 & 扩展 ───────────────────────────────
+    x_ref = data.x[z.t.start : z.t.stop]             # [T,C]
+    x_ext = jnp.concatenate([x_ref,
+                             jnp.square(jnp.abs(x_ref))], axis=-1)  # [T,2C]
+
+    # ── 选择喂入哪一部分 ─────────────────────────────
+    if metric_fn is comm.qamqot:
+        y_pred, y_true = z.val[..., :x_ref.shape[-1]], x_ref        # [T,C]
+    else:
+        y_pred, y_true = z.val, x_ext                               # [T,2C]
 
     metric = metric_fn(
-        z.val, x_ext,
+        y_pred, y_true,
         scale=np.sqrt(10),
         eval_range=eval_range
     )
     return metric, z
+
 
 
 
