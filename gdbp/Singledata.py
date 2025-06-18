@@ -1,24 +1,26 @@
 import numpy as np
+from commplax import comm
 from collections import namedtuple
 from tqdm.auto import tqdm
-from commplax import comm
 import labptptm1
 
-# 数据容器：接收波形 y、发送符号 x、频偏 w0、元数据 a
-Input = namedtuple('DataInput', ['y', 'x', 'w0', 'a'])
+# Container for the loaded data: received waveform, sent symbols, frequency offset, metadata
+tuple_fields = ['y', 'x', 'w0', 'a']
+Input = namedtuple('DataInput', tuple_fields)
+
 
 def load(mod, lp_dbm, rep, n_symbols=1500000):
     """
-    Load single-channel 815 km PDM data.
+    Load single-channel 815 km PDM transmission data.
 
     Args:
       mod:       modulation format index (0-based) or format-name string
-      lp_dbm:    launched power in dBm (e.g. -6, -4, 0, 4)
-      rep:       repetition index (1,2,3,…)
+      lp_dbm:    launched power in dBm
+      rep:       repeat index (1,2,3,...)
       n_symbols: number of symbols to load
 
     Returns:
-      List[Input]: 每个 Input 包含 (y, x, w0, a)
+      list of Input tuples, each with fields (y, x, w0, a)
     """
     dat_grps, _ = labptptm1.select(mod, lp_dbm, rep)
     inputs = []
@@ -29,40 +31,45 @@ def load(mod, lp_dbm, rep, n_symbols=1500000):
 
 def _loader(dat_grp, n_symbols, lp_dbm):
     """
-    Internal loader: 依据 dat_grp.attrs 注入/补全元数据，读取 recv/sent，
-    并做 DC 去除、归一化，返回 Input。
+    Internal loader: reads recv/sent arrays, normalizes, and returns Input.
     """
-    # 1) 拷贝组属性到普通 dict
+    # 1) Extract attributes from Zarr group
     a = dict(dat_grp.attrs)
 
-    # 2) 必要字段都从 attrs 里读
-    symbolrate = a['baudrate']     # 28e9
-    samplerate = a['samplerate']   # 56e9
-    distance   = a['distance']     # 815e3
-    spans      = a['spans']        # 10
-    modformat  = a['modformat']    # e.g. '16QAM'
-
-    # 3) 计算每符号采样数
+    # 2) Extract or fallback essential metadata
+    symbolrate = a.get('baudrate', a.get('symbolrate', None))
+    samplerate = a.get('samplerate', None)
+    if symbolrate is None or samplerate is None:
+        raise KeyError(f"Missing 'baudrate' or 'samplerate' in attrs: {list(a.keys())}")
+    # 3) Compute samples-per-symbol
     sps = samplerate / symbolrate
 
-    # 4) 注入／补全 a 中的关键字段
+    # 4) Link parameters
+    distance  = a.get('distance', None)
+    spans     = a.get('spans', None)
+    if distance is None or spans is None:
+        raise KeyError(f"Missing 'distance' or 'spans' in attrs: {list(a.keys())}")
+    modformat = a.get('modformat', '16QAM')
+
+    # 5) Update metadata dict with standard keys
     a.update({
         'symbolrate': symbolrate,
         'samplerate': samplerate,
         'sps':        sps,
         'distance':   distance,
         'spans':      spans,
-        'cd':         a.get('cd', 17e-6),  # 如果没有，就设 17 ps/nm/km
-        'lpdbm':      lp_dbm,              # 从参数传入
+        'cd':         a.get('cd', 17e-6),   # default CD if missing
+        'lpdbm':      lp_dbm,
+        'modformat':  modformat,
     })
 
-    # 5) 根据 sps 把 recv 切到指定符号数
+    # 6) Load data arrays
     n_samples = int(round(n_symbols * sps))
     y = dat_grp['recv'][:n_samples]
     x = dat_grp['sent'][:n_symbols]
-    w0 = 0.0  # 单通道无频偏元数据
+    w0 = 0.0  # no FO metadata for single-channel
 
-    # 6) 去 DC + 归一化
+    # 7) Preprocessing
     y = y - np.mean(y, axis=0)
     y = comm.normpower(y, real=True) / np.sqrt(2)
     x = x / comm.qamscale(modformat)
