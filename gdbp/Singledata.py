@@ -29,49 +29,64 @@ def load(mod, lp_dbm, rep, n_symbols=1500000):
     return inputs
 
 
-def _loader(dat_grp, n_symbols, lp_dbm):
+def _get_meta(grp, *names):
     """
-    Internal loader: reads recv/sent arrays, normalizes, and returns Input.
+    向上递归地、大小写不敏感地查某些属性，直到根组。
+    返回找到的第一个值或 None
     """
-    # 1) Extract attributes from Zarr group
-    a = dict(dat_grp.attrs)
+    names_lc = [n.lower() for n in names]
+    g = grp
+    while g is not None:
+        for k, v in g.attrs.items():
+            if k.lower() in names_lc:
+                return v
+        g = getattr(g, 'parent', None)   # Zarr >=2.18 有 parent
+    return None
 
-    # 2) Extract or fallback essential metadata
-    symbolrate = a.get('baudrate', a.get('symbolrate', None))
-    samplerate = a.get('samplerate', None)
+
+def _loader(dat_grp, n_symbols, lp_dbm):
+    # ---------- 1) 获取属性（大小写无关 + 回溯） ----------
+    symbolrate = _get_meta(dat_grp, 'baudrate', 'symbolrate', 'baud_rate')
+    samplerate = _get_meta(dat_grp, 'samplerate', 'sample_rate', 'fs')
+
     if symbolrate is None or samplerate is None:
-        raise KeyError(f"Missing 'baudrate' or 'samplerate' in attrs: {list(a.keys())}")
-    # 3) Compute samples-per-symbol
+        raise KeyError(
+            "Cannot find 'baudrate'/'symbolrate' and 'samplerate'. "
+            "Checked current group and ancestors."
+        )
+
+    # ---------- 2) 其他元数据，亦可回溯 ----------
+    distance  = _get_meta(dat_grp, 'distance')
+    spans     = _get_meta(dat_grp, 'spans')
+    modformat = _get_meta(dat_grp, 'modformat') or '16QAM'
+
+    for k, v in {'distance': distance, 'spans': spans}.items():
+        if v is None:
+            raise KeyError(f"Missing '{k}' in attrs up the tree.")
+
+    # ---------- 3) 计算 SPS ----------
     sps = samplerate / symbolrate
 
-    # 4) Link parameters
-    distance  = a.get('distance', None)
-    spans     = a.get('spans', None)
-    if distance is None or spans is None:
-        raise KeyError(f"Missing 'distance' or 'spans' in attrs: {list(a.keys())}")
-    modformat = a.get('modformat', '16QAM')
-
-    # 5) Update metadata dict with standard keys
-    a.update({
+    # ---------- 4) 更新 metadata dict ----------
+    a = {
         'symbolrate': symbolrate,
         'samplerate': samplerate,
         'sps':        sps,
         'distance':   distance,
         'spans':      spans,
-        'cd':         a.get('cd', 17e-6),   # default CD if missing
+        'cd':         _get_meta(dat_grp, 'cd', 'dispersion') or 17e-6,
         'lpdbm':      lp_dbm,
         'modformat':  modformat,
-    })
+    }
 
-    # 6) Load data arrays
+    # ---------- 5) 读取波形 ----------
     n_samples = int(round(n_symbols * sps))
     y = dat_grp['recv'][:n_samples]
     x = dat_grp['sent'][:n_symbols]
-    w0 = 0.0  # no FO metadata for single-channel
+    w0 = 0.0                      # 单通道没有额外 FO
 
-    # 7) Preprocessing
+    # ---------- 6) 预处理 ----------
     y = y - np.mean(y, axis=0)
     y = comm.normpower(y, real=True) / np.sqrt(2)
     x = x / comm.qamscale(modformat)
 
-    return Input(y=y, x=x, w0=w0, a=a)
