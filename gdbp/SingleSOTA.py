@@ -1,4 +1,4 @@
-# CE/BCE loss
+# CE/BCE loss weighted bit-BCE
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
@@ -21,61 +21,6 @@ Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
-## One ##
-# def make_base_module(steps: int = 3,
-#                      dtaps: int = 261,
-#                      ntaps: int = 41,
-#                      rtaps: int = 61,
-#                      init_fn: tuple = (core.delta, core.gauss),
-#                      w0 = 0.,
-#                      mode: str = 'train'):
-#     '''
-#     make base module that derives DBP, FDBP, EDBP, GDBP depending on
-#     specific initialization method and trainable parameters defined
-#     by trainer.
-
-#     Args:
-#         steps: GDBP steps/layers
-#         dtaps: D-filter length
-#         ntaps: N-filter length
-#         rtaps: R-filter length
-#         init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-#         mode: 'train' or 'test'
-
-#     Returns:
-#         A layer object
-#     '''
-
-#     _assert_taps(dtaps, ntaps, rtaps)
-
-#     d_init, n_init = init_fn
-
-#     if mode == 'train':
-#         # configure mimo to its training mode
-#         mimo_train = True
-#     elif mode == 'test':
-#         # mimo operates at training mode for the first 200000 symbols,
-#         # then switches to tracking mode afterwards
-#         mimo_train = cxopt.piecewise_constant([200000], [True, False])
-#     else:
-#         raise ValueError('invalid mode %s' % mode)
-        
-#     base = layer.Serial(
-#         layer.FDBP(steps=steps,
-#                    dtaps=dtaps,
-#                    ntaps=ntaps,
-#                    d_init=d_init,
-#                    n_init=n_init),
-#         layer.BatchPowerNorm(mode=mode),
-#         layer.MIMOFOEAf(name='FOEAf',
-#                         w0=w0,
-#                         train=mimo_train,
-#                         preslicer=core.conv1d_slicer(rtaps),
-#                         foekwargs={}),
-#         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-#         layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-#     return base
 
 ## Two ##
 def make_base_module(steps: int = 3,
@@ -336,90 +281,61 @@ _bits = (
     (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
 )
 BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
+# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
+BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
 
 def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    """返回 4-bit BCE 平均损失"""
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))  # [N,16]
+    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
+    probs   = jnp.exp(logp)                                             # [N,16]
 
-    # softmax 得到 P(symbol=k | pred)
-    log_probs = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)  # [N,16]
-    probs     = jnp.exp(log_probs)                                         # [N,16]
+    # bit 概率 & 真值
+    p1 = (probs @ BIT_MAP)                    # P(bit=1)
+    p0 = 1.0 - p1
 
-    # 计算每 bit 的预测概率：P(bit=1) = Σ_k P(k)·b_k
-    p_bit1 = (probs @ BIT_MAP)                            # [N,4]
-    p_bit0 = 1.0 - p_bit1
+    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
+    bits = BIT_MAP[idx]                       # 真值 bits
 
-    # 真值 bits
-    label_idx = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)  # [N]
-    bits_true = BIT_MAP[label_idx]                                          # [N,4]
-
-    # BCE =  – ( y·log p1 + (1–y)·log p0 )
-    eps = 1e-12
-    bce = -( bits_true * jnp.log(p_bit1 + eps) +
-             (1. - bits_true) * jnp.log(p_bit0 + eps) )
-    return bce.mean()
+    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
+    return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state: Dict,
-#             y: Array,
-#             x: Array,
-#             aux: Dict,
-#             const: Dict,
-#             sparams: Dict,
-#             β_ce: float = 0.5):               # ← CE 权重，可按需要调
-#     params = util.dict_merge(params, sparams)
-
-#     z_original, updated_state = module.apply(
-#         {'params': params, 'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(y))
-
-#     aligned_x = x[z_original.t.start:z_original.t.stop]
-
-#     # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-#     snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-#                                jnp.abs(aligned_x))
-#     evm = evm_ring(jnp.abs(z_original.val),
-#                    jnp.abs(aligned_x))
-#     snr_evm_loss = snr + 0.1 * evm   # ←↙ 你原来的权重
-
-#     # ——— 2) CE 分量 ———
-#     ce_loss = _ce_loss_16qam(z_original.val, aligned_x)
-#     # ——— 3) 合并总损失（仍然 “越小越好”） ———
-#     total_loss = snr_evm_loss + β_ce * ce_loss
-
-#     return total_loss, updated_state
 
 
 def loss_fn(module: layer.Layer,
             params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
             sparams: Dict,
-            β_ce: float = 0.5):               # ← CE 权重，可按需要调
-    params = util.dict_merge(params, sparams)
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
+    params_net = util.dict_merge(params, sparams)
 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
+    # ── 前向 ──────────────────────────────────────────
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
 
-    # ——— 1) 你的 SNR + EVM 分量 (保持不变) ———
-    snr = si_snr_flat_amp_pair(jnp.abs(z_original.val),
-                               jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_original.val),
-                   jnp.abs(aligned_x))
-    snr_evm_loss = snr + 0.15 * evm   # ←↙ 你原来的权重
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ——— 2) CE 分量 ———
-    bit_bce = _bit_bce_loss_16qam(z_original.val, aligned_x)
-    total_loss = snr_evm_loss + β_ce * bit_bce
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    loss_main = snr + 0.1 * evm
 
-    return total_loss, updated_state
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    loss_main += β_ce * bit_bce
+
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    total_loss = loss_main + λ_kl * kl_ib
+
+    return total_loss, state_new
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -551,7 +467,7 @@ def test(model: Model,
                        eval_range=eval_range)
     return metric, z
 
-                      
+                
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
