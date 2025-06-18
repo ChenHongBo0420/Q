@@ -8,7 +8,7 @@ from functools import partial
 from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union, Tuple
-from . import data as gdat
+from . import Singledata as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
