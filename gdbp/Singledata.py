@@ -1,45 +1,56 @@
 import numpy as np
 from commplax import comm
-from . import store
 from collections import namedtuple
+from tqdm.auto import tqdm
+import labptptm1
 
-Input = namedtuple('DataInput', ['y','x','w0','a'])
+# DataInput holds received waveform, sent symbols, frequency offset, and metadata
+tuple_fields = ['y','x','w0','a']
+Input = namedtuple('DataInput', tuple_fields)
 
-# 全局常量：若仓库里没给，就用下面这个 sps
-DEFAULT_SPS       = 2.0
-DEFAULT_SYMB_RATE = 28e9
-DEFAULT_SAMP_RATE = DEFAULT_SPS * DEFAULT_SYMB_RATE
+# Default samples-per-symbol if attrs do not specify
+DEFAULT_SPS = 2.0
+
+
+def load(mod, lp_dbm, rep, n_symbols=1500000):
+    """
+    Load single-channel 815 km PDM transmission data.
+
+    Args:
+      mod:       modulation format index (0-based) or format name string
+      lp_dbm:    launched power in dBm
+      rep:       repeat index (1,2,3)
+      n_symbols: number of symbols to load
+
+    Returns:
+      list of Input tuples
+    """
+    # Select Zarr groups using labptptm1 API
+    dat_grps, _ = labptptm1.select(mod, lp_dbm, rep)
+    inputs = []
+    for dg in tqdm(dat_grps, desc='loading LabPtPtm1 data', leave=False):
+        inputs.append(_loader(dg, n_symbols))
+    return inputs
+
 
 def _loader(dat_grp, n_symbols):
-    # 1) 拿到属性字典
+    """
+    Internal loader: reads recv/sent arrays, normalizes, and returns Input.
+    """
+    # Extract metadata attributes
     a = dict(dat_grp.attrs)
-
-    # 2) 尝试从 dat_grp.attrs 里取 sps
-    if 'sps' in a:
-        sps = a['sps']
-    else:
-        # 3) 尝试从 root.attrs 里取
-        root = store.open_group()
-        gattrs = dict(root.attrs)
-        if 'sps' in gattrs:
-            sps = gattrs['sps']
-        elif 'symbolrate' in gattrs and 'samplerate' in gattrs:
-            sps = gattrs['samplerate'] / gattrs['symbolrate']
-        else:
-            # 4) 回退到默认值
-            sps = DEFAULT_SPS
-
-    # 5) 读取数据
+    # Determine samples-per-symbol
+    sps = a.get('sps', DEFAULT_SPS)
+    # Compute number of samples to read
     n_samples = int(round(n_symbols * sps))
+    # Read arrays
     y = dat_grp['recv'][:n_samples]
     x = dat_grp['sent'][:n_symbols]
-
-    # 6) 因为单通道无 FO 信息，直接设 0
+    # Single-channel has no frequency offset metadata
     w0 = 0.0
-
-    # 7) 归一化
+    # Preprocessing: DC removal and power normalization
     y = y - np.mean(y, axis=0)
     y = comm.normpower(y, real=True) / np.sqrt(2)
+    # Normalize transmitted symbols
     x = x / comm.qamscale(a.get('modformat', '16QAM'))
-
     return Input(y=y, x=x, w0=w0, a=a)
