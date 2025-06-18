@@ -39,6 +39,19 @@ def _loader(dat_grp, n_symbols):
     """
     # Extract metadata attributes
     a = dict(dat_grp.attrs)
+    # --- Inject required metadata for signal processing and DBP initialization ---
+    # modulation format (default to 16QAM if missing)
+    a.setdefault('modformat', '16QAM')
+    # symbol rate (baudrate) and sample rate
+    a.setdefault('symbolrate', 28e9)  # 28 GBd
+    a.setdefault('samplerate', 56e9)  # 56 GSa/s
+    # fiber properties
+    a.setdefault('distance', 815e3)   # 815 km in meters
+    a.setdefault('spans', 1)          # single span
+    # dispersion parameter if needed (ps/nm/km converted to s/m^2)
+    a.setdefault('cd', 17e-6)         # 17 ps/nm/km → 17e-6 s/m^2
+    # launched power already in 'lpdbm'
+    # ---------------------------------------------------------------
     # Determine samples-per-symbol
     sps = a.get('sps', DEFAULT_SPS)
     # Compute number of samples to read
