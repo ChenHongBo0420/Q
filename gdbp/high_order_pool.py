@@ -300,50 +300,42 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
 
-def extend_truth(x_sym: jnp.ndarray) -> jnp.ndarray:
-    """
-    x_sym  : [T,C]  复符号  
-    return : [T,2C] = [符号本身 | 每符号功率]
-    """
-    power = jnp.square(jnp.abs(x_sym))     # [T,C]  (实数)
-    return jnp.concatenate([x_sym, power], axis=-1)
-  
+
 def loss_fn(module: layer.Layer,
-            params: Dict, state: Dict,
-            y: Array,    x: Array,
-            aux: Dict,   const: Dict,
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
             sparams: Dict,
-            β_ce=0.5, λ_kl=1e-4):
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ──────────────────────────────────────
+    # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y)
-    )                                   # z_out.val : [T,2C]
+         'const': const, **state}, core.Signal(y))
 
-    # 参考符号扩到 2C
-    x_ref = x[z_out.t.start : z_out.t.stop]         # [T,C]
-    x_ext = extend_truth(x_ref)                     # [T,2C]
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ── 度量在 2C 空间 ────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(x_ext))
-    evm = evm_ring            (jnp.abs(z_out.val), jnp.abs(x_ext))
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
     loss_main = snr + 0.1 * evm
 
-    # Bit-BCE 仍只用均值分量与原符号比对
-    C      = x_ref.shape[-1]
-    z_sym  = z_out.val[..., :C]                       # [T,C]
-    bit_bce = _bit_bce_loss_16qam(z_sym, x_ref)
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
     loss_main += β_ce * bit_bce
 
-    # KL 正则 → 全 2C 维
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
-    return total_loss, state_new
 
+    return total_loss, state_new
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -438,50 +430,42 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                                 
+                       
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
-    """
-    • 若 metric_fn 是 comm.qamqot → 只用符号域 [T,C]
-    • 否则                     → 传完整 [T,2C]（假定用户自定义）
-    """
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-    # ── 前向 ──────────────────────────────────────────
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-        params = model.initvar[0]
+      params = model.initvar[0]
 
-    z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'    : util.dict_merge(params, sparams),
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
-        core.Signal(data.y)
-    )                                                # z.val : [T,2C]
-
-    # ── 参考符号 & 扩展 ───────────────────────────────
-    x_ref = data.x[z.t.start : z.t.stop]             # [T,C]
-    x_ext = jnp.concatenate([x_ref,
-                             jnp.square(jnp.abs(x_ref))], axis=-1)  # [T,2C]
-
-    # ── 选择喂入哪一部分 ─────────────────────────────
-    if metric_fn is comm.qamqot:
-        y_pred, y_true = z.val[..., :x_ref.shape[-1]], x_ref        # [T,C]
-    else:
-        y_pred, y_true = z.val, x_ext                               # [T,2C]
-
-    metric = metric_fn(
-        y_pred, y_true,
-        scale=np.sqrt(10),
-        eval_range=eval_range
-    )
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
     return metric, z
-
-
-
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
