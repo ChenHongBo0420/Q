@@ -86,7 +86,7 @@ def make_base_module(steps: int = 3,
             fdbp_series,
             serial_branch
         ),
-        layer.FanInMean(),
+        layer.FanInMean()
     )
 
     return base
@@ -298,42 +298,40 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 
     bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
+        
 
-# ─────────────────── new helper in your utils ──────────────────
-def gram_triu_vec(x: jnp.ndarray) -> jnp.ndarray:
-    """
-    x : [T,C] 复符号  →  g_vec : [T,K]  K=C(C+1)/2
-    """
-    g = jnp.einsum('tc,td->tcd', x, x)          # [T,C,C]
-    i, j = jnp.triu_indices(g.shape[-1])
-    return g[:, i, j] / jnp.sqrt(x.shape[-1])
 
 def loss_fn(module: layer.Layer,
-            params : Dict,  state: Dict,
-            y: Array,       x: Array,
-            aux: Dict,      const: Dict,
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
             sparams: Dict,
-            λ_kl: float = 1e-4):
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ─────────────────────────────────────────
+    # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
-         'const' : const, **state},
-        core.Signal(y)
-    )                                        # z_out.val : [T,K]
+         'const': const, **state}, core.Signal(y))
 
-    # 参考符号 → Gram 向量
-    x_ref = x[z_out.t.start : z_out.t.stop]          # [T,C]
-    g_ref = gram_triu_vec(x_ref)                     # [T,K]
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ── 指标：SNR(Gram) + MSE ───────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(g_ref))
-    mse = jnp.mean(jnp.square(jnp.abs(z_out.val - g_ref)))
-    loss_main = snr + 0.05 * mse                    # 0.05 可自行微调
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    loss_main = snr + 0.1 * evm
 
-    # ── 信息瓶颈 KL ────────────────────────────────
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    loss_main += β_ce * bit_bce
+
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
@@ -436,48 +434,38 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
-    """
-    与原版同签名：
-      • 如果 z.val.shape[-1] == 参考符号通道 C → 调用 metric_fn
-      • 否则（如 Gram 向量） → metric 设为空字典 {}
-    返回 (metric, z)
-    """
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-    # ── 前向推理 ──────────────────────────────────────
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
-    aux  = core.dict_replace(aux, {'truth': data.x})
+    aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-        params = model.initvar[0]
+      params = model.initvar[0]
 
-    z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'    : util.dict_merge(params, sparams),
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
-        core.Signal(data.y)
-    )
-
-    # ── 参考符号对齐 ────────────────────────────────
-    x_ref = data.x[z.t.start : z.t.stop]          # [T,C]
-
-    # ── 根据维度决定是否评估 QoT ────────────────────
-    if z.val.shape[-1] == x_ref.shape[-1]:
-        # 正常符号域 → 可安全调用 metric_fn
-        metric = metric_fn(
-            z.val, x_ref,
-            scale=np.sqrt(10),
-            eval_range=eval_range
-        )
-    else:
-        # 维度不匹配（如 Gram 向量） → 跳过评估
-        metric = {}
-
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
     return metric, z
-
-
-
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
