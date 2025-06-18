@@ -28,65 +28,72 @@ def load(mod, lp_dbm, rep, n_symbols=1500000):
         inputs.append(_loader(dg, n_symbols, lp_dbm))
     return inputs
 
+from itertools import chain
 
 def _get_meta(grp, *names):
     """
-    向上递归地、大小写不敏感地查某些属性，直到根组。
-    返回找到的第一个值或 None
+    向上递归查找属性（大小写不敏感，支持别名）直到根组。若未找到返回 None
+    在 Zarr 2.10 上对根组访问 .parent 会抛 ValueError，故捕获后终止。
     """
-    names_lc = [n.lower() for n in names]
+    names_lc = {n.lower() for n in chain.from_iterable(
+        n.split('|') for n in names)}               # 允许写成 'baudrate|baud_rate'
+
     g = grp
     while g is not None:
         for k, v in g.attrs.items():
             if k.lower() in names_lc:
                 return v
-        g = getattr(g, 'parent', None)   # Zarr >=2.18 有 parent
+        # ---------- 向父组移动 ----------
+        try:
+            g = g.parent          # Zarr 2.10：根组 .parent -> ValueError
+        except ValueError:
+            g = None
     return None
 
 
 def _loader(dat_grp, n_symbols, lp_dbm):
-    # ---------- 1) 获取属性（大小写无关 + 回溯） ----------
-    symbolrate = _get_meta(dat_grp, 'baudrate', 'symbolrate', 'baud_rate')
-    samplerate = _get_meta(dat_grp, 'samplerate', 'sample_rate', 'fs')
+    # 1) 元数据（支持多别名，大小写无关）
+    symbolrate = _get_meta(dat_grp, 'baudrate|baud_rate', 'symbolrate')
+    samplerate = _get_meta(dat_grp, 'samplerate|sample_rate|fs')
 
     if symbolrate is None or samplerate is None:
         raise KeyError(
-            "Cannot find 'baudrate'/'symbolrate' and 'samplerate'. "
-            "Checked current group and ancestors."
+            "Cannot find 'baudrate'/'symbolrate' AND 'samplerate' in this group "
+            "or any ancestor. Checked Zarr v2.10 hierarchy."
         )
 
-    # ---------- 2) 其他元数据，亦可回溯 ----------
     distance  = _get_meta(dat_grp, 'distance')
     spans     = _get_meta(dat_grp, 'spans')
+    if distance is None or spans is None:
+        raise KeyError("Missing 'distance' or 'spans' in attrs up the tree.")
+
     modformat = _get_meta(dat_grp, 'modformat') or '16QAM'
+    cd        = _get_meta(dat_grp, 'cd', 'dispersion') or 17e-6
 
-    for k, v in {'distance': distance, 'spans': spans}.items():
-        if v is None:
-            raise KeyError(f"Missing '{k}' in attrs up the tree.")
-
-    # ---------- 3) 计算 SPS ----------
+    # 2) 计算 samples-per-symbol
     sps = samplerate / symbolrate
 
-    # ---------- 4) 更新 metadata dict ----------
+    # 3) metadata dict
     a = {
         'symbolrate': symbolrate,
         'samplerate': samplerate,
         'sps':        sps,
         'distance':   distance,
         'spans':      spans,
-        'cd':         _get_meta(dat_grp, 'cd', 'dispersion') or 17e-6,
+        'cd':         cd,
         'lpdbm':      lp_dbm,
         'modformat':  modformat,
     }
 
-    # ---------- 5) 读取波形 ----------
+    # 4) 读取波形
     n_samples = int(round(n_symbols * sps))
     y = dat_grp['recv'][:n_samples]
     x = dat_grp['sent'][:n_symbols]
-    w0 = 0.0                      # 单通道没有额外 FO
+    w0 = 0.0  # 单通道，未记录 FO
 
-    # ---------- 6) 预处理 ----------
+    # 5) 预处理
     y = y - np.mean(y, axis=0)
     y = comm.normpower(y, real=True) / np.sqrt(2)
     x = x / comm.qamscale(modformat)
 
+    return Input(y=y, x=x, w0=w0, a=a)
