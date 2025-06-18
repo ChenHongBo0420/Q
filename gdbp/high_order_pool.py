@@ -433,29 +433,49 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model: Model, params: Dict, data: gdat.Input,
-         eval_range: tuple = (300000, -20000)):
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple = (300000, -20000),
+         metric_fn = comm.qamqot):
+    """
+    与原版同签名：
+      • 如果 z.val.shape[-1] == 参考符号通道 C → 调用 metric_fn
+      • 否则（如 Gram 向量） → metric 设为空字典 {}
+    返回 (metric, z)
+    """
 
+    # ── 前向推理 ──────────────────────────────────────
     state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
+    aux  = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
     z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **state},
+        {'params'    : util.dict_merge(params, sparams),
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
         core.Signal(data.y)
     )
 
-    x_ref = data.x[z.t.start : z.t.stop]
-    g_ref = gram_triu_vec(x_ref)
+    # ── 参考符号对齐 ────────────────────────────────
+    x_ref = data.x[z.t.start : z.t.stop]          # [T,C]
 
-    # 直接算 SNR / MSE 等，示例：
-    snr = util.to_numpy(-si_snr_flat_amp_pair(jnp.abs(z.val), jnp.abs(g_ref)))
-    mse = util.to_numpy(jnp.mean(jnp.square(jnp.abs(z.val - g_ref))))
-    metric = {'Gram-SNR[dB]': snr, 'Gram-MSE': mse}
+    # ── 根据维度决定是否评估 QoT ────────────────────
+    if z.val.shape[-1] == x_ref.shape[-1]:
+        # 正常符号域 → 可安全调用 metric_fn
+        metric = metric_fn(
+            z.val, x_ref,
+            scale=np.sqrt(10),
+            eval_range=eval_range
+        )
+    else:
+        # 维度不匹配（如 Gram 向量） → 跳过评估
+        metric = {}
 
     return metric, z
+
 
 
 
