@@ -302,40 +302,43 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 
 
 def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
+            params: Dict, state: Dict,
+            y: Array,   x: Array,
+            aux: Dict,  const: Dict,
             sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
+            β_ce: float = 0.5,
+            λ_kl: float = 1e-4):
 
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ──────────────────────────────────────────
+    # ── 前向 ───────────────────────────────────────
     z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state}, core.Signal(y))
+        {'params'    : params_net,
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
+        core.Signal(y)
+    )                                       # z_out.val : [T,2C]
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
+    aligned_x = x[z_out.t.start : z_out.t.stop]       # [T,C]
+    C         = aligned_x.shape[-1]
 
-    # ── (1) SNR + EVM  ───────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    # 仅取均值分量与参考对齐
+    z_main = z_out.val[..., :C]                       # [T,C]
+
+    # ── 指标 ──────────────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_main), jnp.abs(aligned_x))
+    evm = evm_ring            (jnp.abs(z_main), jnp.abs(aligned_x))
     loss_main = snr + 0.1 * evm
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
-    loss_main += β_ce * bit_bce
+    bit_bce   = _bit_bce_loss_16qam(z_main, aligned_x)
+    loss_main = loss_main + β_ce * bit_bce
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # KL 正则仍对全部 2C 维
+    kl_ib     = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
-
     return total_loss, state_new
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -434,38 +437,35 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
+         eval_range: tuple = (300000, -20000),
+         metric_fn = comm.qamqot):
 
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+    # ── 前向 ───────────────────────────────────────
     state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
+    aux  = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
+    z, _ = jax.jit(model.module.apply, backend='cpu')(
+        {'params'    : util.dict_merge(params, sparams),
+         'aux_inputs': aux,
+         'const'     : const,
+         **state},
+        core.Signal(data.y)
+    )                                               # z.val : [T,2C]
+
+    # ── 取均值部分对齐 ─────────────────────────────
+    x_ref = data.x[z.t.start : z.t.stop]            # [T,C]
+    C     = x_ref.shape[-1]
+    z_main = z.val[..., :C]                         # [T,C]
+
+    metric = metric_fn(
+        z_main, x_ref,
+        scale=np.sqrt(10),
+        eval_range=eval_range
+    )
     return metric, z
+
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
