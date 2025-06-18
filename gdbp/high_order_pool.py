@@ -300,42 +300,47 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
 
-
+def extend_truth(x_sym: jnp.ndarray) -> jnp.ndarray:
+    """
+    x_sym  : [T,C]  复符号  
+    return : [T,2C] = [符号本身 | 每符号功率]
+    """
+    power = jnp.square(jnp.abs(x_sym))     # [T,C]  (实数)
+    return jnp.concatenate([x_sym, power], axis=-1)
+  
 def loss_fn(module: layer.Layer,
             params: Dict, state: Dict,
-            y: Array,   x: Array,
-            aux: Dict,  const: Dict,
+            y: Array,    x: Array,
+            aux: Dict,   const: Dict,
             sparams: Dict,
-            β_ce: float = 0.5,
-            λ_kl: float = 1e-4):
+            β_ce=0.5, λ_kl=1e-4):
 
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ───────────────────────────────────────
+    # ── 前向 ──────────────────────────────────────
     z_out, state_new = module.apply(
-        {'params'    : params_net,
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state},
         core.Signal(y)
-    )                                       # z_out.val : [T,2C]
+    )                                   # z_out.val : [T,2C]
 
-    aligned_x = x[z_out.t.start : z_out.t.stop]       # [T,C]
-    C         = aligned_x.shape[-1]
+    # 参考符号扩到 2C
+    x_ref = x[z_out.t.start : z_out.t.stop]         # [T,C]
+    x_ext = extend_truth(x_ref)                     # [T,2C]
 
-    # 仅取均值分量与参考对齐
-    z_main = z_out.val[..., :C]                       # [T,C]
-
-    # ── 指标 ──────────────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_main), jnp.abs(aligned_x))
-    evm = evm_ring            (jnp.abs(z_main), jnp.abs(aligned_x))
+    # ── 度量在 2C 空间 ────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(x_ext))
+    evm = evm_ring            (jnp.abs(z_out.val), jnp.abs(x_ext))
     loss_main = snr + 0.1 * evm
 
-    bit_bce   = _bit_bce_loss_16qam(z_main, aligned_x)
-    loss_main = loss_main + β_ce * bit_bce
+    # Bit-BCE 仍只用均值分量与原符号比对
+    C      = x_ref.shape[-1]
+    z_sym  = z_out.val[..., :C]                       # [T,C]
+    bit_bce = _bit_bce_loss_16qam(z_sym, x_ref)
+    loss_main += β_ce * bit_bce
 
-    # KL 正则仍对全部 2C 维
-    kl_ib     = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # KL 正则 → 全 2C 维
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
     return total_loss, state_new
 
@@ -437,34 +442,31 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
+         eval_range=(300000, -20000),
+         metric_fn=comm.qamqot):
 
-    # ── 前向 ───────────────────────────────────────
     state, aux, const, sparams = model.initvar[1:]
-    aux  = core.dict_replace(aux, {'truth': data.x})
+    aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
     z, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'    : util.dict_merge(params, sparams),
-         'aux_inputs': aux,
-         'const'     : const,
-         **state},
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **state},
         core.Signal(data.y)
-    )                                               # z.val : [T,2C]
+    )                                             # z.val : [T,2C]
 
-    # ── 取均值部分对齐 ─────────────────────────────
-    x_ref = data.x[z.t.start : z.t.stop]            # [T,C]
-    C     = x_ref.shape[-1]
-    z_main = z.val[..., :C]                         # [T,C]
+    # 参考扩到 2C
+    x_ref  = data.x[z.t.start : z.t.stop]         # [T,C]
+    x_ext  = extend_truth(x_ref)                  # [T,2C]
 
     metric = metric_fn(
-        z_main, x_ref,
+        z.val, x_ext,
         scale=np.sqrt(10),
         eval_range=eval_range
     )
     return metric, z
+
 
 
                 
