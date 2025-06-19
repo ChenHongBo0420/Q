@@ -39,40 +39,37 @@ def _estimate_lag(y_1d, x_1d):
 
 def _align_and_rotate(y, x, sps, chk: int = 12_000):
     """
-    y : ndarray (Nsamp, 2)
-    x : ndarray (Nsym , 2)
-    逐偏振估 lag → 裁剪到共同起点
-    返回裁剪后的 y, x, [lag0, lag1], φ
+    y (Nsamp,2), x (Nsym,2)  →  y_aligned, x_aligned
+    - 双偏振独立 lag，对齐到同一起点
+    - y 样本数裁成 sps 的整数倍
+    - x 只裁左端，不裁右端，让 SingleSOTA 再切
     """
-    # ---------- 1. lag per polarization ----------
-    Nchk = min(chk, len(x))
-    lag0 = _estimate_lag(y[:Nchk*sps:sps, 0], x[:Nchk, 0])
-    lag1 = _estimate_lag(y[:Nchk*sps:sps, 1], x[:Nchk, 1])
+    # 1) 估 lag
+    N = min(chk, len(x))
+    lag0 = _estimate_lag(y[:N*sps:sps, 0], x[:N, 0])
+    lag1 = _estimate_lag(y[:N*sps:sps, 1], x[:N, 1])
     lag_min = min(lag0, lag1)
 
-    # ---------- 2. 左裁剪 y 各自偏振 ----------
-    offs0 = (lag0 - lag_min) * sps
-    offs1 = (lag1 - lag_min) * sps
-    y0 = y[offs0:, 0]
-    y1 = y[offs1:, 1]
+    # 2) 偏振各自左裁
+    offs0, offs1 = (lag0 - lag_min)*sps, (lag1 - lag_min)*sps
+    y0, y1 = y[offs0:, 0], y[offs1:, 1]
 
-    # 公共“整符号”长度
+    # 3) 取可共用的“整符号”长度
     L_sym  = min(len(y0), len(y1)) // sps
     L_samp = L_sym * sps
     y_aligned = np.stack([y0[:L_samp], y1[:L_samp]], axis=1)
 
-    # ---------- 3. x 只裁左、不裁右 ----------
-    x_aligned = x[-lag_min:]                 # 起点对齐，尾端留冗余
+    # 4) x 只修起点，不裁尾端  (★关键★)
+    x_aligned = x[-lag_min:]          # 起点对齐，尾部留冗余
 
-    # ---------- 4. 常量相位 ----------
+    # 5) 常量相位
     phi = np.angle(np.mean(
-        x_aligned[:Nchk].reshape(-1) *
-        np.conj(y_aligned[:Nchk*sps:sps].reshape(-1))
+        x_aligned[:N].reshape(-1) *
+        np.conj(y_aligned[:N*sps:sps].reshape(-1))
     ))
-    y_aligned *= np.exp(1j * phi)
+    y_aligned *= np.exp(1j*phi)
 
     return y_aligned, x_aligned, [lag0, lag1], phi
-
 
 # -------------------------------------------------------------------
 # core loader
