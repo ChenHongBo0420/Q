@@ -434,33 +434,13 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (100_000, -10_000),   # 默认更保守
+         eval_range: tuple = (100_000, -10_000),
          metric_fn = comm.qamqot,
          autoscale: bool = True):
     """
     Forward-only QoT evaluation with automatic halo-trim & amplitude match.
-
-    Parameters
-    ----------
-    model : Model
-        Namedtuple returned by `model_init`.
-    params : dict or None
-        Trainable params. 传 None 时使用 model.initvar[0].
-    data : gdat.Input
-        测试集.
-    eval_range : (left, right)
-        评估区间 (符号). right 可 <0 表示从尾部回退.
-        设 None 则不再额外裁剪.
-    metric_fn : callable
-        QoT 评估函数, 例如 comm.qamqot / comm.snrstat.
-    autoscale : bool
-        若 True, 先对 z,x 做最小二乘幅度配准.
-
-    Returns
-    -------
-    metric : 输出自 metric_fn 的结果
-    z_raw  : LayerOutput, 方便事后画波形
     """
+
     # ── 1. 前向 ──────────────────────────────────────────────
     p0, state, aux, const, sparams = model.initvar
     if params is None:
@@ -477,7 +457,7 @@ def test(model: Model,
         core.Signal(data.y)
     )
 
-    # ── 2. 去掉首尾 Halo (overlaps) ─────────────────────────
+    # ── 2. 去 Halo (overlaps) ───────────────────────────────
     ol = max(int(model.overlaps), 0)
     if ol:
         l_halo = ol // 2
@@ -485,10 +465,9 @@ def test(model: Model,
         z_val = z_raw.val[l_halo: -r_halo]
     else:
         z_val = z_raw.val
-
     x_val_full = data.x[z_raw.t.start : z_raw.t.stop][:len(z_val)]
 
-    # ── 3. 额外 eval_range (可选) ───────────────────────────
+    # ── 3. eval_range (可选) ────────────────────────────────
     if eval_range is not None:
         l_off, r_off = eval_range
         r_off = len(z_val) + r_off if r_off < 0 else r_off
@@ -497,24 +476,23 @@ def test(model: Model,
         z_eval = z_val[l_off : r_off]
         x_eval = x_val_full[l_off : r_off]
     else:
-        z_eval = z_val
-        x_eval = x_val_full
+        z_eval, x_eval = z_val, x_val_full
 
-    # ── 4. 幅度自适应 (可关闭) ───────────────────────────────
+    # ── 4. Autoscale (y ← α·y) ────────────────────────────
     if autoscale:
         alpha = np.vdot(z_eval, x_eval) / np.vdot(x_eval, x_eval)
         z_eval = alpha * z_eval
-        scale_used = 1.0
-    else:
-        scale_used = 1.0  # 如需固定缩放可改成 np.sqrt(10) 等
 
     # ── 5. 计算 QoT ─────────────────────────────────────────
+    # ★★ 关键改动：16 QAM 恢复整数星座用 √10 ★★
+    scale_used = comm.qamscale(data.a.get('modformat', '16QAM'))  # √10
     metric = metric_fn(
         z_eval,
         x_eval,
         scale = scale_used
     )
     return metric, z_raw
+
 
 
                 
