@@ -434,31 +434,37 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300_000, -20_000),
-         metric_fn = comm.qamqot):
+         eval_range: tuple = (100_000, -10_000),   # 默认更保守
+         metric_fn = comm.qamqot,
+         autoscale: bool = True):
     """
-    Forward-only evaluation with automatic halo-trim.
+    Forward-only QoT evaluation with automatic halo-trim & amplitude match.
 
-    Args
-    ----
-    model      : Model namedtuple returned by `model_init`
-    params     : trainable params to evaluate; pass None to use model.initvar[0]
-    data       : gdat.Input test dataset
-    eval_range : (left, right) symbols kept for QoT eval *after* halo-trim
-                 – right can be negative (like Python slice)
-    metric_fn  : QoT metric, e.g. comm.qamqot / comm.snrstat / your own fn
+    Parameters
+    ----------
+    model : Model
+        Namedtuple returned by `model_init`.
+    params : dict or None
+        Trainable params. 传 None 时使用 model.initvar[0].
+    data : gdat.Input
+        测试集.
+    eval_range : (left, right)
+        评估区间 (符号). right 可 <0 表示从尾部回退.
+        设 None 则不再额外裁剪.
+    metric_fn : callable
+        QoT 评估函数, 例如 comm.qamqot / comm.snrstat.
+    autoscale : bool
+        若 True, 先对 z,x 做最小二乘幅度配准.
 
     Returns
     -------
-    metric  : dict (or namedtuple) returned by `metric_fn`
-    z_raw   : raw LayerOutput before halo-trim (方便做可视化)
+    metric : 输出自 metric_fn 的结果
+    z_raw  : LayerOutput, 方便事后画波形
     """
-    # ------------------------------------------------------------------
-    # 1) 组装参数 + 前向
-    # ------------------------------------------------------------------
-    params_infer, state, aux, const, sparams = model.initvar
+    # ── 1. 前向 ──────────────────────────────────────────────
+    p0, state, aux, const, sparams = model.initvar
     if params is None:
-        params = params_infer
+        params = p0
     aux = core.dict_replace(aux, {'truth': data.x})
 
     z_raw, _ = jax.jit(model.module.apply, backend='cpu')(
@@ -471,38 +477,42 @@ def test(model: Model,
         core.Signal(data.y)
     )
 
-    # ------------------------------------------------------------------
-    # 2) 去 Halo（overlaps）并裁齐参考符号
-    # ------------------------------------------------------------------
-    ol = model.overlaps                     # 正数（左右各 ol//2 与 ol-ol//2）
-    if ol > 0:
-        left_halo  = ol // 2
-        right_halo = ol - left_halo
-        z_val_trim = z_raw.val[left_halo : -right_halo]
+    # ── 2. 去掉首尾 Halo (overlaps) ─────────────────────────
+    ol = max(int(model.overlaps), 0)
+    if ol:
+        l_halo = ol // 2
+        r_halo = ol - l_halo
+        z_val = z_raw.val[l_halo: -r_halo]
     else:
-        z_val_trim = z_raw.val              # 无 Halo
+        z_val = z_raw.val
 
-    x_trim = data.x[z_raw.t.start : z_raw.t.stop][:len(z_val_trim)]
+    x_val_full = data.x[z_raw.t.start : z_raw.t.stop][:len(z_val)]
 
-    # ------------------------------------------------------------------
-    # 3) 额外 eval_range（可选）
-    # ------------------------------------------------------------------
+    # ── 3. 额外 eval_range (可选) ───────────────────────────
     if eval_range is not None:
         l_off, r_off = eval_range
-        # 把负右偏移转成正索引
-        r_off = len(z_val_trim) + r_off if r_off < 0 else r_off
-        z_eval = z_val_trim[l_off : r_off]
-        x_eval = x_trim[l_off : r_off]
+        r_off = len(z_val) + r_off if r_off < 0 else r_off
+        if r_off <= l_off:
+            raise ValueError("eval_range 裁过头，窗口为空")
+        z_eval = z_val[l_off : r_off]
+        x_eval = x_val_full[l_off : r_off]
     else:
-        z_eval, x_eval = z_val_trim, x_trim
+        z_eval = z_val
+        x_eval = x_val_full
 
-    # ------------------------------------------------------------------
-    # 4) 计算 QoT
-    # ------------------------------------------------------------------
+    # ── 4. 幅度自适应 (可关闭) ───────────────────────────────
+    if autoscale:
+        alpha = np.vdot(z_eval, x_eval) / np.vdot(x_eval, x_eval)
+        z_eval = alpha * z_eval
+        scale_used = 1.0
+    else:
+        scale_used = 1.0  # 如需固定缩放可改成 np.sqrt(10) 等
+
+    # ── 5. 计算 QoT ─────────────────────────────────────────
     metric = metric_fn(
         z_eval,
         x_eval,
-        scale = np.sqrt(10)
+        scale = scale_used
     )
     return metric, z_raw
 
