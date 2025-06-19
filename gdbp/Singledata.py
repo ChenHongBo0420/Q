@@ -26,6 +26,17 @@ def _get_meta(grp, *names):
                 return v
         g = _parent_group(g)
     return None
+    
+br   = _get_meta(dg, 'baudrate|symbolrate')
+fs   = _get_meta(dg, 'samplerate|sample_rate|fs')
+dist = _get_meta(dg, 'distance')            # km → m 或 m；数据集中已有
+spans= _get_meta(dg, 'spans|nspans')        # 段数
+if br is None or fs is None or dist is None or spans is None:
+    raise KeyError("missing baudrate / samplerate / distance / spans")
+
+sps  = int(round(fs/br))
+mod  = _get_meta(dg, 'modformat') or '16QAM'
+beta = _get_meta(dg, 'rolloff') or 0.2
 
 # -------- align per polarization --------
 def _estimate_lag(y, x):
