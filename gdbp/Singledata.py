@@ -37,31 +37,46 @@ def _estimate_lag(y_1d, x_1d):
     return (np.argmax(np.abs(correlate(y_1d, x_1d, 'full')))
             - (len(x_1d) - 1))
 
-def _align_and_rotate(y, x, sps, chk=12_000):
+def _align_and_rotate(y, x, sps, chk: int = 12_000):
     """
-    y: (Nsamp,2)   x: (Nsym,2)   -> 同步裁剪 + 常量相位补偿
-    返回 y, x, [lag0, lag1], phi
+    y: (Nsamp, 2)     x: (Nsym, 2)
+    • 各偏振独立估计整数级 lag，裁剪到同一起点
+    • 再整体做常量相位补偿
+    • 保证最终样本数一定能被 sps 整除，从而 z.val 与 x 等长
+    返回:
+        y_aligned (Nsamp',2), x_aligned (Nsym',2),
+        lag_list  = [lag_pol0, lag_pol1],
+        phi       = 常量相位(rad)
     """
-    N  = min(chk, len(x))
-    lag0 = _estimate_lag(y[:N*sps:sps, 0], x[:N, 0])
-    lag1 = _estimate_lag(y[:N*sps:sps, 1], x[:N, 1])
-    lag_min = min(lag0, lag1)
+    Nchk = min(chk, len(x))                   # 用前 Nchk 符号估 lag/phi
 
-    # 裁剪各自偏振
-    offs0 = (lag0 - lag_min) * sps
+    # ---------- 1) 逐偏振估 lag ----------
+    lag0 = _estimate_lag(y[:Nchk*sps:sps, 0], x[:Nchk, 0])
+    lag1 = _estimate_lag(y[:Nchk*sps:sps, 1], x[:Nchk, 1])
+    lag_min = min(lag0, lag1)                 # 相对最早一条对齐
+
+    # ---------- 2) 对齐并裁剪 ----------
+    offs0 = (lag0 - lag_min) * sps            # ≥0
     offs1 = (lag1 - lag_min) * sps
     y0 = y[offs0:, 0]
     y1 = y[offs1:, 1]
-    L  = min(len(y0), len(y1))
-    y  = np.stack([y0[:L], y1[:L]], axis=1)
-    x  = x[-lag_min : -lag_min + L//sps]
 
-    # 常量相位（两路一起平均）
+    # 共同可用的“整符号数”
+    L_sym = min(len(y0), len(y1)) // sps
+    L_samp = L_sym * sps                      # 对应样本数
+
+    y_aligned = np.stack([y0[:L_samp], y1[:L_samp]], axis=1)
+    x_aligned = x[-lag_min : -lag_min + L_sym]
+
+    # ---------- 3) 常量相位 ----------
     phi = np.angle(np.mean(
-        x[:N].reshape(-1) * np.conj(y[:N*sps:sps].reshape(-1))
+        x_aligned[:Nchk].reshape(-1) *
+        np.conj(y_aligned[:Nchk*sps:sps].reshape(-1))
     ))
-    y *= np.exp(1j * phi)
-    return y, x, [lag0, lag1], phi
+    y_aligned *= np.exp(1j * phi)
+
+    return y_aligned, x_aligned, [lag0, lag1], phi
+
 
 # -------------------------------------------------------------------
 # core loader
