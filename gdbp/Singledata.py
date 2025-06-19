@@ -116,7 +116,7 @@ def _loader(dat_grp, n_symbols, lp_dbm):
     x  = x / comm.qamscale(modfmt)
 
     # 5) 对齐 + 相位
-    y, x, lag_sym, phi = _align_and_rotate(y, x, sps)
+    y, x, lag_list, phi = _align_and_rotate(y, x, sps)
 
     # 6) 最终裁剪同长度
     final_sym = min(len(x), len(y)//sps)
@@ -133,7 +133,7 @@ def _loader(dat_grp, n_symbols, lp_dbm):
     cd         = cd,
     lpdbm      = lp_dbm,
     modformat  = modfmt,
-    lag_list   = lags,          # ← 列表，不要 int()
+    lag_list   = lag_list,      # ← 列表，不再用 int()
     phi_rad    = float(phi),)
 
 # ---------------- 公共 API ----------------
