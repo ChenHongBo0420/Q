@@ -1,4 +1,4 @@
-# === Singledata.py ==================================================
+# === Singledata.py ================================================
 import zarr, numpy as np
 from itertools import chain
 from scipy.signal import correlate
@@ -10,26 +10,16 @@ import labptptm1
 # ---------------- container ----------------
 Input = namedtuple('DataInput', ['y', 'x', 'w0', 'a'])
 
-# ---------------- public API ----------------
-def load(mod, lp_dbm, rep, n_symbols=1_500_000):
-    """Load single-channel 815 km PDM transmission data."""
-    dat_grps, _ = labptptm1.select(mod, lp_dbm, rep)
-    out = []
-    for dg in tqdm(dat_grps, desc='loading LabPtPtm1', leave=False):
-        out.append(_loader(dg, n_symbols, lp_dbm))
-    return out
-
-
-# ---------------- helper: metadata lookup ----------------
+# ---------------- helper: Zarr 元数据递归 ----------------
 def _parent_group(grp):
-    if not grp.path:                       # root
+    if not grp.path:            # root
         return None
     p = '/'.join(grp.path.split('/')[:-1])
     return zarr.open_group(store=grp.store, path=p, mode='r')
 
 def _get_meta(grp, *names):
-    targets = {n.lower() for n in chain.from_iterable(
-               n.split('|') for n in names)}
+    """大小写无关 + 多别名查询；一直爬到根组"""
+    targets = {n.lower() for n in chain.from_iterable(n.split('|') for n in names)}
     g = grp
     while g is not None:
         for k, v in g.attrs.items():
@@ -38,36 +28,44 @@ def _get_meta(grp, *names):
         g = _parent_group(g)
     return None
 
-
-# ---------------- helper: 对齐 & 相位补偿 ----------------
-def _estimate_lag(y_ds, x_ref):
-    """互相关估计整数符号 lag；recv 早 ⇒ lag<0。"""
-    lag = (np.argmax(np.abs(correlate(y_ds, x_ref, mode='full')))
-           - (len(x_ref) - 1))
-    return lag
+# ---------------- helper: lag & 相位 ----------------
+def _estimate_lag(y_ds_1d, x_ref):
+    """互相关估整数符号延迟；recv 早 ⇒ lag<0。"""
+    return (np.argmax(np.abs(correlate(y_ds_1d, x_ref, mode='full')))
+            - (len(x_ref) - 1))
 
 def _align_and_rotate(y, x, sps, max_sym=10_000):
-    """裁剪 y/x 消除整数 lag，并校正平均相位。"""
+    """
+    • 先用第 0 偏振估 lag，裁剪两路
+    • 估平均相位 φ 并整体旋转
+    返回裁剪后的 y/x 以及 lag, φ
+    """
     n_chk = min(max_sym, len(x))
-    y_ds  = y[:n_chk*sps:sps]
-    lag   = _estimate_lag(y_ds, x[:n_chk])
+    # —— 1) 只取第 0 偏振做互相关（保证 1-D） ——
+    y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
+    x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
+    lag  = _estimate_lag(y_ds, x_r)
 
-    if lag < 0:            # recv 早
-        y = y[-lag*sps:]
-        x = x[:len(y)//sps]
-    elif lag > 0:          # recv 晚
+    # —— 2) 同步裁剪 ——（双偏振一起动）
+    if lag < 0:          # recv 早
+        y = y[-lag*sps:]                    # 裁 y 前端
+        x = x[:len(y)//sps]                # 裁 x 尾端
+    elif lag > 0:        # recv 晚
         x = x[lag:]
         y = y[:len(x)*sps]
 
-    # 常量相位误差
-    phi = np.angle(np.mean(x[:n_chk] * np.conj(y[:n_chk*sps:sps])))
-    y   = y * np.exp(1j*phi)
+    # —— 3) 常量相位校正 ——（多偏振平均）
+    if y.ndim == 2:
+        phi = np.angle(np.mean(x[:n_chk] * np.conj(y[:n_chk*sps:sps])))
+    else:
+        phi = np.angle(np.mean(x[:n_chk] * np.conj(y[:n_chk*sps:sps])))
+
+    y *= np.exp(1j*phi)
     return y, x, lag, phi
 
-
-# ---------------- core loader ----------------
+# ---------------- 核心 loader ----------------
 def _loader(dat_grp, n_symbols, lp_dbm):
-    # 1) --- 元数据 ---
+    # 1) 读基本元数据
     baudrate   = _get_meta(dat_grp, 'baudrate|symbolrate')
     samplerate = _get_meta(dat_grp, 'samplerate|sample_rate|fs')
     if baudrate is None or samplerate is None:
@@ -78,39 +76,50 @@ def _loader(dat_grp, n_symbols, lp_dbm):
     spans    = _get_meta(dat_grp, 'spans')
     modfmt   = _get_meta(dat_grp, 'modformat') or '16QAM'
     cd       = _get_meta(dat_grp, 'cd', 'dispersion') or 17e-6
-    fo_hz    = _get_meta(dat_grp, 'fo', 'freq_offset') or 0.0   # 可能没有
+    fo_hz    = _get_meta(dat_grp, 'fo', 'freq_offset') or 0.0
 
-    # 2) --- 读取波形 ---
-    n_samples = int(n_symbols * sps)
+    # 2) 读取波形 (保证足够长，便于裁剪)
+    n_samples = int((n_symbols + 4_000) * sps)   # +4k 留冗余
     y = dat_grp['recv'][:n_samples]
     x = dat_grp['sent'][:n_symbols]
 
-    # 3) --- CFO 粗补偿（如果有 fo） ---
+    # 3) CFO 粗补偿
     if fo_hz:
         t = np.arange(len(y))
-        y = y * np.exp(-1j * 2*np.pi * fo_hz * t / samplerate)
+        y *= np.exp(-1j * 2*np.pi * fo_hz * t / samplerate)
 
-    # 4) --- 去均值 + 功率归一化 + sent 缩放 ---
-    y = y - np.mean(y, axis=0)
-    y = comm.normpower(y, real=True) / np.sqrt(2)
-    x = x / comm.qamscale(modfmt)
+    # 4) 去均值 + 归一化 + sent 缩放
+    y -= np.mean(y, axis=0)
+    y  = comm.normpower(y, real=True) / np.sqrt(2)
+    x  = x / comm.qamscale(modfmt)
 
-    # 5) --- 对齐 & 相位旋转 ---
+    # 5) 对齐 + 相位
     y, x, lag_sym, phi = _align_and_rotate(y, x, sps)
 
-    # 6) --- 打包 metadata ---
-    a = {
-        'samplerate': samplerate,
-        'symbolrate': baudrate,
-        'sps':        sps,
-        'distance':   distance,
-        'spans':      spans,
-        'cd':         cd,
-        'lpdbm':      lp_dbm,
-        'modformat':  modfmt,
-        'lag_sym':    lag_sym,
-        'phi_rad':    float(phi),
-    }
+    # 6) 最终裁剪同长度
+    final_sym = min(len(x), len(y)//sps)
+    x = x[:final_sym]
+    y = y[:final_sym*sps]
 
+    # 7) 打包
+    a = dict(
+        samplerate = samplerate,
+        symbolrate = baudrate,
+        sps        = sps,
+        distance   = distance,
+        spans      = spans,
+        cd         = cd,
+        lpdbm      = lp_dbm,
+        modformat  = modfmt,
+        lag_sym    = int(lag_sym),
+        phi_rad    = float(phi),
+    )
     return Input(y=y, x=x, w0=0.0, a=a)
-# =========================================================
+
+# ---------------- 公共 API ----------------
+def load(mod, lp_dbm, rep, n_symbols=1_500_000):
+    """Load single-channel 815 km PDM transmission data."""
+    dat_grps, _ = labptptm1.select(mod, lp_dbm, rep)
+    return [ _loader(dg, n_symbols, lp_dbm) for dg in
+             tqdm(dat_grps, desc='loading LabPtPtm1', leave=False) ]
+# ===================================================================
