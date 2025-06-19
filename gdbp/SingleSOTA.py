@@ -434,38 +434,78 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
+         eval_range: tuple = (300_000, -20_000),
+         metric_fn = comm.qamqot):
+    """
+    Forward-only evaluation with automatic halo-trim.
 
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
+    Args
+    ----
+    model      : Model namedtuple returned by `model_init`
+    params     : trainable params to evaluate; pass None to use model.initvar[0]
+    data       : gdat.Input test dataset
+    eval_range : (left, right) symbols kept for QoT eval *after* halo-trim
+                 – right can be negative (like Python slice)
+    metric_fn  : QoT metric, e.g. comm.qamqot / comm.snrstat / your own fn
 
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
+    Returns
+    -------
+    metric  : dict (or namedtuple) returned by `metric_fn`
+    z_raw   : raw LayerOutput before halo-trim (方便做可视化)
+    """
+    # ------------------------------------------------------------------
+    # 1) 组装参数 + 前向
+    # ------------------------------------------------------------------
+    params_infer, state, aux, const, sparams = model.initvar
     if params is None:
-      params = model.initvar[0]
+        params = params_infer
+    aux = core.dict_replace(aux, {'truth': data.x})
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
+    z_raw, _ = jax.jit(model.module.apply, backend='cpu')(
+        {
+            'params': util.dict_merge(params, sparams),
+            'aux_inputs': aux,
+            'const': const,
+            **state
+        },
+        core.Signal(data.y)
+    )
+
+    # ------------------------------------------------------------------
+    # 2) 去 Halo（overlaps）并裁齐参考符号
+    # ------------------------------------------------------------------
+    ol = model.overlaps                     # 正数（左右各 ol//2 与 ol-ol//2）
+    if ol > 0:
+        left_halo  = ol // 2
+        right_halo = ol - left_halo
+        z_val_trim = z_raw.val[left_halo : -right_halo]
+    else:
+        z_val_trim = z_raw.val              # 无 Halo
+
+    x_trim = data.x[z_raw.t.start : z_raw.t.stop][:len(z_val_trim)]
+
+    # ------------------------------------------------------------------
+    # 3) 额外 eval_range（可选）
+    # ------------------------------------------------------------------
+    if eval_range is not None:
+        l_off, r_off = eval_range
+        # 把负右偏移转成正索引
+        r_off = len(z_val_trim) + r_off if r_off < 0 else r_off
+        z_eval = z_val_trim[l_off : r_off]
+        x_eval = x_trim[l_off : r_off]
+    else:
+        z_eval, x_eval = z_val_trim, x_trim
+
+    # ------------------------------------------------------------------
+    # 4) 计算 QoT
+    # ------------------------------------------------------------------
+    metric = metric_fn(
+        z_eval,
+        x_eval,
+        scale = np.sqrt(10)
+    )
+    return metric, z_raw
+
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
