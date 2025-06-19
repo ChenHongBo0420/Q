@@ -35,32 +35,31 @@ def _estimate_lag(y_ds_1d, x_ref):
             - (len(x_ref) - 1))
 
 def _align_and_rotate(y, x, sps, max_sym=10_000):
-    """
-    - 用第 0 偏振估 lag（避免 2-D 互相关混维度）
-    - lag 裁剪后同步截两路
-    - 计算平均相位 φ 并整体旋转
-    """
     n_chk = min(max_sym, len(x))
-    # ---------- 1) 互相关估 lag ----------
+
+    # --- 1) 互相关估 lag（第 0 偏振） ---
     y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
     x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
-    lag  = (np.argmax(np.abs(correlate(y_ds, x_r, mode='full'))) -
-            (len(x_r) - 1))
+    lag  = (np.argmax(np.abs(correlate(y_ds, x_r, mode='full')))
+            - (len(x_r) - 1))
 
-    # ---------- 2) lag 裁剪 ----------
-    if lag < 0:                       # recv 早
+    # --- 2) 根据 lag 裁剪 ---
+    if lag < 0:          # recv 早
         y = y[-lag*sps:]
         x = x[:len(y)//sps]
-    elif lag > 0:                     # recv 晚
+    elif lag > 0:        # recv 晚
         x = x[lag:]
         y = y[:len(x)*sps]
 
-    # ---------- 3) 常量相位 ----------
-    phi = np.angle(np.mean(x[:n_chk] *
-                           np.conj(y[:n_chk*sps:sps, 0] if y.ndim==2
-                                   else y[:n_chk*sps:sps])))
+    # --- 3) 常量相位（仍用第 0 偏振） ---
+    y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
+    x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
+    phi  = np.angle(np.mean(x_r * np.conj(y_ds)))
+
+    # 同一个 φ 旋转全部偏振
     y *= np.exp(1j*phi)
     return y, x, lag, phi
+
 
 # ---------------- 核心 loader ----------------
 def _loader(dat_grp, n_symbols, lp_dbm):
