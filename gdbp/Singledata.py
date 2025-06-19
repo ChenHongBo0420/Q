@@ -36,30 +36,29 @@ def _estimate_lag(y_ds_1d, x_ref):
 
 def _align_and_rotate(y, x, sps, max_sym=10_000):
     """
-    • 先用第 0 偏振估 lag，裁剪两路
-    • 估平均相位 φ 并整体旋转
-    返回裁剪后的 y/x 以及 lag, φ
+    - 用第 0 偏振估 lag（避免 2-D 互相关混维度）
+    - lag 裁剪后同步截两路
+    - 计算平均相位 φ 并整体旋转
     """
     n_chk = min(max_sym, len(x))
-    # —— 1) 只取第 0 偏振做互相关（保证 1-D） ——
+    # ---------- 1) 互相关估 lag ----------
     y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
     x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
-    lag  = _estimate_lag(y_ds, x_r)
+    lag  = (np.argmax(np.abs(correlate(y_ds, x_r, mode='full'))) -
+            (len(x_r) - 1))
 
-    # —— 2) 同步裁剪 ——（双偏振一起动）
-    if lag < 0:          # recv 早
-        y = y[-lag*sps:]                    # 裁 y 前端
-        x = x[:len(y)//sps]                # 裁 x 尾端
-    elif lag > 0:        # recv 晚
+    # ---------- 2) lag 裁剪 ----------
+    if lag < 0:                       # recv 早
+        y = y[-lag*sps:]
+        x = x[:len(y)//sps]
+    elif lag > 0:                     # recv 晚
         x = x[lag:]
         y = y[:len(x)*sps]
 
-    # —— 3) 常量相位校正 ——（多偏振平均）
-    if y.ndim == 2:
-        phi = np.angle(np.mean(x[:n_chk] * np.conj(y[:n_chk*sps:sps])))
-    else:
-        phi = np.angle(np.mean(x[:n_chk] * np.conj(y[:n_chk*sps:sps])))
-
+    # ---------- 3) 常量相位 ----------
+    phi = np.angle(np.mean(x[:n_chk] *
+                           np.conj(y[:n_chk*sps:sps, 0] if y.ndim==2
+                                   else y[:n_chk*sps:sps])))
     y *= np.exp(1j*phi)
     return y, x, lag, phi
 
