@@ -35,30 +35,54 @@ def _estimate_lag(y_ds_1d, x_ref):
             - (len(x_ref) - 1))
 
 def _align_and_rotate(y, x, sps, max_sym=10_000):
+    """
+    双偏振：分别估 lag_p，再把两路对齐到同一参考帧
+    返回裁剪后的 y (N×2)、x (N×2)、lag_list、phi
+    """
     n_chk = min(max_sym, len(x))
+    P     = y.shape[1] if y.ndim == 2 else 1
 
-    # --- 1) 互相关估 lag（第 0 偏振） ---
-    y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
-    x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
-    lag  = (np.argmax(np.abs(correlate(y_ds, x_r, mode='full')))
-            - (len(x_r) - 1))
+    # 1) 逐路估 lag
+    lags = []
+    for p in range(P):
+        y_ds = y[:n_chk*sps:sps, p] if P == 2 else y[:n_chk*sps:sps]
+        x_r  = x[:n_chk, p]         if P == 2 else x[:n_chk]
+        lag  = _estimate_lag(y_ds, x_r)
+        lags.append(lag)
+    lag_min = min(lags)             # 最早那一路
 
-    # --- 2) 根据 lag 裁剪 ---
-    if lag < 0:          # recv 早
-        y = y[-lag*sps:]
-        x = x[:len(y)//sps]
-    elif lag > 0:        # recv 晚
-        x = x[lag:]
-        y = y[:len(x)*sps]
+    # 2) 裁剪每一路 y，使它们都与 lag_min 对齐
+    if P == 2:
+        y_aligned = []
+        for p, lag_p in enumerate(lags):
+            offset = (lag_p - lag_min) * sps   # ≥0
+            y_aligned.append(y[offset: , p])
+        # 截成同一最短长度
+        Lmin = min(len(y_aligned[0]), len(y_aligned[1]))
+        y = np.stack([ya[:Lmin] for ya in y_aligned], axis=1)
+        x = x[-lag_min : -lag_min + Lmin//sps]
+    else:
+        # 单偏振保持旧逻辑
+        if lag_min < 0:
+            y = y[-lag_min*sps:]
+        elif lag_min > 0:
+            x = x[lag_min:]
+        L = min(len(y)//sps, len(x))
+        y = y[:L*sps]; x = x[:L]
 
-    # --- 3) 常量相位（仍用第 0 偏振） ---
-    y_ds = y[:n_chk*sps:sps, 0] if y.ndim == 2 else y[:n_chk*sps:sps]
-    x_r  = x[:n_chk, 0]         if x.ndim == 2 else x[:n_chk]
-    phi  = np.angle(np.mean(x_r * np.conj(y_ds)))
+    # 3) 常量相位（两路合并估）
+    if P == 2:
+        phi = np.angle(np.mean(
+            x[:n_chk].flatten() *
+            np.conj(y[:n_chk*sps:sps].flatten())
+        ))
+    else:
+        phi = np.angle(np.mean(x[:n_chk] *
+                               np.conj(y[:n_chk*sps:sps])))
 
-    # 同一个 φ 旋转全部偏振
     y *= np.exp(1j*phi)
-    return y, x, lag, phi
+    return y, x, lags, phi
+
 
 
 # ---------------- 核心 loader ----------------
