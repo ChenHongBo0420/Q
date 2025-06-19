@@ -125,18 +125,16 @@ def _loader(dat_grp, n_symbols, lp_dbm):
 
     # 7) 打包
     a = dict(
-        samplerate = samplerate,
-        symbolrate = baudrate,
-        sps        = sps,
-        distance   = distance,
-        spans      = spans,
-        cd         = cd,
-        lpdbm      = lp_dbm,
-        modformat  = modfmt,
-        lag_sym    = int(lag_sym),
-        phi_rad    = float(phi),
-    )
-    return Input(y=y, x=x, w0=0.0, a=a)
+    samplerate = samplerate,
+    symbolrate = baudrate,
+    sps        = sps,
+    distance   = distance,
+    spans      = spans,
+    cd         = cd,
+    lpdbm      = lp_dbm,
+    modformat  = modfmt,
+    lag_list   = lags,          # ← 列表，不要 int()
+    phi_rad    = float(phi),)
 
 # ---------------- 公共 API ----------------
 def load(mod, lp_dbm, rep, n_symbols=1_500_000):
