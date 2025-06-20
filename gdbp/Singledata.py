@@ -76,7 +76,7 @@ def _loader(dg, n_sym, lp_dbm):
     a['CD'] = 13.367
 
     # 7) default initial frequency offset (cycles/symbol)
-    w0 = 0.0
+    w0 = 0.0144
 
     return Input(y=y, x=x, w0=w0, a=a)
 
