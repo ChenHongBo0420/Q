@@ -45,7 +45,7 @@ def _loader(dg, n_sym, lp_dbm):
     sps = int(round(fs / br))
 
     # 3) read raw data
-    y = dg['recv'][: (n_sym + 4_000) * sps]
+    y = dg['recv'][: n_sym * sps]
     x = dg['sent'][: n_sym]
 
     # 4) normalize power & remove DC
