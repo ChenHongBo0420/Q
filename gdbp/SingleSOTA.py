@@ -430,68 +430,41 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                                 
-                       
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (100_000, -10_000),
-         metric_fn = comm.qamqot,
-         autoscale: bool = True):
-    """
-    Forward-only QoT evaluation with automatic halo-trim & amplitude match.
-    """
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-    # ── 1. 前向 ──────────────────────────────────────────────
-    p0, state, aux, const, sparams = model.initvar
-    if params is None:
-        params = p0
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
+    state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+      params = model.initvar[0]
 
-    z_raw, _ = jax.jit(model.module.apply, backend='cpu')(
-        {
-            'params': util.dict_merge(params, sparams),
-            'aux_inputs': aux,
-            'const': const,
-            **state
-        },
-        core.Signal(data.y)
-    )
-
-    # ── 2. 去 Halo (overlaps) ───────────────────────────────
-    ol = max(int(model.overlaps), 0)
-    if ol:
-        l_halo = ol // 2
-        r_halo = ol - l_halo
-        z_val = z_raw.val[l_halo: -r_halo]
-    else:
-        z_val = z_raw.val
-    x_val_full = data.x[z_raw.t.start : z_raw.t.stop][:len(z_val)]
-
-    # ── 3. eval_range (可选) ────────────────────────────────
-    if eval_range is not None:
-        l_off, r_off = eval_range
-        r_off = len(z_val) + r_off if r_off < 0 else r_off
-        if r_off <= l_off:
-            raise ValueError("eval_range 裁过头，窗口为空")
-        z_eval = z_val[l_off : r_off]
-        x_eval = x_val_full[l_off : r_off]
-    else:
-        z_eval, x_eval = z_val, x_val_full
-
-    # ── 4. Autoscale (y ← α·y) ────────────────────────────
-    if autoscale:
-        alpha = np.vdot(z_eval, x_eval) / np.vdot(x_eval, x_eval)
-        z_eval = alpha * z_eval
-
-    # ── 5. 计算 QoT ─────────────────────────────────────────
-    # ★★ 关键改动：16 QAM 恢复整数星座用 √10 ★★
-    scale_used = comm.qamscale(data.a.get('modformat', '16QAM'))  # √10
-    metric = metric_fn(
-        z_eval,
-        x_eval,
-        scale = scale_used
-    )
-    return metric, z_raw
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
 
 
 
