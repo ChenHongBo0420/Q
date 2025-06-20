@@ -83,7 +83,7 @@ def _loader(dg, n_sym, lp_dbm):
 # -------------------------------------------------------------------
 # public API
 # -------------------------------------------------------------------
-def load(mod, lp_dbm, rep, n_symbols=1_500_000):
+def load(mod, lp_dbm, rep, n_symbols=150000):
     """
     Load the 815km dataset from labptptm1, producing a list of Inputs.
     
