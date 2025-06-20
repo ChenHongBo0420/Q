@@ -44,8 +44,7 @@ def loader(dat_grp, sup_grp, n_symbol=1500000):
     # download data
     y = dat_grp['recv'][:n_sample]
     x = dat_grp['sent'][:n_symbol]
-    # w0 = sup_grp['nfo'][0] * sps # initial FO at symbol period used to initialize FOE
-    w0 = 0
+    w0 = sup_grp['nfo'][0] * sps # initial FO at symbol period used to initialize FOE
     # preprocessing
     y -= np.mean(y, axis=0) # block DC
     y = comm.normpower(y, real=True) / np.sqrt(2) # normalize inputs
