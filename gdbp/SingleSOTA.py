@@ -429,22 +429,22 @@ def train(model: Model,
                                                    module_state, y, x, aux,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
-                                
+
 def test(
     model: Model,
     params: Dict,
     data: gdat.Input,
-    burn_in: int = 300_000,
-    burn_out: int = 20_000,
+    burn_in_ratio: float = 0.1,
+    burn_out_ratio: float = 0.1,
     metric_fn=comm.qamqot
 ):
     """
-    改进后的测试函数：
-      1) forward 得到 z.val
-      2) 同时对 z.val 和 data.x 按 burn_in/burn_out 切片
-      3) 调用 metric_fn 时只传 (0,0) 让它不再做额外切片
+    动态版测试函数：
+      - burn_in_ratio/burn_out_ratio：丢弃前后多少比例的样本（0~1）
+      - 内部自动根据 data.y 长度计算 burn_in/burn_out
+      - 同时对 z.val 和 data.x 做切片，再以 eval_range=(0,0) 调用 qamqot
     """
-    # —— 1) forward —— 
+    # —— 1) forward 得到等化后输出 z.val —— 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
@@ -457,17 +457,16 @@ def test(
         **state
     }, core.Signal(data.y))
 
-    # —— 2) 同步切片 —— 
-    Lz = z.val.shape[0]
-    bi = min(burn_in, Lz // 2)
-    bo = min(burn_out, Lz // 5)
-    start, end = bi, Lz - bo
+    # —— 2) 动态计算要丢弃的样本数 —— 
+    L = z.val.shape[0]
+    burn_in  = int(L * burn_in_ratio)
+    burn_out = int(L * burn_out_ratio)
+    start, end = burn_in, L - burn_out
 
     y_trim = z.val[start:end]
     x_trim = data.x[start:end]
 
-    # —— 3) 调用 qamqot —— 
-    #    这里 eval_range=(0,0) 表示不再做任何切片
+    # —— 3) 调用 qamqot —— 不再做内部切片 —— 
     metric = metric_fn(
         y_trim,
         x_trim,
@@ -475,6 +474,7 @@ def test(
         eval_range=(0, 0)
     )
     return metric, z
+
 
 
                 
