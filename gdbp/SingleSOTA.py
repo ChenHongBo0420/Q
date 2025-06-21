@@ -430,40 +430,47 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                                 
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+def test(
+    model: Model,
+    params: Dict,
+    data: gdat.Input,
+    burn_in: int = 300_000,
+    burn_out: int = 20_000,
+    metric_fn=comm.qamqot
+):
+    """
+    改进后的测试函数：
+      - 不对 x 手动切片；让 metric_fn 自己按 eval_range 做切片
+      - burn_in/burn_out 根据 data.y 长度自动截断
+    """
+    # —— 1) forward —— 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
+    z, _ = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux,
+        'const': const,
+        **state
+    }, core.Signal(data.y))
+
+    # —— 2) 动态计算 eval_range —— 
+    L = z.val.shape[0]
+    # 确保 burn_in 不超过总长度的 50%，burn_out 不超过 20%
+    bi = min(burn_in, L // 2)
+    bo = min(burn_out, L // 5)
+    eval_range = (bi, -bo)
+
+    # —— 3) 评估 —— 
+    # 注意：这里传入的是完整的 data.x，让 qamqot 自己 slice
+    metric = metric_fn(
+        z.val,
+        data.x,
+        scale=np.sqrt(10),
+        eval_range=eval_range
+    )
     return metric, z
 
 
