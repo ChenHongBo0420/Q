@@ -440,8 +440,9 @@ def test(
 ):
     """
     改进后的测试函数：
-      - 不对 x 手动切片；让 metric_fn 自己按 eval_range 做切片
-      - burn_in/burn_out 根据 data.y 长度自动截断
+      1) forward 得到 z.val
+      2) 同时对 z.val 和 data.x 按 burn_in/burn_out 切片
+      3) 调用 metric_fn 时只传 (0,0) 让它不再做额外切片
     """
     # —— 1) forward —— 
     state, aux, const, sparams = model.initvar[1:]
@@ -456,23 +457,24 @@ def test(
         **state
     }, core.Signal(data.y))
 
-    # —— 2) 动态计算 eval_range —— 
-    L = z.val.shape[0]
-    # 确保 burn_in 不超过总长度的 50%，burn_out 不超过 20%
-    bi = min(burn_in, L // 2)
-    bo = min(burn_out, L // 5)
-    eval_range = (bi, -bo)
+    # —— 2) 同步切片 —— 
+    Lz = z.val.shape[0]
+    bi = min(burn_in, Lz // 2)
+    bo = min(burn_out, Lz // 5)
+    start, end = bi, Lz - bo
 
-    # —— 3) 评估 —— 
-    # 注意：这里传入的是完整的 data.x，让 qamqot 自己 slice
+    y_trim = z.val[start:end]
+    x_trim = data.x[start:end]
+
+    # —— 3) 调用 qamqot —— 
+    #    这里 eval_range=(0,0) 表示不再做任何切片
     metric = metric_fn(
-        z.val,
-        data.x,
+        y_trim,
+        x_trim,
         scale=np.sqrt(10),
-        eval_range=eval_range
+        eval_range=(0, 0)
     )
     return metric, z
-
 
 
                 
