@@ -433,7 +433,7 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(80000, 0),
+         eval_range: tuple=(100000, 0),
          metric_fn=comm.qamqot):
     ''' testing, a simple forward pass
 
