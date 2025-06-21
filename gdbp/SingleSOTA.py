@@ -430,51 +430,41 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
 
-def test(
-    model: Model,
-    params: Dict,
-    data: gdat.Input,
-    burn_in_ratio: float = 0.1,
-    burn_out_ratio: float = 0.1,
-    metric_fn=comm.qamqot
-):
-    """
-    动态版测试函数：
-      - burn_in_ratio/burn_out_ratio：丢弃前后多少比例的样本（0~1）
-      - 内部自动根据 data.y 长度计算 burn_in/burn_out
-      - 同时对 z.val 和 data.x 做切片，再以 eval_range=(0,0) 调用 qamqot
-    """
-    # —— 1) forward 得到等化后输出 z.val —— 
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(30000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-        params = model.initvar[0]
+      params = model.initvar[0]
 
-    z, _ = jit(model.module.apply, backend='cpu')({
-        'params': util.dict_merge(params, sparams),
-        'aux_inputs': aux,
-        'const': const,
-        **state
-    }, core.Signal(data.y))
-
-    # —— 2) 动态计算要丢弃的样本数 —— 
-    L = z.val.shape[0]
-    burn_in  = int(L * burn_in_ratio)
-    burn_out = int(L * burn_out_ratio)
-    start, end = burn_in, L - burn_out
-
-    y_trim = z.val[start:end]
-    x_trim = data.x[start:end]
-
-    # —— 3) 调用 qamqot —— 不再做内部切片 —— 
-    metric = metric_fn(
-        y_trim,
-        x_trim,
-        scale=np.sqrt(10),
-        eval_range=(0, 0)
-    )
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
     return metric, z
-
 
 
                 
