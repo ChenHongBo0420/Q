@@ -430,60 +430,41 @@ def train(model: Model,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
 
-def test_safe(model: Model,
-              params: Dict,
-              data: gdat.Input,
-              eval_range: tuple = (30000, -20000),
-              metric_fn      = comm.qamqot,
-              max_lag: int   = 4096):
-    """
-    调用方式与旧 test 完全一致，但保证:
-    1. 先用互相关在 ±max_lag 范围内找最佳 lag
-    2. 把 z.val、真值 x_ref 裁为同长
-    3. 再调用 metric_fn（默认 comm.qamqot）
-    """
-    # ---------- 1. 前向 ----------
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-        params = model.initvar[0]
+      params = model.initvar[0]
 
-    z, _ = jit(model.module.apply, backend='cpu')(
-        {'params': util.dict_merge(params, sparams),
-         'aux_inputs': aux, 'const': const, **state},
-        core.Signal(data.y))
-
-    y_hat = z.val
-    x_ref = data.x[z.t.start:z.t.stop]
-
-    # ---------- 2. 粗互相关找 lag ----------
-    # 仅用实部加速；lag >0 代表 y_hat 领先
-    Lc = min(len(y_hat), len(x_ref), 2*max_lag)
-    corr = np.correlate(
-        np.real(y_hat[:Lc]), np.real(x_ref[:Lc]), mode='full')
-    mid  = len(corr)//2
-    window = corr[mid-max_lag: mid+max_lag+1]
-    lag = int(np.argmax(window) - max_lag)
-
-    # ---------- 3. 同步裁切 ----------
-    if   lag > 0:
-        y_hat = y_hat[lag:]
-        x_ref = x_ref[:len(y_hat)]
-    elif lag < 0:
-        x_ref = x_ref[-lag:]
-        y_hat = y_hat[:len(x_ref)]
-
-    # 防止 eval_range 再截出负长
-    eval_len = len(y_hat) + eval_range[1] - eval_range[0]
-    assert eval_len > 0, "eval_range 太长，裁完为空，请缩短或加长数据"
-
-    # ---------- 4. QoT 评估 ----------
-    metric = metric_fn(y_hat,
-                       x_ref,
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
-
 
 
                 
