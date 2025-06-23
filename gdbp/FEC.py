@@ -23,7 +23,6 @@ Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
-
 ## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
@@ -262,25 +261,32 @@ def _bit_bce_loss(pred: Array, target: Array)->Array:
     return (bce * BIT_WEIGHTS).mean()
 
 def loss_fn(module: layer.Layer,
-            params: TDict, state: TDict,
+            params: Dict, state: Dict,
             y: Array, x: Array,
-            aux: TDict, const: TDict, sparams: TDict,
-            β=0.5, λ=1e-4):
+            aux: Dict, const: Dict, sparams: Dict,
+            β: float = 0.5, λ: float = 1e-4):
+
+    # ① 前向
     p_all = util.dict_merge(params, sparams)
     z_sig, state = module.apply(
         {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state}, core.Signal(y))
+         'const': const, **state},
+        core.Signal(y))
 
-    x_aln = x[z_sig.t.start:z_sig.t.stop]
-    # ---- main metrics ----
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    main = -snr + 0.1*evm                           # minimisation
+    # ② 对齐
+    x_aln = x[z_sig.t.start : z_sig.t.stop]
 
-    bce  = _bit_bce_loss(z_sig.val, x_aln)
-    kl   = 0.5 * jnp.mean(jnp.abs(z_sig.val)**2)
+    # ③ 主损失：SNR + 0.1·EVM
+    snr = si_snr_flat_amp_pair(jnp.abs(z_sig.val), jnp.abs(x_aln))
+    evm = evm_ring           (jnp.abs(z_sig.val), jnp.abs(x_aln))
+    main = snr + 0.1 * evm            # 已是“越小越好”的度量
 
-    return main + β*bce + λ*kl , state
+    # ④ Bit-BCE + KL
+    bce = _bit_bce_loss(z_sig.val, x_aln)
+    kl  = 0.5 * jnp.mean(jnp.abs(z_sig.val) ** 2)
+
+    return main + β * bce + λ * kl , state
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
