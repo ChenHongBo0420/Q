@@ -247,45 +247,97 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
+CONST_16QAM = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j
+], dtype=jnp.complex64) / jnp.sqrt(10.)
 
-def _bit_bce_loss(pred: Array, target: Array)->Array:
-    logits = -jnp.square(jnp.abs(pred[...,None]-CONST))
-    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    p1 = jnp.exp(logp) @ BITS.astype(jnp.float32)   # (N,4)
-    p0 = 1. - p1
+# 2. CE-loss helper  (可 jit / vmap)
+def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    """
+    pred_sym : [N] complex  — 网络输出符号
+    true_sym : [N] complex  — 对齐后的发送符号
+    return    : 标量 cross-entropy 损失
+    """
+    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
+    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
 
-    idx  = jnp.argmin(jnp.abs(target[...,None]-CONST)**2, axis=-1)
-    bits = BITS[idx].astype(jnp.float32)
+    # 每个真实符号对应的 QAM 点下标
+    label_idx = jnp.argmin(
+        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
+        axis=-1)                                                      # [N]
 
-    bce  = -(bits*jnp.log(p1+1e-12)+(1.-bits)*jnp.log(p0+1e-12))
-    return (bce * BIT_WEIGHTS).mean()
+    # softmax-cross-entropy:
+    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
+
+    return ce.mean()
+
+_bits = (
+    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
+    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
+    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
+    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
+)
+BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
+# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
+BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
+
+def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
+    probs   = jnp.exp(logp)                                             # [N,16]
+
+    # bit 概率 & 真值
+    p1 = (probs @ BIT_MAP)                    # P(bit=1)
+    p0 = 1.0 - p1
+
+    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
+    bits = BIT_MAP[idx]                       # 真值 bits
+
+    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
+    return (bce * BIT_WEIGHTS).mean()          # 加权平均
+        
+
 
 def loss_fn(module: layer.Layer,
-            params: Dict, state: Dict,
-            y: Array, x: Array,
-            aux: Dict, const: Dict, sparams: Dict,
-            β: float = 0.5, λ: float = 1e-4):
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
+            sparams: Dict,
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
-    # ① 前向
-    p_all = util.dict_merge(params, sparams)
-    z_sig, state = module.apply(
-        {'params': p_all, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+    params_net = util.dict_merge(params, sparams)
 
-    # ② 对齐
-    x_aln = x[z_sig.t.start : z_sig.t.stop]
+    # ── 前向 ──────────────────────────────────────────
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
 
-    # ③ 主损失：SNR + 0.1·EVM
-    snr = si_snr_flat_amp_pair(jnp.abs(z_sig.val), jnp.abs(x_aln))
-    evm = evm_ring           (jnp.abs(z_sig.val), jnp.abs(x_aln))
-    main = snr + 0.1 * evm            # 已是“越小越好”的度量
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ④ Bit-BCE + KL
-    bce = _bit_bce_loss(z_sig.val, x_aln)
-    kl  = 0.5 * jnp.mean(jnp.abs(z_sig.val) ** 2)
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    loss_main = snr + 0.1 * evm
 
-    return main + β * bce + λ * kl , state
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    loss_main += β_ce * bit_bce
+
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    total_loss = loss_main + λ_kl * kl_ib
+
+    return total_loss, state_new
+
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
