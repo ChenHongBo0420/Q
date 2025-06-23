@@ -420,28 +420,45 @@ def train(model: Model, ds: gdat.Input,
         yield float(loss), opt.params_fn(opt_state), st
                                 
                        
-def test(model: Model, params, ds: gdat.Input):
-    st, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': ds.x})
-    if params is None: params = model.initvar[0]
+def test(model: Model,
+         params: Dict | None,
+         data: gdat.Input,
+         eval_range: tuple = (300_000, -20_000),
+         metric_fn       = comm.qamqot):
 
-    z_sig,_ = model.module.apply(
-        {'params': util.dict_merge(params,sparams),
-         'aux_inputs': aux, 'const': const, **st},
-        core.Signal(ds.y))
+    # ---------- 0) 取初始化时的 state / const ----------
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:                      # 若测试时不给参数，用 init 时的
+        params = model.initvar[0]
 
-    sps = z_sig.t.sps
-    x_ref = jnp.repeat(ds.x, sps, axis=0)
-    x_aln = x_ref[z_sig.t.start:z_sig.t.stop]
-    L = min(z_sig.val.shape[0], x_aln.shape[0])
+    # ---------- 1) 前向 ----------
+    z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
+        {'params'     : util.dict_merge(params, sparams),
+         'aux_inputs' : aux,
+         'const'      : const,
+         **state},
+        core.Signal(data.y))
+
+    # ---------- 2) 与发送符号对齐 ----------
+    sps   = z_sig.t.sps                      # =2
+    x_ref = jnp.repeat(data.x, sps, axis=0)  # (N_sym*sps,2)
+    x_aln = x_ref[z_sig.t.start : z_sig.t.stop]
+    L     = min(z_sig.val.shape[0], x_aln.shape[0])
     z_val, x_val = z_sig.val[:L], x_aln[:L]
 
-    # --- soft-LLR ------------
-    sigma2 = jnp.mean(jnp.abs(z_val-x_val)**2)
-    llr = llr_maxlog(z_val[:,0], sigma2)            # (L,4)
+    # ---------- 3) 计算 LLR (Max-Log) ----------
+    #   σ² 估成均方误差；如果你已有更稳的估计器，可替换
+    sigma2 = jnp.mean(jnp.abs(z_val - x_val) ** 2)
+    llr    = llr_maxlog(z_val[:, 0], sigma2)      # (L,4) — 只取一路做示例
+    # 若想双极化都输出，可 llr = jnp.stack([...], axis=-1)
 
-    metric = comm.qamqot(z_val, x_val, scale=jnp.sqrt(10.))
-    return metric, z_sig, llr
+    # ---------- 4) QoT / Q-factor / BER ----------
+    metric = metric_fn(z_val, x_val,
+                       scale=jnp.sqrt(10.),     # 16-QAM 硬判时用
+                       eval_range=eval_range)
+
+    return metric, z_sig, llr   
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
