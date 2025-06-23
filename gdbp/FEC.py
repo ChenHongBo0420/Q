@@ -17,6 +17,8 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
+from qam16_soft import CONST, BITS, sym2bit, llr_maxlog
+BIT_WEIGHTS = jnp.array([1.2,1.0,1.0,0.8], dtype=jnp.float32)
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -246,96 +248,39 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
-CONST_16QAM = jnp.array([
-    -3-3j, -3-1j, -3+3j, -3+1j,
-    -1-3j, -1-1j, -1+3j, -1+1j,
-     3-3j,  3-1j,  3+3j,  3+1j,
-     1-3j,  1-1j,  1+3j,  1+1j
-], dtype=jnp.complex64) / jnp.sqrt(10.)
 
-# 2. CE-loss helper  (可 jit / vmap)
-def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    """
-    pred_sym : [N] complex  — 网络输出符号
-    true_sym : [N] complex  — 对齐后的发送符号
-    return    : 标量 cross-entropy 损失
-    """
-    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+def _bit_bce_loss(pred: Array, target: Array)->Array:
+    logits = -jnp.square(jnp.abs(pred[...,None]-CONST))
+    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    p1 = jnp.exp(logp) @ BITS.astype(jnp.float32)   # (N,4)
+    p0 = 1. - p1
 
-    # 每个真实符号对应的 QAM 点下标
-    label_idx = jnp.argmin(
-        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
-        axis=-1)                                                      # [N]
+    idx  = jnp.argmin(jnp.abs(target[...,None]-CONST)**2, axis=-1)
+    bits = BITS[idx].astype(jnp.float32)
 
-    # softmax-cross-entropy:
-    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
-
-    return ce.mean()
-
-_bits = (
-    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
-    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
-    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
-    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
-)
-BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
-# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
-
-def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
-    probs   = jnp.exp(logp)                                             # [N,16]
-
-    # bit 概率 & 真值
-    p1 = (probs @ BIT_MAP)                    # P(bit=1)
-    p0 = 1.0 - p1
-
-    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits = BIT_MAP[idx]                       # 真值 bits
-
-    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
-    return (bce * BIT_WEIGHTS).mean()          # 加权平均
-        
-
+    bce  = -(bits*jnp.log(p1+1e-12)+(1.-bits)*jnp.log(p0+1e-12))
+    return (bce * BIT_WEIGHTS).mean()
 
 def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
-
-    params_net = util.dict_merge(params, sparams)
-
-    # ── 前向 ──────────────────────────────────────────
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux,
+            params: TDict, state: TDict,
+            y: Array, x: Array,
+            aux: TDict, const: TDict, sparams: TDict,
+            β=0.5, λ=1e-4):
+    p_all = util.dict_merge(params, sparams)
+    z_sig, state = module.apply(
+        {'params': p_all, 'aux_inputs': aux,
          'const': const, **state}, core.Signal(y))
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
-
-    # ── (1) SNR + EVM  ───────────────────────────────
+    x_aln = x[z_sig.t.start:z_sig.t.stop]
+    # ---- main metrics ----
     snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    loss_main = snr + 0.1 * evm
+    main = -snr + 0.1*evm                           # minimisation
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
-    loss_main += β_ce * bit_bce
+    bce  = _bit_bce_loss(z_sig.val, x_aln)
+    kl   = 0.5 * jnp.mean(jnp.abs(z_sig.val)**2)
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
-    total_loss = loss_main + λ_kl * kl_ib
-
-    return total_loss, state_new
+    return main + β*bce + λ*kl , state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -398,74 +343,47 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-def train(model: Model,
-          data: gdat.Input,
-          batch_size: int = 500,
-          n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
-
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
-
-    params, module_state, aux, const, sparams = model.initvar
+def train(model: Model, ds: gdat.Input,
+          batch=500, n_iter=None,
+          opt=optim.adam(
+              optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
+    params, st, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_batch, gen = get_train_batch(ds, batch, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
-        if i >= n_iter: break
+    for i,(y,x) in tqdm(enumerate(gen), total=n_iter):
+        if i>=n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-        yield loss, opt.params_fn(opt_state), module_state
+        loss, opt_state, st = update_step(
+            model.module, opt, i, opt_state,
+            st, y, x, aux, const, sparams)
+        yield float(loss), opt.params_fn(opt_state), st
                                 
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
+def test(model: Model, params, ds: gdat.Input):
+    st, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': ds.x})
+    if params is None: params = model.initvar[0]
 
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
+    z_sig,_ = model.module.apply(
+        {'params': util.dict_merge(params,sparams),
+         'aux_inputs': aux, 'const': const, **st},
+        core.Signal(ds.y))
 
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
+    sps = z_sig.t.sps
+    x_ref = jnp.repeat(ds.x, sps, axis=0)
+    x_aln = x_ref[z_sig.t.start:z_sig.t.stop]
+    L = min(z_sig.val.shape[0], x_aln.shape[0])
+    z_val, x_val = z_sig.val[:L], x_aln[:L]
 
-    state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
+    # --- soft-LLR ------------
+    sigma2 = jnp.mean(jnp.abs(z_val-x_val)**2)
+    llr = llr_maxlog(z_val[:,0], sigma2)            # (L,4)
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
+    metric = comm.qamqot(z_val, x_val, scale=jnp.sqrt(10.))
+    return metric, z_sig, llr
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
