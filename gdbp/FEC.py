@@ -1,7 +1,7 @@
 # CE/BCE loss weighted bit-BCE
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from commplax import util, comm, cxopt, op, optim
+from commplax import util, comm, cxopt, op, optim, qam16_soft
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
