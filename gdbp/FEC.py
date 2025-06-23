@@ -17,7 +17,7 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
-from qam16_soft import CONST, BITS, sym2bit, llr_maxlog
+from commplax.qam16_soft import CONST, BITS, sym2bit, llr_maxlog
 BIT_WEIGHTS = jnp.array([1.2,1.0,1.0,0.8], dtype=jnp.float32)
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
