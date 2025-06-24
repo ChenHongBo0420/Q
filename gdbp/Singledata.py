@@ -39,68 +39,51 @@ def _get_meta(grp, *names, default=None):
 # -------------------------------------------------------------------
 # core loader for a single group  ★ 自动搜索 bits/src ★
 # -------------------------------------------------------------------
+from zarr.errors import ArrayNotFoundError       # 记得放在文件最上方
+
+# -------------------------------------------------------------------
 def _loader(dg, n_sym, lp_dbm):
-    # ---------- 1. metadata ----------
-    br  = _get_meta(dg, 'baudrate|symbolrate')
-    fs  = _get_meta(dg, 'samplerate|sample_rate|fs')
+    # -------- 1. metadata ---------
+    br = _get_meta(dg, 'baudrate|symbolrate')
+    fs = _get_meta(dg, 'samplerate|sample_rate|fs')
     modfmt = (_get_meta(dg, 'modformat', default='16QAM') or '16QAM').upper()
     sps = int(round(fs / br))
 
-    # ---------- 2. recv / sent -------
+    # -------- 2. recv / sent ------
     y = dg['recv'][: n_sym * sps]
     x = dg['sent'][: n_sym]
 
-    # ---------- 3. 自动定位 src bits ---
+    # -------- 3. 定位并读取 src ----
     root = zarr.open_group(store=dg.store, path='/', mode='r')
     mfl  = modfmt.lower()
-    src_paths = []
+    src_grp_path = f"source/{modfmt}65536/src"     # 你的固定规则
+    print(f"[Singledata] using src bits → {src_grp_path}")
 
-    def walk_groups(grp, pref=''):
-        # arrays在当前 group
-        for a in grp.array_keys():
-            if 'src' in a.lower():
-                src_paths.append(('array', f'{pref}{a}'))
-        # 子groups
-        for g in grp.group_keys():
-            gpath = f'{pref}{g}'
-            if g.lower().endswith('src'):
-                src_paths.append(('group', gpath))
-            walk_groups(grp[g], gpath + '/')
+    try:
+        # 3a. 直接当 array 读
+        bits = zarr.open_array(root.store, src_grp_path)[: n_sym]
+    except ArrayNotFoundError:
+        # 3b. 当 group → 拼子数组
+        g = zarr.open_group(root.store, src_grp_path, mode='r')
+        sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
+        bits = np.concatenate([g[k][:] for k in sub_keys], axis=0)[: n_sym]
 
-    walk_groups(root)
+    bits = bits.astype(np.float32)                # (n_sym, Pol)
 
-    # 选择包含调制格式的路径；否则取第一个
-    cand = [p for p in src_paths if mfl in p[1].lower()]
-    kind_path = cand[0] if cand else (src_paths[0] if src_paths else None)
-
-    if kind_path is None:
-        print("⚠ src bits not found, fallback to sym_to_bits(sent)")
-        from commplax.coding.FEC import sym_to_bits
-        bits = sym_to_bits(x).astype(np.float32)
-    else:
-        kind, path = kind_path
-        print(f"[Singledata] using src bits → {path}")
-        if kind == 'array':
-            bits = zarr.open_array(root.store, path)[: n_sym]
-        else:
-            g = zarr.open_group(root.store, path)
-            subs = sorted(g.array_keys(), key=lambda s: int(s))
-            bits = np.concatenate([g[k][:] for k in subs], axis=0)[: n_sym]
-        bits = bits.astype(np.float32)
-
-    # ---------- 4. normalise ----------
+    # -------- 4. normalise ---------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
 
-    # ---------- 5. pack ---------------
+    # -------- 5. pack --------------
     a = dict(samplerate=fs, baudrate=br, sps=sps,
              modformat=modfmt, lpdbm=lp_dbm,
              lpw=10**(lp_dbm/10)/1e3)
     return Input(y.astype(np.complex64),
                  x.astype(np.complex64),
                  bits,
-                 0.0144,   # w0
+                 0.0144,
                  a)
+
 
 # -------------------------------------------------------------------
 # public API – single file, split into train / test
