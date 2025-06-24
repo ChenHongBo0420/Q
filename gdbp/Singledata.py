@@ -39,8 +39,10 @@ def _get_meta(grp, *names, default=None):
 # -------------------------------------------------------------------
 # core loader for a single group  ★ 自动搜索 bits/src ★
 # -------------------------------------------------------------------
-from zarr.errors import ArrayNotFoundError       # 记得放在文件最上方
+from zarr.errors import ArrayNotFoundError   # 放在文件最上方
 
+# -------------------------------------------------------------------
+# core loader for a single group  ★ final robust version ★
 # -------------------------------------------------------------------
 def _loader(dg, n_sym, lp_dbm):
     # ---------- 1. metadata ----------
@@ -55,36 +57,35 @@ def _loader(dg, n_sym, lp_dbm):
     x = dg['sent'][: n_sym]
 
     # ---------- 3. locate src group/array ----
-    src_grp_path = f"source/{modfmt}65536/src"          # ← 你的固定结构
+    src_grp_path = f"source/{modfmt}65536/src"      # 你的固定布局
     print(f"[Singledata] using src bits → {src_grp_path}")
 
-    try:                                                # 3a. 直接当 array
+    try:                                            # 3a. treat as array
         bits = zarr.open_array(root.store, src_grp_path)[: n_sym]
-    except ArrayNotFoundError:                          # 3b. 是 group
-        g = zarr.open_group(root.store, src_grp_path, mode='r')
+    except ArrayNotFoundError:                      # 3b. treat as group
+        g = zarr.open_group(root.store, path=src_grp_path, mode='r')
         sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
         parts = [g[k][:] for k in sub_keys]
         bits  = np.concatenate(parts, axis=0)[: n_sym]
-    except KeyError:
-        # src 路径完全不存在 → fallback
-        print("⚠ src group not found, fallback to sym_to_bits(sent)")
+    except KeyError:                               # 3c. path not exist
+        print("⚠ src path not found, fallback to sym_to_bits(sent)")
         from commplax.coding.FEC import sym_to_bits
         bits = sym_to_bits(x).astype(np.float32)
 
-    bits = bits.astype(np.float32)                      # (n_sym, Pol)
+    bits = bits.astype(np.float32)                 # (n_sym, Pol)
 
     # ---------- 4. normalise ----------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
 
-    # ---------- 5. pack ---------------
+    # ---------- 5. pack & return ------
     a = dict(samplerate=fs, baudrate=br, sps=sps,
              modformat=modfmt, lpdbm=lp_dbm,
              lpw=10**(lp_dbm/10)/1e3)
     return Input(y.astype(np.complex64),
                  x.astype(np.complex64),
                  bits,
-                 0.0144,
+                 0.0144,   # w0
                  a)
 
 
