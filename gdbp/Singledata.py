@@ -45,6 +45,7 @@ from zarr.errors import ArrayNotFoundError   # 放在文件最上方
 # core loader for a single group  ★ final robust version ★
 # -------------------------------------------------------------------
 from zarr.errors import ArrayNotFoundError, ContainsArrayError
+import math
 
 def _loader(dg, n_sym, lp_dbm):
     # ---------- 1. metadata ----------
@@ -62,23 +63,31 @@ def _loader(dg, n_sym, lp_dbm):
     src_grp_path = f"source/{modfmt}65536/src"
     print(f"[Singledata] using src bits → {src_grp_path}")
 
-    try:                                            # 3a. treat as array
-        bits = zarr.open_array(root.store, path=src_grp_path)[: n_sym]
-    except ArrayNotFoundError:                      # 3b. treat as group
+    # --- 3a. 读 array or group ---
+    try:
+        bits = zarr.open_array(root.store, path=src_grp_path)[:]
+    except ArrayNotFoundError:
         try:
             g = zarr.open_group(root.store, path=src_grp_path, mode='r')
-        except ContainsArrayError:                 # actually an array
-            bits = zarr.open_array(root.store, path=src_grp_path)[: n_sym]
+        except ContainsArrayError:                     # 其实是 array
+            bits = zarr.open_array(root.store, path=src_grp_path)[:]
         else:
-            sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
-            parts = [g[k][:] for k in sub_keys]
-            bits  = np.concatenate(parts, axis=0)[: n_sym]
+            parts = [g[k][:] for k in sorted(g.array_keys(), key=int)]
+            bits  = np.concatenate(parts, axis=0)
     except KeyError:
-        print("⚠ src path not found, fallback to sym_to_bits(sent)")
         from commplax.coding.FEC import sym_to_bits
-        bits = sym_to_bits(x).astype(np.float32)
+        print("⚠ src path missing, fallback to sym_to_bits(sent)")
+        bits = sym_to_bits(x)
 
-    bits = bits.astype(np.float32)                 # (n_sym, Pol)
+    # --- 3b. 数据清洗 & 补齐长度 ---
+    if np.iscomplexobj(bits):          # 保留实部
+        bits = bits.real
+    bits = bits.astype(np.float32)
+    if bits.shape[0] < n_sym:          # 不够长就循环复制
+        rep = math.ceil(n_sym / bits.shape[0])
+        bits = np.tile(bits, (rep, 1))[: n_sym]
+    else:                              # 够长直接截断
+        bits = bits[: n_sym]
 
     # ---------- 4. normalise ----------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
