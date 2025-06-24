@@ -40,49 +40,61 @@ def _get_meta(grp, *names, default=None):
 # core loader for a single group  ★ 自动搜索 bits/src ★
 # -------------------------------------------------------------------
 def _loader(dg, n_sym, lp_dbm):
-    # ---------- metadata ----------
+    # ---------- 1. metadata ----------
     br  = _get_meta(dg, 'baudrate|symbolrate')
     fs  = _get_meta(dg, 'samplerate|sample_rate|fs')
     modfmt = (_get_meta(dg, 'modformat', default='16QAM') or '16QAM').upper()
     sps = int(round(fs / br))
     root = zarr.open_group(store=dg.store, path='/', mode='r')
 
-    # ---------- search src ----------
-    def _find_src(g: zarr.hierarchy.Group):
-        hits = []
-        def walk(grp, pref=''):
-            for a in grp.array_keys():
-                if 'src' in a.lower():
-                    hits.append(f'{pref}{a}')
-            for sub in grp.group_keys():
-                walk(grp[sub], f'{pref}{sub}/')
-        walk(g)
-        return hits
-
-    all_src = _find_src(root)
-    if not all_src:
-        raise KeyError("No any 'src' array in entire store!")
-
-    # 先找包含 modfmt 的；若无则用第一个
-    mfl = modfmt.lower()
-    cand = [p for p in all_src if mfl in p.lower()]
-    src_path = cand[0] if cand else all_src[0]
-
-    print(f"[Singledata]  using src bits:  {src_path}")
-
-    bits = zarr.open_array(root.store, src_path)[:n_sym].astype(np.float32)
-
-    # ---------- load recv/sent ----------
+    # ---------- 2. recv / sent -------
     y = dg['recv'][: n_sym * sps]
     x = dg['sent'][: n_sym]
 
-    # ---------- normalise & pack ----------
+    # ---------- 3. locate src ---------
+    def _search_src(group, pref=''):
+        mfl = modfmt.lower()
+        # arrays at this level
+        for a in group.array_keys():
+            if 'src' in a.lower() and mfl in a.lower():
+                return ('array', f'{pref}{a}')
+        # groups at this level
+        for g in group.group_keys():
+            if 'src' in g.lower() and mfl in g.lower():
+                return ('group', f'{pref}{g}')
+            hit = _search_src(group[g], f'{pref}{g}/')
+            if hit: return hit
+        return None
+
+    kind, path = _search_src(root)
+    if path is None:
+        raise KeyError(f"No src bits found (modfmt={modfmt})")
+
+    print(f"[Singledata] using src bits: {path}")
+
+    if kind == 'array':                           # 单独 array
+        bits = zarr.open_array(root.store, path)[: n_sym]
+    else:                                         # group → concat 子数组
+        g = zarr.open_group(root.store, path)
+        sub_keys = sorted(g.array_keys())         # '0','1',…
+        parts = [g[k][:] for k in sub_keys]
+        bits = np.concatenate(parts, axis=0)[: n_sym]
+
+    bits = bits.astype(np.float32)                # (n_sym, Pol)
+
+    # ---------- 4. normalise ----------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
-    a = dict(samplerate=fs, baudrate=br, sps=sps, modformat=modfmt,
-             lpdbm=lp_dbm, lpw=10**(lp_dbm/10)/1e3)
-    return Input(y.astype(np.complex64), x.astype(np.complex64),
-                 bits, 0.0144, a)
+
+    # ---------- 5. pack ---------------
+    a = dict(samplerate=fs, baudrate=br, sps=sps,
+             modformat=modfmt, lpdbm=lp_dbm,
+             lpw=10**(lp_dbm/10)/1e3)
+    return Input(y.astype(np.complex64),
+                 x.astype(np.complex64),
+                 bits,
+                 0.0144,           # w0
+                 a)
 
 # -------------------------------------------------------------------
 # public API – single file, split into train / test
