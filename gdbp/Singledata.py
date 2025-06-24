@@ -41,72 +41,62 @@ def _get_meta(grp, *names, default=None):
 # -------------------------------------------------------------------
 def _loader(dg, n_sym, lp_dbm):
     """
-    Read raw recv / sent / src arrays, normalise, and pack into Input.
-    Works with src stored at any depth, e.g. source/16QAM65536/src
+    Read recv / sent / src;  auto-find src under any sub-folder like
+    'source/16QAM65536/src' or '16qam65536/src'.
     """
-    # 1) metadata ------------------------------------------------------
-    br    = _get_meta(dg, 'baudrate|symbolrate')
-    fs    = _get_meta(dg, 'samplerate|sample_rate|fs')
-    dist  = _get_meta(dg, 'distance', default=815e3)   # [m]
-    spans = _get_meta(dg, 'spans|nspans', default=10)
+    # -------- 1. metadata ----------
+    br  = _get_meta(dg, 'baudrate|symbolrate')
+    fs  = _get_meta(dg, 'samplerate|sample_rate|fs')
     if br is None or fs is None:
-        raise KeyError("metadata missing 'baudrate' or 'samplerate'")
-
-    modfmt = _get_meta(dg, 'modformat', default='16QAM').upper()  # '16QAM'
+        raise KeyError("missing baudrate / samplerate in metadata")
+    modfmt = _get_meta(dg, 'modformat', default='16QAM').upper()
     sps    = int(round(fs / br))
 
-    # 2) recv / sent ---------------------------------------------------
-    y = dg['recv'][: n_sym * sps]               # complex64
-    x = dg['sent'][: n_sym]                     # complex64
+    # -------- 2. recv / sent -------
+    y = dg['recv'][: n_sym * sps]
+    x = dg['sent'][: n_sym]
 
-    # 3) 搜索符合条件的 src 数组 ----------------------------------------
-    def _find_src(store, modfmt):
+    # -------- 3. find src ----------
+    root = zarr.open_group(store=dg.store, path='/', mode='r')
+
+    def _search_src(group, prefix=''):
         mfl = modfmt.lower()
-        for path, _ in store.arrays():
-            pl = path.lower()
-            if 'src' in pl and mfl in pl:
+        # 当前层 arrays
+        for a in group.array_keys():
+            path = f'{prefix}{a}'
+            if 'src' in a.lower() and mfl in a.lower():
                 return path
+        # 递归子组
+        for g in group.group_keys():
+            sub = group[g]
+            hit = _search_src(sub, f'{prefix}{g}/')
+            if hit: return hit
         return None
 
-    src_path = _find_src(dg.store, modfmt)
+    src_path = _search_src(root)
     if src_path is None:
-        raise KeyError(f"No src bits array found for modformat={modfmt}")
+        raise KeyError(f"No src bits found for {modfmt}")
 
-    bits = zarr.open_array(dg.store, src_path, mode='r')[: n_sym] \
-               .astype(np.float32)               # (n_sym, Pol)
+    bits = zarr.open_array(root.store, src_path, mode='r')[: n_sym] \
+               .astype(np.float32)                      # (n_sym, P)
 
-    # 4) normalisation -------------------------------------------------
+    # -------- 4. normalise ---------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
 
-    # 5) attribute dict ------------------------------------------------
+    # -------- 5. pack into Input ---
     a = dict(
-        samplerate = fs,
-        baudrate   = br,
-        distance   = dist,
-        spans      = spans,
-        rolloff    = _get_meta(dg,'rolloff', default=0.2),
-        modformat  = modfmt,
-        polmux     = _get_meta(dg,'polmux',  default=0),
-        laserlinewidth = _get_meta(dg,'laserlinewidth', default=100e3),
-        chind      = _get_meta(dg,'chind',   default=0),
-        srcid      = _get_meta(dg,'srcid',   default='src'),
-        lpdbm      = lp_dbm,
-        lpw        = 10**(lp_dbm/10)/1e3,
-        sps        = sps,
-        CD         = 13.367
+        samplerate=fs, baudrate=br,
+        sps=sps, modformat=modfmt,
+        lpdbm=lp_dbm, lpw=10**(lp_dbm/10)/1e3,
+        CD=13.367,  # …
     )
-    w0 = 0.0144   # coarse CFO 估计
-
-    # 6) pack ----------------------------------------------------------
-    return Input(
-        y    = y.astype(np.complex64),
-        x    = x.astype(np.complex64),
-        bits = bits,
-        w0   = w0,
-        a    = a,
-    )
-
+    w0 = 0.0144
+    return Input(y=y.astype(np.complex64),
+                 x=x.astype(np.complex64),
+                 bits=bits,
+                 w0=w0,
+                 a=a)
 
 # -------------------------------------------------------------------
 # public API – single file, split into train / test
