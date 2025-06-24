@@ -54,50 +54,30 @@ def _loader(dg, n_sym, lp_dbm):
     y = dg['recv'][: n_sym * sps]
     x = dg['sent'][: n_sym]
 
-    # ---------- 3. 找到 src 路径 -------
-    mfl = modfmt.lower()
-    def walk(grp, pref=''):
-        paths = []
-        # 记录以 src 结尾的 group
-        for gname in grp.group_keys():
-            pg = f'{pref}{gname}'
-            if gname.lower().endswith('src'):
-                paths.append(pg)
-            paths += walk(grp[gname], pg + '/')
-        # 记录直接名含 src 的 array
-        for aname in grp.array_keys():
-            if 'src' in aname.lower():
-                paths.append(f'{pref}{aname}')
-        return paths
+    # ---------- 3. locate src group/array ----
+    src_grp_path = f"source/{modfmt}65536/src"          # ← 你的固定结构
+    print(f"[Singledata] using src bits → {src_grp_path}")
 
-    candidates = walk(root)
-    if not candidates:
-        print("⚠ 没找到任何 src，比特用 sym_to_bits(sent)")
+    try:                                                # 3a. 直接当 array
+        bits = zarr.open_array(root.store, src_grp_path)[: n_sym]
+    except ArrayNotFoundError:                          # 3b. 是 group
+        g = zarr.open_group(root.store, src_grp_path, mode='r')
+        sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
+        parts = [g[k][:] for k in sub_keys]
+        bits  = np.concatenate(parts, axis=0)[: n_sym]
+    except KeyError:
+        # src 路径完全不存在 → fallback
+        print("⚠ src group not found, fallback to sym_to_bits(sent)")
         from commplax.coding.FEC import sym_to_bits
         bits = sym_to_bits(x).astype(np.float32)
-    else:
-        # 优先选含调制名的，否则第一个
-        sel = next((p for p in candidates if mfl in p.lower()), candidates[0])
-        print(f"[Singledata] using src bits → {sel}")
 
-        # ---------- 4. 判断是 array 还是 group ----------
-        store = root.store
-        zarr_meta_key = f'{sel}/.zarray' if sel else '.zarray'
-        if zarr_meta_key in store:                  # 直接 array
-            bits = zarr.open_array(store, sel)[: n_sym]
-        else:                                       # group → 拼子数组
-            g = zarr.open_group(store, sel, mode='r')
-            sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
-            parts = [g[k][:] for k in sub_keys]
-            bits  = np.concatenate(parts, axis=0)[: n_sym]
+    bits = bits.astype(np.float32)                      # (n_sym, Pol)
 
-        bits = bits.astype(np.float32)              # (n_sym, Pol)
-
-    # ---------- 5. normalise ----------
+    # ---------- 4. normalise ----------
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
 
-    # ---------- 6. pack ---------------
+    # ---------- 5. pack ---------------
     a = dict(samplerate=fs, baudrate=br, sps=sps,
              modformat=modfmt, lpdbm=lp_dbm,
              lpw=10**(lp_dbm/10)/1e3)
