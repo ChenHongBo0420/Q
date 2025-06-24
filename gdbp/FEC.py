@@ -1,7 +1,7 @@
 # CE/BCE loss weighted bit-BCE
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from commplax import util, comm, cxopt, op, optim, qam16_soft
+from commplax import util, comm, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
@@ -17,11 +17,10 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
-from commplax.qam16_soft import CONST, BITS, sym2bit, llr_maxlog
-BIT_WEIGHTS = jnp.array([1.2,1.0,1.0,0.8], dtype=jnp.float32)
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
+
 
 ## Two ##
 def make_base_module(steps: int = 3,
@@ -338,8 +337,6 @@ def loss_fn(module: layer.Layer,
 
     return total_loss, state_new
 
-
-
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -401,64 +398,74 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-def train(model: Model, ds: gdat.Input,
-          batch=500, n_iter=None,
-          opt=optim.adam(
-              optim.piecewise_constant([500,1000],[1e-4,1e-5,1e-6]))):
-    params, st, aux, const, sparams = model.initvar
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
+    params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    n_batch, gen = get_train_batch(ds, batch, model.overlaps)
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i,(y,x) in tqdm(enumerate(gen), total=n_iter):
-        if i>=n_iter: break
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, st = update_step(
-            model.module, opt, i, opt_state,
-            st, y, x, aux, const, sparams)
-        yield float(loss), opt.params_fn(opt_state), st
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
                                 
                        
 def test(model: Model,
-         params: Dict | None,
+         params: Dict,
          data: gdat.Input,
-         eval_range: tuple = (300_000, -20_000),
-         metric_fn       = comm.qamqot):
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
 
-    # ---------- 0) 取初始化时的 state / const ----------
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:                      # 若测试时不给参数，用 init 时的
-        params = model.initvar[0]
+    if params is None:
+      params = model.initvar[0]
 
-    # ---------- 1) 前向 ----------
-    z_sig, _ = jax.jit(model.module.apply, backend='cpu')(
-        {'params'     : util.dict_merge(params, sparams),
-         'aux_inputs' : aux,
-         'const'      : const,
-         **state},
-        core.Signal(data.y))
-
-    # ---------- 2) 与发送符号对齐 ----------
-    sps   = z_sig.t.sps                      # =2
-    x_ref = jnp.repeat(data.x, sps, axis=0)  # (N_sym*sps,2)
-    x_aln = x_ref[z_sig.t.start : z_sig.t.stop]
-    L     = min(z_sig.val.shape[0], x_aln.shape[0])
-    z_val, x_val = z_sig.val[:L], x_aln[:L]
-
-    # ---------- 3) 计算 LLR (Max-Log) ----------
-    #   σ² 估成均方误差；如果你已有更稳的估计器，可替换
-    sigma2 = jnp.mean(jnp.abs(z_val - x_val) ** 2)
-    llr    = llr_maxlog(z_val[:, 0], sigma2)      # (L,4) — 只取一路做示例
-    # 若想双极化都输出，可 llr = jnp.stack([...], axis=-1)
-
-    # ---------- 4) QoT / Q-factor / BER ----------
-    metric = metric_fn(z_val, x_val,
-                       scale=jnp.sqrt(10.),     # 16-QAM 硬判时用
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
                        eval_range=eval_range)
-
-    return metric, z_sig, llr   
+    return metric, z
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
