@@ -94,9 +94,22 @@ def _loader(dg, n_sym, lp_dbm):
     x = x / comm.qamscale(modfmt)
 
     # ---------- 5. pack ---------------
-    a = dict(samplerate=fs, baudrate=br, sps=sps,
-             modformat=modfmt, lpdbm=lp_dbm,
-             lpw=10**(lp_dbm/10)/1e3)
+    a = dict(
+    samplerate = fs,
+    baudrate   = br,
+    distance   = _get_meta(dg, 'distance', default=815e3),   # ★ 必须
+    spans      = _get_meta(dg, 'spans|nspans', default=10),  # ★ 必须
+    rolloff    = _get_meta(dg, 'rolloff', default=0.2),
+    modformat  = modfmt,
+    polmux     = _get_meta(dg, 'polmux', default=0),
+    laserlinewidth = _get_meta(dg, 'laserlinewidth', default=100e3),
+    chind      = _get_meta(dg, 'chind', default=0),
+    srcid      = _get_meta(dg, 'srcid', default='src'),
+    lpdbm      = lp_dbm,
+    lpw        = 10**(lp_dbm/10)/1e3,
+    sps        = sps,
+    CD         = 13.367,)
+
     return Input(y.astype(np.complex64),
                  x.astype(np.complex64),
                  bits,
