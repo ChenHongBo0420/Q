@@ -44,6 +44,8 @@ from zarr.errors import ArrayNotFoundError   # 放在文件最上方
 # -------------------------------------------------------------------
 # core loader for a single group  ★ final robust version ★
 # -------------------------------------------------------------------
+from zarr.errors import ArrayNotFoundError, ContainsArrayError
+
 def _loader(dg, n_sym, lp_dbm):
     # ---------- 1. metadata ----------
     br  = _get_meta(dg, 'baudrate|symbolrate')
@@ -56,18 +58,22 @@ def _loader(dg, n_sym, lp_dbm):
     y = dg['recv'][: n_sym * sps]
     x = dg['sent'][: n_sym]
 
-    # ---------- 3. locate src group/array ----
-    src_grp_path = f"source/{modfmt}65536/src"      # 你的固定布局
+    # ---------- 3. src bits ----------
+    src_grp_path = f"source/{modfmt}65536/src"
     print(f"[Singledata] using src bits → {src_grp_path}")
 
     try:                                            # 3a. treat as array
-        bits = zarr.open_array(root.store, src_grp_path)[: n_sym]
+        bits = zarr.open_array(root.store, path=src_grp_path)[: n_sym]
     except ArrayNotFoundError:                      # 3b. treat as group
-        g = zarr.open_group(root.store, path=src_grp_path, mode='r')
-        sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
-        parts = [g[k][:] for k in sub_keys]
-        bits  = np.concatenate(parts, axis=0)[: n_sym]
-    except KeyError:                               # 3c. path not exist
+        try:
+            g = zarr.open_group(root.store, path=src_grp_path, mode='r')
+        except ContainsArrayError:                 # actually an array
+            bits = zarr.open_array(root.store, path=src_grp_path)[: n_sym]
+        else:
+            sub_keys = sorted(g.array_keys(), key=lambda k: int(k))
+            parts = [g[k][:] for k in sub_keys]
+            bits  = np.concatenate(parts, axis=0)[: n_sym]
+    except KeyError:
         print("⚠ src path not found, fallback to sym_to_bits(sent)")
         from commplax.coding.FEC import sym_to_bits
         bits = sym_to_bits(x).astype(np.float32)
@@ -78,15 +84,16 @@ def _loader(dg, n_sym, lp_dbm):
     y = comm.normpower(y - np.mean(y, axis=0), real=True) / np.sqrt(2)
     x = x / comm.qamscale(modfmt)
 
-    # ---------- 5. pack & return ------
+    # ---------- 5. pack ---------------
     a = dict(samplerate=fs, baudrate=br, sps=sps,
              modformat=modfmt, lpdbm=lp_dbm,
              lpw=10**(lp_dbm/10)/1e3)
     return Input(y.astype(np.complex64),
                  x.astype(np.complex64),
                  bits,
-                 0.0144,   # w0
+                 0.0144,
                  a)
+
 
 
 # -------------------------------------------------------------------
