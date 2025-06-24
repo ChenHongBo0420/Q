@@ -17,11 +17,78 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
+import optax
+from commplax.coding.qc_ldpc_ste import qc_ldpc_encode, init_G_soft
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
+_CONST = jnp.array(
+    [-3-3j, -3-1j, -3+3j, -3+1j,
+     -1-3j, -1-1j, -1+3j, -1+1j,
+      3-3j,  3-1j,  3+3j,  3+1j,
+      1-3j,  1-1j,  1+3j,  1+1j], dtype=jnp.complex64) / jnp.sqrt(10.)
 
+_BIT_MAP = jnp.array([
+   (0,0,0,0),(0,0,0,1),(0,0,1,0),(0,0,1,1),
+   (0,1,0,0),(0,1,0,1),(0,1,1,0),(0,1,1,1),
+   (1,0,0,0),(1,0,0,1),(1,0,1,0),(1,0,1,1),
+   (1,1,0,0),(1,1,0,1),(1,1,1,0),(1,1,1,1)
+], dtype=jnp.float32)                                          # (16,4)
+
+def bits_to_sym(bits4: jnp.ndarray) -> jnp.ndarray:            # (M,4)
+    idx = jnp.dot(bits4, jnp.array([8,4,2,1], dtype=jnp.float32))
+    return _CONST[idx.astype(jnp.int32)]
+
+def sym_to_bits(sym: jnp.ndarray) -> jnp.ndarray:              # (...,)→(...,4)
+    d = jnp.abs(sym[..., None] - _CONST)
+    idx = jnp.argmin(d, axis=-1)
+    return _BIT_MAP[idx]
+
+class NeuralBP(nn.Module):
+    H: jnp.ndarray       # (M,N), parity matrix
+    n_iter: int = 5
+    learn_gamma: bool = True
+    def setup(self):
+        if self.learn_gamma:
+            self.gamma = self.param('gamma', nn.initializers.ones, ())
+    def __call__(self, llr: jnp.ndarray) -> jnp.ndarray:
+        g = self.gamma if self.learn_gamma else 1.0
+        for _ in range(self.n_iter):
+            llr = self._bp_iter(llr, g)
+        return llr
+    def _bp_iter(self, llr, γ):
+        # 单步 Min-Sum / Scaled-Min-Sum. 只做演示; 可换为 commplax.layer.ldpc.bp_iter
+        sign = jnp.sign(jnp.matmul(self.H, jnp.sign(llr)))
+        mag  = jnp.matmul(self.H, jnp.abs(llr))
+        msg  = γ * sign * mag
+        return llr + jnp.matmul(self.H.T, msg)
+
+def tx_pipeline(bits: jnp.ndarray,             # (K,)
+                G_soft: jnp.ndarray,           # (K,N-K)
+                Π: jnp.ndarray | None = None   # (4,4) 可学置换
+                ) -> jnp.ndarray:
+    cw   = qc_ldpc_encode(bits, G_soft)        # (N,)
+    bit4 = cw.reshape(-1,4)
+    if Π is not None:
+        bit4 = jnp.matmul(bit4, Π)             # 置换 / Power-alloc
+    return bits_to_sym(bit4)                   # (N/4,)
+
+_BIT_W = jnp.array([1.2,1.0,1.0,0.8], dtype=jnp.float32)
+
+@jax.jit
+def bit_bce_loss(pred_sym: jnp.ndarray,
+                 true_sym: jnp.ndarray) -> jnp.ndarray:
+    logits = -jnp.square(jnp.abs(pred_sym[...,None] - _CONST))
+    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    probs  = jnp.exp(logp)                                # (...,16)
+    p1     = probs @ _BIT_MAP
+    p0     = 1. - p1
+    idx    = jnp.argmin(jnp.square(jnp.abs(true_sym[...,None]-_CONST)), axis=-1)
+    bits   = _BIT_MAP[idx]                                # (...,4)
+    bce    = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
+    return (bce * _BIT_W).mean()
+                   
 ## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
@@ -467,7 +534,26 @@ def test(model: Model,
                        eval_range=eval_range)
     return metric, z
 
-                
+def build_optimizers(param_tree: Dict,
+                     lr1=1e-4, lr2=1e-4, lr3=1e-5):
+    """
+    param_tree keys 约定：
+      {"dsp":…, "G":…, "Π":…, "bp":…}
+    """
+    mask1 = jax.tree_map(lambda _: False, param_tree)
+    mask1['dsp'] = True
+
+    mask2 = jax.tree_map(lambda _: True, param_tree)
+    mask2['dsp'] = False
+
+    mask3 = jax.tree_map(lambda _: True, param_tree)
+
+    opt1 = optax.chain(optax.masked(optax.adam(lr1), mask1))
+    opt2 = optax.chain(optax.masked(optax.adam(lr2), mask2))
+    opt3 = optax.adam(lr3)
+
+    return opt1, opt2, opt3
+                       
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
