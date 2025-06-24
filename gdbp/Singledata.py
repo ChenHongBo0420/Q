@@ -51,7 +51,7 @@ def _loader(dg, n_sym, lp_dbm):
 
     modfmt = _get_meta(dg, 'modformat', default='16QAM').upper()   # '16QAM' / 'QPSK'
     block  = 65536
-    src_key= f'{modfmt}{block}/src'                                # e.g. 16QAM65536/src
+    src_key = f'source/{modfmt}{block}/src'         # e.g. 16QAM65536/src
 
     sps = int(round(fs / br))
 
