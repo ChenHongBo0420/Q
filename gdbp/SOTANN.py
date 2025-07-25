@@ -18,6 +18,7 @@ from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
 from flax.core import unfreeze, freeze
+Signal = core.Signal
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -303,63 +304,64 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
+def _slice_signal(sig: Signal, new_start: int, new_stop: int) -> Signal:
+    """返回 sig 在 [new_start, new_stop) 区间的切片。"""
+    x, t = sig
+    # 提取与时间轴对应的样本区间
+    x_sliced = x[new_start - t.start : x.shape[0] + (new_stop - t.stop)]
+    t_sliced = core.SigTime(new_start, new_stop, t.sps)
+    return Signal(x_sliced, t_sliced)
+
 def align_signals(sig_a: Signal, sig_b: Signal):
-    """截取 sig_a / sig_b 的最大重叠区间并返回新的 Signal。
-
-    若两信号时间轴完全不重叠将抛出 ValueError。
-    仅对 .val 做切片；返回的 t 统一为 SigTime(0,0,sps)。
     """
-    # ---- 取 overlap 起止 ------------------------------------
-    t_start = max(sig_a.t.start, sig_b.t.start)
-    t_stop  = min(sig_a.t.stop , sig_b.t.stop )
-    if t_start >= t_stop:
-        raise ValueError('align_signals: two signals have no overlap.')
+    截取两段 Signal 的 **最大重叠区间**，并返回 (sig_a_aligned, sig_b_aligned)。
+    若二者时间轴无交集则抛 ValueError 以便调试。
+    """
+    start = max(sig_a.t.start, sig_b.t.start)
+    stop  = min(sig_a.t.stop , sig_b.t.stop )
+    if start >= stop:
+        raise ValueError(f'No overlap between signals: '
+                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
+                         f'B[{sig_b.t.start},{sig_b.t.stop})')
+    return (_slice_signal(sig_a, start, stop),
+            _slice_signal(sig_b, start, stop))
 
-    # ---- 在各自数组上切片 ----------------------------------
-    a_s = t_start - sig_a.t.start
-    a_e = sig_a.val.shape[0] - (sig_a.t.stop - t_stop)
-    b_s = t_start - sig_b.t.start
-    b_e = sig_b.val.shape[0] - (sig_b.t.stop - t_stop)
-
-    sps = sig_a.t.sps                      # 两端 sps 必须一致
-    new_t = SigTime(0, 0, sps)
-    return (Signal(sig_a.val[a_s:a_e], new_t),
-            Signal(sig_b.val[b_s:b_e], new_t))
-
-def loss_fn(module: layer.Layer,
+def loss_fn(module : layer.Layer,
             params : Dict,
             state  : Dict,
-            y      : Array,
-            x      : Array,
+            y      : core.Array,
+            x      : core.Array,
             aux    : Dict,
             const  : Dict,
             sparams: Dict,
             β_ce   : float = 0.5,
             λ_kl   : float = 1e-4):
-
+    """
+    Same logic as before，但用 align_signals 保证 z/x 对齐，
+    避免长度 0 或 shape 不一致导致的 Dot / Einsum 报错。
+    """
+    # ------ 前向 ----------------------------------------------------------------
     params_net = util.dict_merge(params, sparams)
-
-    # -------- Forward ---------------------------------------
     z_out, state_new = module.apply(
         {'params': params_net,
          'aux_inputs': aux,
-         'const': const,
-         **state},
-        core.Signal(y))
+         'const': const, **state},
+        core.Signal(y)
+    )
 
-    # -------- 对齐 Z / X ------------------------------------
+    # ------ 与真值对齐 ----------------------------------------------------------
     z_aligned, x_aligned = align_signals(z_out, core.Signal(x))
 
-    # ===== Loss‑1 : SNR + EVM ===============================
+    # ------ Loss‑1 : SNR + EVM --------------------------------------------------
     snr = si_snr_flat_amp_pair(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
-    evm = evm_ring          (jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
+    evm = evm_ring(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
     loss_main = snr + 0.1 * evm
 
-    # ===== Loss‑2 : Bit‑BCE =================================
+    # ------ Loss‑2 : Bit‑wise BCE ----------------------------------------------
     bit_bce = _bit_bce_loss_16qam(z_aligned.val, x_aligned.val)
     loss_main += β_ce * bit_bce
 
-    # ===== Loss‑3 : KL (Information Bottleneck) =============
+    # ------ Loss‑3 : Information Bottleneck KL ---------------------------------
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_aligned.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
