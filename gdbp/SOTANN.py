@@ -312,29 +312,35 @@ def loss_fn(module: layer.Layer,
             const : Dict,
             sparams: Dict,
             β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
+            λ_kl : float = 1e-4):
 
+    # ---- 合并可训练 + 静态参数 ---------------------------------
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ──────────────────────────────────────────
+    # ---- 前向 --------------------------------------------------
     z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state}, core.Signal(y))
+        {'params': params_net,
+         'aux_inputs': aux,
+         'const': const,
+         **state},                # 其余 collection 原样传回
+        core.Signal(y))           # 输入信号封装为 Signal
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
+    # ---- 自动对齐：确保长度 / 起止一致 -------------------------
+    # ① z_aligned, x_aligned 的 .val 等长
+    # ② 若两段时间轴无交集会抛错，便于调试
+    z_aligned, x_aligned = core.align(z_out, core.Signal(x))
 
-    # ── (1) SNR + EVM  ───────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    # ===== Loss 1 : SNR + EVM ==================================
+    snr = si_snr_flat_amp_pair(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
+    evm = evm_ring          (jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
     loss_main = snr + 0.1 * evm
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    # ===== Loss 2 : Bit‑level BCE ==============================
+    bit_bce = _bit_bce_loss_16qam(z_aligned.val, x_aligned.val)
     loss_main += β_ce * bit_bce
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # ===== Loss 3 : Information‑Bottleneck KL =================
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_aligned.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
