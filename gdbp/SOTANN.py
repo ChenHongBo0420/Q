@@ -17,6 +17,7 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
+from flax.core import unfreeze, freeze
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
