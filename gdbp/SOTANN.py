@@ -335,43 +335,41 @@ def robust_align_len(sig_a: Signal,
 
     return _crop(sig_a), _crop(sig_b)
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):
+def loss_fn(module, params, state, y, x, aux, const, sparams,
+                      β_ce: float = .5, λ_kl: float = 1e-4):
+    """与官方 loss_fn 完全一致，只把对齐方式换回『切片』。"""
 
+    # ═════ 1) 合并可训练 + 静态参数 ═════
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ──────────────────────────────────────────
+    # ═════ 2) 前向 ═════
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state}, core.Signal(y))
+         'const': const, **state},
+        core.Signal(y))
 
-    # ── 与真值对齐（时间 + 长度）───────────────────────
-    z_align, x_align = robust_align_len(z_out, core.Signal(x))
+    # ═════ 3) **对齐真值** ── 回到作者原来的切片方式 ═════
+    # stop 可能为负；Python slice 能正确处理
+    x_align = x[z_out.t.start : z_out.t.stop]
 
-    # ---------- # 现在两端的 .val 已保证完全同长 # ----------
+    # ---- 确保两端同长（极端情况下多‑余位再裁一下） ----
+    N = min(z_out.val.shape[0], x_align.shape[0])
+    z_val = z_out.val[:N]
+    x_val = x_align[:N]
 
-    # — 1) SNR + EVM —
-    snr = si_snr_flat_amp_pair(jnp.abs(z_align.val), jnp.abs(x_align.val))
-    evm = evm_ring(jnp.abs(z_align.val), jnp.abs(x_align.val))
+    # ═════ 4) 计算各分量 loss ═════
+    snr = gb.si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
+    evm = gb.evm_ring(jnp.abs(z_val), jnp.abs(x_val))
     loss_main = snr + 0.1 * evm
 
-    # — 2) Bit‑BCE —
-    bit_bce = _bit_bce_loss_16qam(z_align.val, x_align.val)
+    bit_bce = gb._bit_bce_loss_16qam(z_val, x_val)
     loss_main += β_ce * bit_bce
 
-    # — 3) Information‑Bottleneck KL —
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_align.val)))
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
+
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
