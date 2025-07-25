@@ -306,41 +306,38 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
 
 
 def _slice(sig: Signal, start: int, stop: int) -> Signal:
-    """返回 sig 在全局样本区间 [start, stop) 的切片。"""
+    """将 Signal 按全局坐标 [start, stop) 裁剪。"""
     x, t = sig
-    # 把全局坐标映射到数组内部下标
-    x_slice = x[start - t.start : x.shape[0] + (stop - t.stop)]
-    return Signal(x_slice, SigTime(start, stop, t.sps))
+    xs = x[start - t.start : x.shape[0] + (stop - t.stop)]
+    return Signal(xs, SigTime(start, stop, t.sps))
 
-def robust_align(a: Signal, b_raw):
-    """
-    让网络输出 `a` 与真值 `b_raw` 在样本维度上对齐。
-    支持 `b_raw` 为:
-      • Signal (带/不带有效时间轴) • 裸 ndarray
-    总能返回 **长度一致** 的 `(a_aligned, b_aligned)`。
-    """
-    # -------- 把 b_raw 也包装成 Signal ---------------------------------
+def robust_align_len(a: Signal, b_raw):
+    """返回 (a_aligned, b_aligned)，保证 .val 长度完全一致。"""
+    # 1) 统一包装为 Signal
     if isinstance(b_raw, Signal):
         b = b_raw
-    else:  # ndarray
-        # 如果没时间轴，就先用 (0,0) 占位
+    else:
         b = Signal(b_raw, SigTime(0, 0, a.t.sps))
 
-    # -------- 计算重叠区间 ---------------------------------------------
+    # 2) 计算时间重叠；若无重叠取各自最短长度
     start = max(a.t.start, b.t.start)
     stop  = min(a.t.stop , b.t.stop )
-    # 若没有交集就按最短长度裁剪
-    if start >= stop:
-        # 取两端都能覆盖的最小长度
+    if start >= stop:          # 无重叠 → 按最短长度裁剪
         N = min(a.val.shape[0], b.val.shape[0])
-        start_a = a.t.start
-        start_b = b.t.start
-        a = _slice(a, start_a, start_a + N)
-        b = _slice(b, start_b, start_b + N)
-        return a, b
+        a_cut = _slice(a, a.t.start, a.t.start + N)
+        b_cut = _slice(b, b.t.start, b.t.start + N)
+    else:                       # 有重叠
+        a_cut = _slice(a, start, stop)
+        b_cut = _slice(b, start, stop)
 
-    # 有交集 → 直接裁剪到重叠区
-    return _slice(a, start, stop), _slice(b, start, stop)
+    # 3) 二次同步长度（因为 sps 可能不同）
+    N = min(a_cut.val.shape[0], b_cut.val.shape[0])
+    if a_cut.val.shape[0] != N:
+        a_cut = _slice(a_cut, a_cut.t.start, a_cut.t.start + N)
+    if b_cut.val.shape[0] != N:
+        b_cut = _slice(b_cut, b_cut.t.start, b_cut.t.start + N)
+
+    return a_cut, b_cut
 
 def loss_fn(module : layer.Layer,
             params : Dict,
