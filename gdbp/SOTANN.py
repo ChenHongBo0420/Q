@@ -311,32 +311,30 @@ def _slice_sig(sig: Signal, start: int, stop: int) -> Signal:
     xs = x[start - t.start : x.shape[0] + (stop - t.stop)]
     return Signal(xs, SigTime(start, stop, t.sps))
 
-def robust_align_len(a: Signal, b_like):
+def robust_align_len(sig_a: Signal,
+                     sig_b: Signal) -> Tuple[Signal, Signal]:
     """
-    返回 (a_aligned, b_aligned)，保证 a.val 和 b.val 的 **长度相等**。
-    b_like 可以是 Signal 或裸 ndarray。
+    截取 sig_a / sig_b 的最大重叠区间并返回新的 Signal。
+    两信号 *时间轴 sps 必须一致*，否则抛错。
     """
-    # —— 1) 保证两端都是 Signal ———————————————————————————
-    b = b_like if isinstance(b_like, Signal) else Signal(b_like, SigTime(0, 0, a.t.sps))
+    assert sig_a.t.sps == sig_b.t.sps, 'sps mismatch'
 
-    # —— 2) 先按时间坐标求重叠 —— 若无重叠就各取最短段 ——
-    start = max(a.t.start, b.t.start)
-    stop  = min(a.t.stop , b.t.stop )
-    if start >= stop:                       # 没交集
-        Na, Nb = a.val.shape[0], b.val.shape[0]
-        a_aln = _slice_sig(a, a.t.start, a.t.start + Na)
-        b_aln = _slice_sig(b, b.t.start, b.t.start + Nb)
-    else:                                   # 有交集
-        a_aln = _slice_sig(a, start, stop)
-        b_aln = _slice_sig(b, start, stop)
+    start = max(sig_a.t.start, sig_b.t.start)
+    stop  = min(sig_a.t.stop , sig_b.t.stop )
+    if start >= stop:
+        raise ValueError(f'No overlap between signals: '
+                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
+                         f'B[{sig_b.t.start},{sig_b.t.stop})')
 
-    # —— 3) 再裁到共同最短长度 N —— 避免 sps 不同造成残差 ——
-    N = min(a_aln.val.shape[0], b_aln.val.shape[0])
-    a_aln = Signal(a_aln.val[:N], SigTime(a_aln.t.start, a_aln.t.start+N, a_aln.t.sps))
-    b_aln = Signal(b_aln.val[:N], SigTime(b_aln.t.start, b_aln.t.start+N, b_aln.t.sps))
+    def _crop(sig: Signal):
+        x, t = sig
+        # 计算在自身数组上的切片索引
+        l = start - t.start
+        r = t.stop  - stop
+        return Signal(x[l: x.shape[0]-r], core.SigTime(start, stop, t.sps))
 
-    return a_aln, b_aln
-  
+    return _crop(sig_a), _crop(sig_b)
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state : Dict,
@@ -469,41 +467,46 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
+def test(model,
+         params,
+         data,
+         eval_range: tuple = (300000, -20000),
+         metric_fn = comm.qamqot):
+    """
+    覆盖 gdbp.SOTANN.test.
+    仅改一处：metric 计算前用 robust_align_len 裁剪 y_pred / x_ref
+    """
 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
+    # -------- forward --------
+    z_pred, _ = jit(model.module.apply, backend='cpu')(
+        {
+            'params'     : util.dict_merge(params, sparams),
+            'aux_inputs' : aux,
+            'const'      : const,
+            **state
+        },
+        core.Signal(data.y)
+    )
+
+    # -------- 对齐 --------
+    sig_pred, sig_ref = robust_align_len(
+        z_pred,
+        core.Signal(data.x)        # 整段真值
+    )
+
+    # -------- metric --------
+    metric = metric_fn(
+        sig_pred.val,
+        sig_ref.val,
+        scale=np.sqrt(10),
+        eval_range=eval_range
+    )
+    return metric, sig_pred
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
