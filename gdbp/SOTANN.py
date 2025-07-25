@@ -360,7 +360,7 @@ def loss_fn(module : layer.Layer,
     )
 
     # ---- 与真值对齐 ------------------------------------------------------------
-    z_align, x_align = robust_align(z_out, x)      # <= 关键改动
+    z_align, x_align = robust_align_len(z_out, core.Signal(x))
 
     # ---- 1) SNR + EVM ----------------------------------------------------------
     snr = si_snr_flat_amp_pair(jnp.abs(z_align.val), jnp.abs(x_align.val))
