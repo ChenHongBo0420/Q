@@ -303,48 +303,68 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):
+def align_signals(sig_a: Signal, sig_b: Signal):
+    """截取 sig_a / sig_b 的最大重叠区间并返回新的 Signal。
 
-    # ---- 合并可训练 + 静态参数 ---------------------------------
+    若两信号时间轴完全不重叠将抛出 ValueError。
+    仅对 .val 做切片；返回的 t 统一为 SigTime(0,0,sps)。
+    """
+    # ---- 取 overlap 起止 ------------------------------------
+    t_start = max(sig_a.t.start, sig_b.t.start)
+    t_stop  = min(sig_a.t.stop , sig_b.t.stop )
+    if t_start >= t_stop:
+        raise ValueError('align_signals: two signals have no overlap.')
+
+    # ---- 在各自数组上切片 ----------------------------------
+    a_s = t_start - sig_a.t.start
+    a_e = sig_a.val.shape[0] - (sig_a.t.stop - t_stop)
+    b_s = t_start - sig_b.t.start
+    b_e = sig_b.val.shape[0] - (sig_b.t.stop - t_stop)
+
+    sps = sig_a.t.sps                      # 两端 sps 必须一致
+    new_t = SigTime(0, 0, sps)
+    return (Signal(sig_a.val[a_s:a_e], new_t),
+            Signal(sig_b.val[b_s:b_e], new_t))
+
+def loss_fn(module: layer.Layer,
+            params : Dict,
+            state  : Dict,
+            y      : Array,
+            x      : Array,
+            aux    : Dict,
+            const  : Dict,
+            sparams: Dict,
+            β_ce   : float = 0.5,
+            λ_kl   : float = 1e-4):
+
     params_net = util.dict_merge(params, sparams)
 
-    # ---- 前向 --------------------------------------------------
+    # -------- Forward ---------------------------------------
     z_out, state_new = module.apply(
         {'params': params_net,
          'aux_inputs': aux,
          'const': const,
-         **state},                # 其余 collection 原样传回
-        core.Signal(y))           # 输入信号封装为 Signal
+         **state},
+        core.Signal(y))
 
-    # ---- 自动对齐：确保长度 / 起止一致 -------------------------
-    # ① z_aligned, x_aligned 的 .val 等长
-    # ② 若两段时间轴无交集会抛错，便于调试
-    z_aligned, x_aligned = core.align(z_out, core.Signal(x))
+    # -------- 对齐 Z / X ------------------------------------
+    z_aligned, x_aligned = align_signals(z_out, core.Signal(x))
 
-    # ===== Loss 1 : SNR + EVM ==================================
+    # ===== Loss‑1 : SNR + EVM ===============================
     snr = si_snr_flat_amp_pair(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
     evm = evm_ring          (jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
     loss_main = snr + 0.1 * evm
 
-    # ===== Loss 2 : Bit‑level BCE ==============================
+    # ===== Loss‑2 : Bit‑BCE =================================
     bit_bce = _bit_bce_loss_16qam(z_aligned.val, x_aligned.val)
     loss_main += β_ce * bit_bce
 
-    # ===== Loss 3 : Information‑Bottleneck KL =================
+    # ===== Loss‑3 : KL (Information Bottleneck) =============
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_aligned.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
-
+              
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
