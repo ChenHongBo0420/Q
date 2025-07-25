@@ -107,44 +107,77 @@ def fdbp_init(a: dict,
     return d_init, n_init
 
 
+# def model_init(data: gdat.Input,
+#                base_conf: dict,
+#                sparams_flatkeys: list,
+#                n_symbols: int = 4000,
+#                sps : int = 2,
+#                name='Model'):
+#     ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+#     depending on given N-filter length and trainable parameters
+
+#     Args:
+#         data:
+#         base_conf: a dict of kwargs to make base module, see `make_base_module`
+#         sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+#             For example, assume base module has parameters represented as nested dict
+#             {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+#              {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+#              of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+#             regexp key is supportted.
+#         n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+#             memory
+#         sps: sample per symbol. Only integer sps is supported now.
+
+#     Returns:
+#         a initialized model wrapped by a namedtuple
+#     '''
+    
+#     mod = make_base_module(**base_conf, w0=data.w0)
+#     y0 = data.y[:n_symbols * sps]
+#     rng0 = random.PRNGKey(0)
+#     z0, v0 = mod.init(rng0, core.Signal(y0))
+#     ol = z0.t.start - z0.t.stop
+#     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+#     state = v0['af_state']
+#     aux = v0['aux_inputs']
+#     const = v0['const']
+#     return Model(mod, (params, state, aux, const, sparams), ol, name)
+
 def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps : int = 2,
-               name='Model'):
-    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-    depending on given N-filter length and trainable parameters
-
-    Args:
-        data:
-        base_conf: a dict of kwargs to make base module, see `make_base_module`
-        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-            For example, assume base module has parameters represented as nested dict
-            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supportted.
-        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-            memory
-        sps: sample per symbol. Only integer sps is supported now.
-
-    Returns:
-        a initialized model wrapped by a namedtuple
-    '''
-    
+               sps: int = 2,
+               name: str = 'Model'):
+    """
+    与原 SOTANN.model_init 等价，只是在 v0 中若缺
+    'af_state' / 'aux_inputs' / 'const' 就填空 dict。
+    """
+    # 1. 构网络骨架
     mod = make_base_module(**base_conf, w0=data.w0)
-    y0 = data.y[:n_symbols * sps]
+
+    # 2. 随机一次 forward 拿到所有 collections
     rng0 = random.PRNGKey(0)
+    y0   = data.y[:n_symbols * sps]
     z0, v0 = mod.init(rng0, core.Signal(y0))
-    ol = z0.t.start - z0.t.stop
+
+    # -------- 补空 dict --------------
+    v0_mut = unfreeze(v0)
+    for col in ('af_state', 'aux_inputs', 'const'):
+        v0_mut.setdefault(col, {})
+    v0 = freeze(v0_mut)
+    # ---------------------------------
+
+    # 3. 拆可训练 / 静态参数
+    ol       = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+
+    # 4. 封装 Model
     state = v0['af_state']
-    aux = v0['aux_inputs']
+    aux   = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
-
-
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
