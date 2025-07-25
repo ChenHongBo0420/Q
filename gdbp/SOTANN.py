@@ -101,41 +101,38 @@ def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps: int = 2,
-               name: str = 'Model'):
-    """Robust version: auto‑fill missing collections to avoid KeyError."""
-    # ------------------------------------------------------------------
-    # 1) 构造基础网络
+               sps : int = 2,
+               name='Model'):
+    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+    depending on given N-filter length and trainable parameters
+
+    Args:
+        data:
+        base_conf: a dict of kwargs to make base module, see `make_base_module`
+        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+            For example, assume base module has parameters represented as nested dict
+            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+            regexp key is supportted.
+        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+            memory
+        sps: sample per symbol. Only integer sps is supported now.
+
+    Returns:
+        a initialized model wrapped by a namedtuple
+    '''
+    
     mod = make_base_module(**base_conf, w0=data.w0)
-
-    # ------------------------------------------------------------------
-    # 2) 用一段前导数据做一次 init()，获得所有变量 collections
-    y0   = data.y[:n_symbols * sps]
+    y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    z0, var0 = mod.init(rng0, core.Signal(y0))     # var0 = FrozenDict
-
-    # ------------------------------------------------------------------
-    # 3) 若缺 collection ⇒ 自动补 {}
-    var_mut = unfreeze(var0)
-    for col in ('af_state', 'aux_inputs', 'const'):
-        var_mut.setdefault(col, {})
-    var0 = freeze(var_mut)
-
-    # ------------------------------------------------------------------
-    # 4) 解析各类参数 / 变量
-    ol = z0.t.start - z0.t.stop                      # overall latency
-    sparams, params = util.dict_split(var0['params'], sparams_flatkeys)
-    state  = var0['af_state']
-    aux    = var0['aux_inputs']
-    const  = var0['const']
-
-    # ------------------------------------------------------------------
-    # 5) 返回包装好的 Model (保持原来的接口)
-    return Model(mod,
-                 (params, state, aux, const, sparams),
-                 ol,
-                 name)
-
+    z0, v0 = mod.init(rng0, core.Signal(y0))
+    ol = z0.t.start - z0.t.stop
+    sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+    state = v0['af_state']
+    aux = v0['aux_inputs']
+    const = v0['const']
+    return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
