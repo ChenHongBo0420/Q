@@ -304,27 +304,42 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def _slice_signal(sig: Signal, new_start: int, new_stop: int) -> Signal:
-    """返回 sig 在 [new_start, new_stop) 区间的切片。"""
+def _slice(sig: Signal, start: int, stop: int) -> Signal:
+    """返回 sig 在全局样本区间 [start, stop) 的切片。"""
     x, t = sig
-    # 提取与时间轴对应的样本区间
-    x_sliced = x[new_start - t.start : x.shape[0] + (new_stop - t.stop)]
-    t_sliced = core.SigTime(new_start, new_stop, t.sps)
-    return Signal(x_sliced, t_sliced)
+    # 把全局坐标映射到数组内部下标
+    x_slice = x[start - t.start : x.shape[0] + (stop - t.stop)]
+    return Signal(x_slice, SigTime(start, stop, t.sps))
 
-def align_signals(sig_a: Signal, sig_b: Signal):
+def robust_align(a: Signal, b_raw):
     """
-    截取两段 Signal 的 **最大重叠区间**，并返回 (sig_a_aligned, sig_b_aligned)。
-    若二者时间轴无交集则抛 ValueError 以便调试。
+    让网络输出 `a` 与真值 `b_raw` 在样本维度上对齐。
+    支持 `b_raw` 为:
+      • Signal (带/不带有效时间轴) • 裸 ndarray
+    总能返回 **长度一致** 的 `(a_aligned, b_aligned)`。
     """
-    start = max(sig_a.t.start, sig_b.t.start)
-    stop  = min(sig_a.t.stop , sig_b.t.stop )
+    # -------- 把 b_raw 也包装成 Signal ---------------------------------
+    if isinstance(b_raw, Signal):
+        b = b_raw
+    else:  # ndarray
+        # 如果没时间轴，就先用 (0,0) 占位
+        b = Signal(b_raw, SigTime(0, 0, a.t.sps))
+
+    # -------- 计算重叠区间 ---------------------------------------------
+    start = max(a.t.start, b.t.start)
+    stop  = min(a.t.stop , b.t.stop )
+    # 若没有交集就按最短长度裁剪
     if start >= stop:
-        raise ValueError(f'No overlap between signals: '
-                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
-                         f'B[{sig_b.t.start},{sig_b.t.stop})')
-    return (_slice_signal(sig_a, start, stop),
-            _slice_signal(sig_b, start, stop))
+        # 取两端都能覆盖的最小长度
+        N = min(a.val.shape[0], b.val.shape[0])
+        start_a = a.t.start
+        start_b = b.t.start
+        a = _slice(a, start_a, start_a + N)
+        b = _slice(b, start_b, start_b + N)
+        return a, b
+
+    # 有交集 → 直接裁剪到重叠区
+    return _slice(a, start, stop), _slice(b, start, stop)
 
 def loss_fn(module : layer.Layer,
             params : Dict,
@@ -336,11 +351,8 @@ def loss_fn(module : layer.Layer,
             sparams: Dict,
             β_ce   : float = 0.5,
             λ_kl   : float = 1e-4):
-    """
-    Same logic as before，但用 align_signals 保证 z/x 对齐，
-    避免长度 0 或 shape 不一致导致的 Dot / Einsum 报错。
-    """
-    # ------ 前向 ----------------------------------------------------------------
+    """训练损失：SNR+EVM + 可选 BCE + IB‑KL（含对齐鲁棒性）"""
+    # ---- 前向 ------------------------------------------------------------------
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net,
@@ -349,20 +361,20 @@ def loss_fn(module : layer.Layer,
         core.Signal(y)
     )
 
-    # ------ 与真值对齐 ----------------------------------------------------------
-    z_aligned, x_aligned = align_signals(z_out, core.Signal(x))
+    # ---- 与真值对齐 ------------------------------------------------------------
+    z_align, x_align = robust_align(z_out, x)      # <= 关键改动
 
-    # ------ Loss‑1 : SNR + EVM --------------------------------------------------
-    snr = si_snr_flat_amp_pair(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
-    evm = evm_ring(jnp.abs(z_aligned.val), jnp.abs(x_aligned.val))
+    # ---- 1) SNR + EVM ----------------------------------------------------------
+    snr = si_snr_flat_amp_pair(jnp.abs(z_align.val), jnp.abs(x_align.val))
+    evm = evm_ring(jnp.abs(z_align.val), jnp.abs(x_align.val))
     loss_main = snr + 0.1 * evm
 
-    # ------ Loss‑2 : Bit‑wise BCE ----------------------------------------------
-    bit_bce = _bit_bce_loss_16qam(z_aligned.val, x_aligned.val)
+    # ---- 2) Bit‑wise BCE -------------------------------------------------------
+    bit_bce = _bit_bce_loss_16qam(z_align.val, x_align.val)
     loss_main += β_ce * bit_bce
 
-    # ------ Loss‑3 : Information Bottleneck KL ---------------------------------
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_aligned.val)))
+    # ---- 3) Information‑Bottleneck KL -----------------------------------------
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_align.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
