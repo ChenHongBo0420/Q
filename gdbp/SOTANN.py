@@ -8,7 +8,7 @@ from functools import partial
 from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union, Tuple
-from . import data as gdat
+from . import Singledata as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
@@ -22,6 +22,7 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
+## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
@@ -29,26 +30,67 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
+
     _assert_taps(dtaps, ntaps, rtaps)
 
     d_init, n_init = init_fn
 
     if mode == 'train':
-        # configure mimo to its training mode
         mimo_train = True
     elif mode == 'test':
-        # mimo operates at training mode for the first 200000 symbols,
-        # then switches to tracking mode afterwards
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
 
+    # 定义串联的 FDBP 层
+    fdbp_series = layer.Serial(
+        layer.FDBP(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp1'),
+        layer.BatchPowerNorm(mode=mode),
+        # layer.MIMOFOEAf(name='FOEAf1',
+        #                 w0=w0,
+        #                 train=mimo_train,
+        #                 preslicer=core.conv1d_slicer(rtaps),
+        #                 foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='fdbp_series'
+    )
+
+    # 定义原有的串行分支
+    serial_branch = layer.Serial(
+        layer.FDBP1(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        # layer.MIMOFOEAf(name='FOEAf',
+        #                 w0=w0,
+        #                 train=mimo_train,
+        #                 preslicer=core.conv1d_slicer(rtaps),
+        #                 foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='serial_branch'  # 添加名称
+    )
+
+    # 定义基础模块
     base = layer.Serial(
-        layer.TimeCNN(),
-        layer.GatedRNN(),
-        layer.DenseHead(),)
+        layer.FanOut(num=2),
+        layer.Parallel(
+            fdbp_series,
+            serial_branch
+        ),
+        layer.FanInMean()
+    )
 
     return base
+  
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -133,6 +175,8 @@ def model_init(data: gdat.Input,
     aux = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
+
+
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
@@ -385,12 +429,11 @@ def train(model: Model,
                                                    module_state, y, x, aux,
                                                    const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
-                                
-                       
+
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
+         eval_range: tuple=(100000, 0),
          metric_fn=comm.qamqot):
     ''' testing, a simple forward pass
 
@@ -422,6 +465,7 @@ def test(model: Model,
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
+
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
