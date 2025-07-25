@@ -358,11 +358,11 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     x_val = x_align[:N]
 
     # ═════ 4) 计算各分量 loss ═════
-    snr = gb.si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
-    evm = gb.evm_ring(jnp.abs(z_val), jnp.abs(x_val))
+    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
+    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val))
     loss_main = snr + 0.1 * evm
 
-    bit_bce = gb._bit_bce_loss_16qam(z_val, x_val)
+    bit_bce = bit_bce_loss_16qam(z_val, x_val)
     loss_main += β_ce * bit_bce
 
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_val)))
