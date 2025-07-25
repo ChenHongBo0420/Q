@@ -305,73 +305,71 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def _slice(sig: Signal, start: int, stop: int) -> Signal:
-    """将 Signal 按全局坐标 [start, stop) 裁剪。"""
+def _slice_sig(sig: Signal, start: int, stop: int) -> Signal:
+    """按全局坐标 [start, stop) 裁剪 Signal."""
     x, t = sig
     xs = x[start - t.start : x.shape[0] + (stop - t.stop)]
     return Signal(xs, SigTime(start, stop, t.sps))
 
-def robust_align_len(a: Signal, b_raw):
-    """返回 (a_aligned, b_aligned)，保证 .val 长度完全一致。"""
-    # 1) 统一包装为 Signal
-    if isinstance(b_raw, Signal):
-        b = b_raw
-    else:
-        b = Signal(b_raw, SigTime(0, 0, a.t.sps))
+def robust_align_len(a: Signal, b_like):
+    """
+    返回 (a_aligned, b_aligned)，保证 a.val 和 b.val 的 **长度相等**。
+    b_like 可以是 Signal 或裸 ndarray。
+    """
+    # —— 1) 保证两端都是 Signal ———————————————————————————
+    b = b_like if isinstance(b_like, Signal) else Signal(b_like, SigTime(0, 0, a.t.sps))
 
-    # 2) 计算时间重叠；若无重叠取各自最短长度
+    # —— 2) 先按时间坐标求重叠 —— 若无重叠就各取最短段 ——
     start = max(a.t.start, b.t.start)
     stop  = min(a.t.stop , b.t.stop )
-    if start >= stop:          # 无重叠 → 按最短长度裁剪
-        N = min(a.val.shape[0], b.val.shape[0])
-        a_cut = _slice(a, a.t.start, a.t.start + N)
-        b_cut = _slice(b, b.t.start, b.t.start + N)
-    else:                       # 有重叠
-        a_cut = _slice(a, start, stop)
-        b_cut = _slice(b, start, stop)
+    if start >= stop:                       # 没交集
+        Na, Nb = a.val.shape[0], b.val.shape[0]
+        a_aln = _slice_sig(a, a.t.start, a.t.start + Na)
+        b_aln = _slice_sig(b, b.t.start, b.t.start + Nb)
+    else:                                   # 有交集
+        a_aln = _slice_sig(a, start, stop)
+        b_aln = _slice_sig(b, start, stop)
 
-    # 3) 二次同步长度（因为 sps 可能不同）
-    N = min(a_cut.val.shape[0], b_cut.val.shape[0])
-    if a_cut.val.shape[0] != N:
-        a_cut = _slice(a_cut, a_cut.t.start, a_cut.t.start + N)
-    if b_cut.val.shape[0] != N:
-        b_cut = _slice(b_cut, b_cut.t.start, b_cut.t.start + N)
+    # —— 3) 再裁到共同最短长度 N —— 避免 sps 不同造成残差 ——
+    N = min(a_aln.val.shape[0], b_aln.val.shape[0])
+    a_aln = Signal(a_aln.val[:N], SigTime(a_aln.t.start, a_aln.t.start+N, a_aln.t.sps))
+    b_aln = Signal(b_aln.val[:N], SigTime(b_aln.t.start, b_aln.t.start+N, b_aln.t.sps))
 
-    return a_cut, b_cut
-
-def loss_fn(module : layer.Layer,
-            params : Dict,
-            state  : Dict,
-            y      : core.Array,
-            x      : core.Array,
-            aux    : Dict,
-            const  : Dict,
+    return a_aln, b_aln
+  
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
             sparams: Dict,
-            β_ce   : float = 0.5,
-            λ_kl   : float = 1e-4):
-    """训练损失：SNR+EVM + 可选 BCE + IB‑KL（含对齐鲁棒性）"""
-    # ---- 前向 ------------------------------------------------------------------
-    params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net,
-         'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y)
-    )
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):
 
-    # ---- 与真值对齐 ------------------------------------------------------------
+    params_net = util.dict_merge(params, sparams)
+
+    # ── 前向 ──────────────────────────────────────────
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
+
+    # ── 与真值对齐（时间 + 长度）───────────────────────
     z_align, x_align = robust_align_len(z_out, core.Signal(x))
 
-    # ---- 1) SNR + EVM ----------------------------------------------------------
+    # ---------- # 现在两端的 .val 已保证完全同长 # ----------
+
+    # — 1) SNR + EVM —
     snr = si_snr_flat_amp_pair(jnp.abs(z_align.val), jnp.abs(x_align.val))
     evm = evm_ring(jnp.abs(z_align.val), jnp.abs(x_align.val))
     loss_main = snr + 0.1 * evm
 
-    # ---- 2) Bit‑wise BCE -------------------------------------------------------
+    # — 2) Bit‑BCE —
     bit_bce = _bit_bce_loss_16qam(z_align.val, x_align.val)
     loss_main += β_ce * bit_bce
 
-    # ---- 3) Information‑Bottleneck KL -----------------------------------------
+    # — 3) Information‑Bottleneck KL —
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_align.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
