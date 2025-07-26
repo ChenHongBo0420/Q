@@ -269,38 +269,57 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
+import jax.numpy as jnp
+from flax.core import freeze, unfreeze
+from types import MethodType
+from commplax.module import core
+
+def robust_align_len(sig_a: core.Signal, sig_b: core.Signal):
+    """返回两段 Signal 在『最大交集区间』截取后且长度一致的新信号"""
+    # ---------- 时间交集 ----------
+    start = max(sig_a.t.start, sig_b.t.start)
+    stop  = min(sig_a.t.stop , sig_b.t.stop )
+    if start >= stop:
+        raise ValueError(f'No overlap between signals: '
+                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
+                         f'B[{sig_b.t.start},{sig_b.t.stop})')
+    # ---------- 截取 ----------
+    def _crop(sig):
+        val = sig.val[start - sig.t.start : sig.val.shape[0] + (stop - sig.t.stop)]
+        return core.Signal(val, sig.t)  # 时间戳保持原样
+    sig_a_c = _crop(sig_a)
+    sig_b_c = _crop(sig_b)
+    # ---------- 取最短长度 ----------
+    L = min(sig_a_c.val.shape[0], sig_b_c.val.shape[0])
+    sig_a_c = core.Signal(sig_a_c.val[:L], sig_a_c.t)
+    sig_b_c = core.Signal(sig_b_c.val[:L], sig_b_c.t)
+    return sig_a_c, sig_b_c
+
+
+def _loss_fn(module, params, state, y, x, aux,
+                     const, sparams, β_ce=0.5, λ_kl=1e-4):
 
     params_net = util.dict_merge(params, sparams)
 
-    # ── 前向 ──────────────────────────────────────────
+    # ── 前向 ─────────────────────────────────────────
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
          'const': const, **state}, core.Signal(y))
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
+    # ── 对齐（新）───────────────────────────────────
+    z_align, x_align = robust_align_len(z_out, core.Signal(x))
 
-    # ── (1) SNR + EVM  ───────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    # ── 1) SNR + EVM ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_align.val), jnp.abs(x_align.val))
+    evm = evm_ring(jnp.abs(z_align.val), jnp.abs(x_align.val))
     loss_main = snr + 0.1 * evm
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    # ── 2) Bit‑BCE ─────────────────────────────────
+    bit_bce = _bit_bce_loss_16qam(z_align.val, x_align.val)
     loss_main += β_ce * bit_bce
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # ── 3) IB‑KL ───────────────────────────────────
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_align.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
