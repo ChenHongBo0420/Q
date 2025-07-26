@@ -274,28 +274,63 @@ from flax.core import freeze, unfreeze
 from types import MethodType
 from commplax.module import core
 
+import jax
+import jax.numpy as jnp
+from commplax.module import core
+
+def _best_lag(a: jnp.ndarray, b: jnp.ndarray,
+              max_shift: int = 128) -> int:
+    """
+    返回 b 相对于 a 需要前移(正) / 后移(负) 的 sample 数，使 |a| 与 |b| 相关性最大。
+    用 |·| 而不用复数，可以避免相位影响。
+    """
+    # 截出对齐窗口（防止 batch 很长导致 FFT 内存炸）
+    N = min(a.shape[0], 4096)
+    a_seg = jax.lax.stop_gradient(jnp.abs(a[:N]))
+    b_seg = jax.lax.stop_gradient(jnp.abs(b[:N]))
+
+    # 直接相关（时域差分法，N 不大可以接受）
+    # r[k] = Σ a[n]·b[n‑k]，k∈[-max_shift, max_shift]
+    lags = jnp.arange(-max_shift, max_shift + 1)
+    def corr(k):
+        if k >= 0:
+            return jnp.dot(a_seg[k:], b_seg[:N - k])
+        else:
+            k = -k
+            return jnp.dot(a_seg[:N - k], b_seg[k:])
+    r = jax.vmap(corr)(lags)
+    return int(lags[jnp.argmax(r)])
+
 def robust_align_len(sig_a: core.Signal,
-                     sig_b: core.Signal) -> Tuple[core.Signal, core.Signal]:
+                     sig_b: core.Signal,
+                     max_shift: int = 128):
     """
-    先按时间戳求交集；若交集为空，则忽略时间戳，
-    直接按最短长度裁剪，使两段波形 val 等长。
+    · 先按时间戳求交集；若无交集 ➜ 通过互相关找到最佳整数时移，再裁剪。
+    · 输出两段 Signal，val 完全等长。
     """
-    # ── 按时间戳求交集 ─────────────────────────────
+    # ---------- 1) 先尝试时间戳交集 ----------
     start = max(sig_a.t.start, sig_b.t.start)
     stop  = min(sig_a.t.stop , sig_b.t.stop )
-
-    if start < stop:            # 有交集 ➜ 正常裁剪
+    if start < stop:                     # 有交集
         def crop(sig):
             v = sig.val[start - sig.t.start : sig.val.shape[0] + (stop - sig.t.stop)]
             return core.Signal(v, sig.t)
         a_c, b_c = crop(sig_a), crop(sig_b)
 
-    else:                       # 无交集 ➜ 退化为长度对齐
-        L = min(sig_a.val.shape[0], sig_b.val.shape[0])
-        a_c = core.Signal(sig_a.val[:L], sig_a.t)
-        b_c = core.Signal(sig_b.val[:L], sig_b.t)
+    else:                                # 无交集 ➜ 做互相关
+        lag = _best_lag(sig_a.val.squeeze(), sig_b.val.squeeze(),
+                        max_shift=max_shift)
 
-    # （再次）取最短，保证完全等长
+        # lag>0:  b 要向前挪（裁 b 头 / 裁 a 尾），lag<0 反之
+        if lag >= 0:
+            a_c = core.Signal(sig_a.val[:-lag] if lag else sig_a.val, sig_a.t)
+            b_c = core.Signal(sig_b.val[lag:], sig_b.t)
+        else:
+            lag = -lag
+            a_c = core.Signal(sig_a.val[lag:], sig_a.t)
+            b_c = core.Signal(sig_b.val[:-lag] if lag else sig_b.val, sig_b.t)
+
+    # ---------- 2) 再次保证完全等长 ----------
     L = min(a_c.val.shape[0], b_c.val.shape[0])
     return (core.Signal(a_c.val[:L], a_c.t),
             core.Signal(b_c.val[:L], b_c.t))
