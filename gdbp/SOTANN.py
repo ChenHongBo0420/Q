@@ -296,7 +296,7 @@ def robust_align_len(sig_a: core.Signal, sig_b: core.Signal):
     return sig_a_c, sig_b_c
 
 
-def _loss_fn(module, params, state, y, x, aux,
+def loss_fn(module, params, state, y, x, aux,
                      const, sparams, β_ce=0.5, λ_kl=1e-4):
 
     params_net = util.dict_merge(params, sparams)
