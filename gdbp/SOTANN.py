@@ -1,4 +1,3 @@
-# CE/BCE loss weighted bit-BCE
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
@@ -17,13 +16,9 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
-from flax.core import unfreeze, freeze
-Signal = core.Signal
-SigTime     = core.SigTime     
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
-
 
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
@@ -52,16 +47,18 @@ def make_base_module(steps: int = 3,
                    ntaps=ntaps,
                    d_init=d_init,
                    n_init=n_init),
-        layer.BatchPowerNorm(mode=mode),)
-        # layer.MIMOFOEAf(name='FOEAf',
-        #                 w0=w0,
-        #                 train=mimo_train,
-        #                 preslicer=core.conv1d_slicer(rtaps),
-        #                 foekwargs={}),
-        # layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        # layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
         
     return base
+
+  
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -110,77 +107,44 @@ def fdbp_init(a: dict,
     return d_init, n_init
 
 
-# def model_init(data: gdat.Input,
-#                base_conf: dict,
-#                sparams_flatkeys: list,
-#                n_symbols: int = 4000,
-#                sps : int = 2,
-#                name='Model'):
-#     ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-#     depending on given N-filter length and trainable parameters
-
-#     Args:
-#         data:
-#         base_conf: a dict of kwargs to make base module, see `make_base_module`
-#         sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-#             For example, assume base module has parameters represented as nested dict
-#             {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-#              {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-#              of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-#             regexp key is supportted.
-#         n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-#             memory
-#         sps: sample per symbol. Only integer sps is supported now.
-
-#     Returns:
-#         a initialized model wrapped by a namedtuple
-#     '''
-    
-#     mod = make_base_module(**base_conf, w0=data.w0)
-#     y0 = data.y[:n_symbols * sps]
-#     rng0 = random.PRNGKey(0)
-#     z0, v0 = mod.init(rng0, core.Signal(y0))
-#     ol = z0.t.start - z0.t.stop
-#     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-#     state = v0['af_state']
-#     aux = v0['aux_inputs']
-#     const = v0['const']
-#     return Model(mod, (params, state, aux, const, sparams), ol, name)
-
 def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps: int = 2,
-               name: str = 'Model'):
-    """
-    与原 SOTANN.model_init 等价，只是在 v0 中若缺
-    'af_state' / 'aux_inputs' / 'const' 就填空 dict。
-    """
-    # 1. 构网络骨架
+               sps : int = 2,
+               name='Model'):
+    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+    depending on given N-filter length and trainable parameters
+
+    Args:
+        data:
+        base_conf: a dict of kwargs to make base module, see `make_base_module`
+        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+            For example, assume base module has parameters represented as nested dict
+            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+            regexp key is supportted.
+        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+            memory
+        sps: sample per symbol. Only integer sps is supported now.
+
+    Returns:
+        a initialized model wrapped by a namedtuple
+    '''
+    
     mod = make_base_module(**base_conf, w0=data.w0)
-
-    # 2. 随机一次 forward 拿到所有 collections
+    y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    y0   = data.y[:n_symbols * sps]
     z0, v0 = mod.init(rng0, core.Signal(y0))
-
-    # -------- 补空 dict --------------
-    v0_mut = unfreeze(v0)
-    for col in ('af_state', 'aux_inputs', 'const'):
-        v0_mut.setdefault(col, {})
-    v0 = freeze(v0_mut)
-    # ---------------------------------
-
-    # 3. 拆可训练 / 静态参数
-    ol       = z0.t.start - z0.t.stop
+    ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-
-    # 4. 封装 Model
     state = v0['af_state']
-    aux   = v0['aux_inputs']
+    aux = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
+
+
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
@@ -305,72 +269,42 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def _slice_sig(sig: Signal, start: int, stop: int) -> Signal:
-    """按全局坐标 [start, stop) 裁剪 Signal."""
-    x, t = sig
-    xs = x[start - t.start : x.shape[0] + (stop - t.stop)]
-    return Signal(xs, SigTime(start, stop, t.sps))
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
+            sparams: Dict,
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
-def robust_align_len(sig_a: Signal,
-                     sig_b: Signal) -> Tuple[Signal, Signal]:
-    """
-    截取 sig_a / sig_b 的最大重叠区间并返回新的 Signal。
-    两信号 *时间轴 sps 必须一致*，否则抛错。
-    """
-    assert sig_a.t.sps == sig_b.t.sps, 'sps mismatch'
-
-    start = max(sig_a.t.start, sig_b.t.start)
-    stop  = min(sig_a.t.stop , sig_b.t.stop )
-    if start >= stop:
-        raise ValueError(f'No overlap between signals: '
-                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
-                         f'B[{sig_b.t.start},{sig_b.t.stop})')
-
-    def _crop(sig: Signal):
-        x, t = sig
-        # 计算在自身数组上的切片索引
-        l = start - t.start
-        r = t.stop  - stop
-        return Signal(x[l: x.shape[0]-r], core.SigTime(start, stop, t.sps))
-
-    return _crop(sig_a), _crop(sig_b)
-
-def loss_fn(module, params, state, y, x, aux, const, sparams,
-                      β_ce: float = .5, λ_kl: float = 1e-4):
-    """与官方 loss_fn 完全一致，只把对齐方式换回『切片』。"""
-
-    # ═════ 1) 合并可训练 + 静态参数 ═════
     params_net = util.dict_merge(params, sparams)
 
-    # ═════ 2) 前向 ═════
+    # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state},
-        core.Signal(y))
+         'const': const, **state}, core.Signal(y))
 
-    # ═════ 3) **对齐真值** ── 回到作者原来的切片方式 ═════
-    # stop 可能为负；Python slice 能正确处理
-    x_align = x[z_out.t.start : z_out.t.stop]
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ---- 确保两端同长（极端情况下多‑余位再裁一下） ----
-    N = min(z_out.val.shape[0], x_align.shape[0])
-    z_val = z_out.val[:N]
-    x_val = x_align[:N]
-
-    # ═════ 4) 计算各分量 loss ═════
-    snr = si_snr_flat_amp_pair(jnp.abs(z_val), jnp.abs(x_val))
-    evm = evm_ring(jnp.abs(z_val), jnp.abs(x_val))
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
     loss_main = snr + 0.1 * evm
 
-    bit_bce = _bit_bce_loss_16qam(z_val, x_val)
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
     loss_main += β_ce * bit_bce
 
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_val)))
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
 
     return total_loss, state_new
 
-              
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -465,46 +399,41 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model,
-         params,
-         data,
-         eval_range: tuple = (300000, -20000),
-         metric_fn = comm.qamqot):
-    """
-    覆盖 gdbp.SOTANN.test.
-    仅改一处：metric 计算前用 robust_align_len 裁剪 y_pred / x_ref
-    """
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-        params = model.initvar[0]
+      params = model.initvar[0]
 
-    # -------- forward --------
-    z_pred, _ = jit(model.module.apply, backend='cpu')(
-        {
-            'params'     : util.dict_merge(params, sparams),
-            'aux_inputs' : aux,
-            'const'      : const,
-            **state
-        },
-        core.Signal(data.y)
-    )
-
-    # -------- 对齐 --------
-    sig_pred, sig_ref = robust_align_len(
-        z_pred,
-        core.Signal(data.x)        # 整段真值
-    )
-
-    # -------- metric --------
-    metric = metric_fn(
-        sig_pred.val,
-        sig_ref.val,
-        scale=np.sqrt(10),
-        eval_range=eval_range
-    )
-    return metric, sig_pred
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
 
                 
 def equalize_dataset(model_te, params, state_bundle, data):
