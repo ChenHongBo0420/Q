@@ -274,26 +274,32 @@ from flax.core import freeze, unfreeze
 from types import MethodType
 from commplax.module import core
 
-def robust_align_len(sig_a: core.Signal, sig_b: core.Signal):
-    """返回两段 Signal 在『最大交集区间』截取后且长度一致的新信号"""
-    # ---------- 时间交集 ----------
+def robust_align_len(sig_a: core.Signal,
+                     sig_b: core.Signal) -> Tuple[core.Signal, core.Signal]:
+    """
+    先按时间戳求交集；若交集为空，则忽略时间戳，
+    直接按最短长度裁剪，使两段波形 val 等长。
+    """
+    # ── 按时间戳求交集 ─────────────────────────────
     start = max(sig_a.t.start, sig_b.t.start)
     stop  = min(sig_a.t.stop , sig_b.t.stop )
-    if start >= stop:
-        raise ValueError(f'No overlap between signals: '
-                         f'A[{sig_a.t.start},{sig_a.t.stop}) vs '
-                         f'B[{sig_b.t.start},{sig_b.t.stop})')
-    # ---------- 截取 ----------
-    def _crop(sig):
-        val = sig.val[start - sig.t.start : sig.val.shape[0] + (stop - sig.t.stop)]
-        return core.Signal(val, sig.t)  # 时间戳保持原样
-    sig_a_c = _crop(sig_a)
-    sig_b_c = _crop(sig_b)
-    # ---------- 取最短长度 ----------
-    L = min(sig_a_c.val.shape[0], sig_b_c.val.shape[0])
-    sig_a_c = core.Signal(sig_a_c.val[:L], sig_a_c.t)
-    sig_b_c = core.Signal(sig_b_c.val[:L], sig_b_c.t)
-    return sig_a_c, sig_b_c
+
+    if start < stop:            # 有交集 ➜ 正常裁剪
+        def crop(sig):
+            v = sig.val[start - sig.t.start : sig.val.shape[0] + (stop - sig.t.stop)]
+            return core.Signal(v, sig.t)
+        a_c, b_c = crop(sig_a), crop(sig_b)
+
+    else:                       # 无交集 ➜ 退化为长度对齐
+        L = min(sig_a.val.shape[0], sig_b.val.shape[0])
+        a_c = core.Signal(sig_a.val[:L], sig_a.t)
+        b_c = core.Signal(sig_b.val[:L], sig_b.t)
+
+    # （再次）取最短，保证完全等长
+    L = min(a_c.val.shape[0], b_c.val.shape[0])
+    return (core.Signal(a_c.val[:L], a_c.t),
+            core.Signal(b_c.val[:L], b_c.t))
+
 
 
 def loss_fn(module, params, state, y, x, aux,
