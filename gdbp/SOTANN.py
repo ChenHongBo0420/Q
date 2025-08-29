@@ -313,77 +313,119 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
         
 
 
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):
-    """
-    商空间对齐版损失：
-      1) 先在 U(1)×R+ 上把 ŷ 对齐到 x（相位×尺度闭式解）
-      2) 在对齐后的输出上计算 EVM、SI-SNR、Bit-BCE
-      3) KL 作为信息瓶颈正则（保持原实现）
-    返回: (total_loss, state_new)
-    """
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state : Dict,
+#             y     : Array,
+#             x     : Array,
+#             aux   : Dict,
+#             const : Dict,
+#             sparams: Dict,
+#             β_ce : float = 0.5,
+#             λ_kl : float = 1e-4):
+#     """
+#     商空间对齐版损失：
+#       1) 先在 U(1)×R+ 上把 ŷ 对齐到 x（相位×尺度闭式解）
+#       2) 在对齐后的输出上计算 EVM、SI-SNR、Bit-BCE
+#       3) KL 作为信息瓶颈正则（保持原实现）
+#     返回: (total_loss, state_new)
+#     """
 
-    # ---- 前向 ----
+#     # ---- 前向 ----
+#     params_net = util.dict_merge(params, sparams)
+#     z_out, state_new = module.apply(
+#         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+#         core.Signal(y))
+
+#     # 参考与预测
+#     x_ref = x[z_out.t.start:z_out.t.stop]     # 真实符号（裁剪后）
+#     yhat  = z_out.val                          # 预测复符号（complex）
+
+#     # ---- 相位×尺度闭式对齐（可微，稳定）----
+#     # 先把对齐在扁平空间里计算（标量 α 与相位因子对整段生效），再还原形状
+#     y_flat = yhat.reshape(-1)
+#     x_flat = x_ref.reshape(-1)
+
+#     zc = jnp.vdot(y_flat, x_flat)                   # <ŷ, x>
+#     p  = zc / (jnp.abs(zc) + 1e-8)                  # 单位相位子，避免 atan2 奇异
+#     y_rm_phase = yhat * jnp.conj(p)                 # 去相位：e^{-jφ} = conj(p)
+
+#     num = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), x_flat))
+#     den = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), y_rm_phase.reshape(-1))) + 1e-8
+#     alpha = num / den                                # 最优尺度
+#     y_aligned = alpha * y_rm_phase                   # 对齐后的预测 ŷ'
+
+#     # ---- 任务一致的评分（全部在 y_aligned 上计算）----
+#     # 1) EVM（归一化 MSE，Q² 代理）
+#     evm_num = jnp.mean(jnp.abs(y_aligned - x_ref)**2)
+#     evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
+#     evm = evm_num / evm_den
+
+#     # 2) SI-SNR（复数版，贴近波形一致性）
+#     t = x_ref.reshape(-1)
+#     e = y_aligned.reshape(-1)
+#     a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
+#     s = a * t
+#     err = e - s
+#     snr = -10.0 * jnp.log10(
+#         (jnp.real(jnp.vdot(s, s)) + 1e-8) /
+#         (jnp.real(jnp.vdot(err, err)) + 1e-8)
+#     )
+
+#     # 3) Bit-BCE（在对齐后的星座上做判决概率）
+#     bit_bce = _bit_bce_loss_16qam(y_aligned, x_ref)
+
+#     # ---- 信息瓶颈 KL 正则（保持原实现；用未对齐输出以限制绝对幅度/能量）----
+#     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
+
+#     # ---- 组合 ----
+#     loss_main  = snr + 0.1 * evm + β_ce * bit_bce
+#     total_loss = loss_main + λ_kl * kl_ib
+#     return total_loss, state_new
+
+def loss_fn(module, params, state, y, x, aux, const, sparams,
+            β_ce: float = 0.5, λ_kl: float = 1e-4):
+
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y))
-
-    # 参考与预测
-    x_ref = x[z_out.t.start:z_out.t.stop]     # 真实符号（裁剪后）
-    yhat  = z_out.val                          # 预测复符号（complex）
-
-    # ---- 相位×尺度闭式对齐（可微，稳定）----
-    # 先把对齐在扁平空间里计算（标量 α 与相位因子对整段生效），再还原形状
-    y_flat = yhat.reshape(-1)
-    x_flat = x_ref.reshape(-1)
-
-    zc = jnp.vdot(y_flat, x_flat)                   # <ŷ, x>
-    p  = zc / (jnp.abs(zc) + 1e-8)                  # 单位相位子，避免 atan2 奇异
-    y_rm_phase = yhat * jnp.conj(p)                 # 去相位：e^{-jφ} = conj(p)
-
-    num = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), x_flat))
-    den = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), y_rm_phase.reshape(-1))) + 1e-8
-    alpha = num / den                                # 最优尺度
-    y_aligned = alpha * y_rm_phase                   # 对齐后的预测 ŷ'
-
-    # ---- 任务一致的评分（全部在 y_aligned 上计算）----
-    # 1) EVM（归一化 MSE，Q² 代理）
-    evm_num = jnp.mean(jnp.abs(y_aligned - x_ref)**2)
-    evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
-    evm = evm_num / evm_den
-
-    # 2) SI-SNR（复数版，贴近波形一致性）
-    t = x_ref.reshape(-1)
-    e = y_aligned.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-    s = a * t
-    err = e - s
-    snr = -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-        (jnp.real(jnp.vdot(err, err)) + 1e-8)
+        core.Signal(y)
     )
 
-    # 3) Bit-BCE（在对齐后的星座上做判决概率）
-    bit_bce = _bit_bce_loss_16qam(y_aligned, x_ref)
+    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
+    yhat  = z_out.val                       # 预测复符号
 
-    # ---- 信息瓶颈 KL 正则（保持原实现；用未对齐输出以限制绝对幅度/能量）----
+    # --- 仅移除相位（商空间代表），并 stop-gradient ---
+    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
+    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
+    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
+    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
+    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
+
+    # --- 任务一致计分（在 y_al 上）---
+    # EVM（Q²代理）
+    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
+           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
+
+    # SI-SNR（复数版）
+    t = x_ref.reshape(-1); e = y_al.reshape(-1)
+    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
+    s = a * t
+    snr = -10.0 * jnp.log10(
+        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
+        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
+    )
+
+    # Bit-BCE（对齐后星座）
+    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
+
+    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
 
-    # ---- 组合 ----
     loss_main  = snr + 0.1 * evm + β_ce * bit_bce
     total_loss = loss_main + λ_kl * kl_ib
     return total_loss, state_new
-
-
+              
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -478,43 +520,64 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
+# def test(model: Model,
+#          params: Dict,
+#          data: gdat.Input,
+#          eval_range: tuple=(300000, -20000),
+#          metric_fn=comm.qamqot):
+#     ''' testing, a simple forward pass
+
+#         Args:
+#             model: Model namedtuple return by `model_init`
+#         data: dataset
+#         eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+#         metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+#             BER, Q, SER and more metrics.
+
+#         Returns:
+#             evaluated matrics and equalized symbols
+#     '''
+
+#     state, aux, const, sparams = model.initvar[1:]
+#     aux = core.dict_replace(aux, {'truth': data.x})
+#     if params is None:
+#       params = model.initvar[0]
+
+#     z, _ = jit(model.module.apply,
+#                backend='cpu')({
+#                    'params': util.dict_merge(params, sparams),
+#                    'aux_inputs': aux,
+#                    'const': const,
+#                    **state
+#                }, core.Signal(data.y))
+#     metric = metric_fn(z.val,
+#                        data.x[z.t.start:z.t.stop],
+#                        scale=np.sqrt(10),
+#                        eval_range=eval_range)
+#     return metric, z
+
+
+def test(model: Model, params: Dict, data: gdat.Input, eval_range=(300000, -20000),
          metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
     state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
+    # ★ 测试期不喂真值，避免分布错位
+    aux = core.dict_replace(aux, {'truth': None})
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
+    if params is None:
+        params = model.initvar[0]
+
+    z, _ = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux, 'const': const, **state
+    }, core.Signal(data.y))
+
     metric = metric_fn(z.val,
                        data.x[z.t.start:z.t.stop],
                        scale=np.sqrt(10),
                        eval_range=eval_range)
     return metric, z
 
-                
+
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
