@@ -23,21 +23,26 @@ from commplax.module import core, layer
 Array = Any
 Dict  = Union[dict, flax.core.FrozenDict]
 Model = namedtuple('Model', 'module initvar overlaps name')
+try:
+    _ = layer.Identity
+    def _id_block(name):
+        return layer.Identity(name=name)
+except Exception:
+    def _NoOp(scope, signal, **kwargs):
+        return signal
+    def _id_block(name):
+        return _NoOp
 
-# ---------------------------
-# 与你原来一致的模块构建（保持命名）
-# ---------------------------
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
-                     mode: str = 'train'):
-    """
-    不改结构：含两个分支（FDBP + FDBP1），FOEAf1/FOEAf 与 RConv1/RConv 命名保持不变。
-    """
+                     mode: str = 'train',
+                     use_qal: bool = False):     # ★ 新增：训练期旁路开关
     _assert_taps(dtaps, ntaps, rtaps)
+
     d_init, n_init = init_fn
 
     if mode == 'train':
@@ -45,42 +50,65 @@ def make_base_module(steps: int = 3,
     elif mode == 'test':
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
-        raise ValueError('invalid mode %s' % mode)
+        raise ValueError(f'invalid mode {mode}')
 
-    # 串联 FDBP 分支
+    # ── 训练期若 use_qal=True：旁路 FOE/MIMOAF，避免“吃梯度” ──
+    if mode == 'train' and use_qal:
+        # 名字仍然叫 FOEAf1 / FOEAf，以保证与原图一致（但用 Identity 旁路）
+        foe_block_series = _id_block('FOEAf1')   # 代替原 FOEAf1
+        mimo_block_series = _id_block('MIMOAF1') # 代替原 MIMOAF（该名字仅用于标识）
+        foe_block_serial = _id_block('FOEAf')    # 代替原 FOEAf
+        mimo_block_serial = _id_block('MIMOAF')  # 代替原 MIMOAF
+    else:
+        foe_block_series = layer.MIMOFOEAf(name='FOEAf1',
+                                           w0=w0, train=mimo_train,
+                                           preslicer=core.conv1d_slicer(rtaps),
+                                           foekwargs={})
+        mimo_block_series = layer.MIMOAF(train=mimo_train)
+
+        foe_block_serial = layer.MIMOFOEAf(name='FOEAf',
+                                           w0=w0, train=mimo_train,
+                                           preslicer=core.conv1d_slicer(rtaps),
+                                           foekwargs={})
+        mimo_block_serial = layer.MIMOAF(train=mimo_train)
+
+    # ── 分支 1：FDBP 串联 ──
     fdbp_series = layer.Serial(
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
-                   d_init=d_init, n_init=n_init, name='fdbp1'),
+        layer.FDBP(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init,
+                   name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf1',
-                        w0=w0, train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
+        foe_block_series,                                 # ← 由上面的开关控制
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
+        mimo_block_series,
         name='fdbp_series'
     )
 
-    # 原有串行分支（保留 FDBP1）
+    # ── 分支 2：原有串行分支 ──
     serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
-                    d_init=d_init, n_init=n_init),
+        layer.FDBP1(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0, train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
+        foe_block_serial,                                  # ← 同步控制
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
+        mimo_block_serial,
         name='serial_branch'
     )
 
+    # ── 汇合 ──
     base = layer.Serial(
         layer.FanOut(num=2),
         layer.Parallel(fdbp_series, serial_branch),
         layer.FanInMean()
     )
     return base
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     """保持你原来的奇数 tap 约束"""
