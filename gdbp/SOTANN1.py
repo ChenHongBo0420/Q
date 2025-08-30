@@ -32,7 +32,7 @@ except Exception:
         return signal
     def _id_block(name):
         return _NoOp
-
+        
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
@@ -51,9 +51,9 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError(f'invalid mode {mode}')
 
-    # ---------------- QAL 训练期：FOE 打开、MIMOAF 冻结 ----------------
+    # ---------------- QAL（训练期）：FOE 打开，MIMOAF 也要工作 ----------------
     if mode == 'train' and use_qal:
-        # FOE 仍然使用原来的名字，保证 checkpoint/path 不变
+        # 保留原名字，保证可复用旧 ckpt
         foe_block_series  = layer.MIMOFOEAf(name='FOEAf1',
                                             w0=w0, train=True,
                                             preslicer=core.conv1d_slicer(rtaps),
@@ -62,11 +62,11 @@ def make_base_module(steps: int = 3,
                                             w0=w0, train=True,
                                             preslicer=core.conv1d_slicer(rtaps),
                                             foekwargs={})
-        # MIMOAF 仅用于符号率整形/降采，冻结自适应
-        mimo_block_series = layer.MIMOAF(train=False)
-        mimo_block_serial = layer.MIMOAF(train=False)
+        # 关键：MIMOAF 必须运行（DD 模式），否则符号率/时序对不上
+        mimo_block_series = layer.MIMOAF(train=True)
+        mimo_block_serial = layer.MIMOAF(train=True)
     else:
-        # 测试或非 QAL：全部按原逻辑
+        # 测试或非 QAL：按原逻辑
         foe_block_series  = layer.MIMOFOEAf(name='FOEAf1',
                                             w0=w0, train=mimo_train_flag,
                                             preslicer=core.conv1d_slicer(rtaps),
@@ -87,7 +87,6 @@ def make_base_module(steps: int = 3,
         mimo_block_series,
         name='fdbp_series'
     )
-
     serial_branch = layer.Serial(
         layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
                     d_init=d_init, n_init=n_init),
@@ -97,13 +96,13 @@ def make_base_module(steps: int = 3,
         mimo_block_serial,
         name='serial_branch'
     )
-
     base = layer.Serial(
         layer.FanOut(num=2),
         layer.Parallel(fdbp_series, serial_branch),
         layer.FanInMean()
     )
     return base
+
 
 
 
