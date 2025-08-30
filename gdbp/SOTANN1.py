@@ -149,9 +149,8 @@ def fdbp_init(a: dict,
 
     return d_init, n_init
 
-# ---------------------------
-# 模型初始化（与你原实现兼容）
-# ---------------------------
+from flax.core import freeze  # 顶部确保有这个导入
+
 def model_init(data,
                base_conf: dict,
                sparams_flatkeys: list,
@@ -159,18 +158,31 @@ def model_init(data,
                sps : int = 2,
                name='Model'):
     """
-    不改接口；保持返回 (Model.module, initvar, overlaps, name)
+    初始化模型；与旧接口兼容。
+    关键点：
+      - 可能不存在 'af_state' / 'aux_inputs' / 'const' 集合时，给空的 FrozenDict
+      - 将 module_state 组织为 {'af_state': ...} 的顶层集合字典，便于 apply(**state)
     """
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
+
+    # 可训练 vs 静态参数拆分
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-    state = v0['af_state']
-    aux = v0['aux_inputs']
-    const = v0['const']
-    return Model(mod, (params, state, aux, const, sparams), ol, name)
+
+    # ★ 鲁棒获取各集合（可能不存在）
+    af_state  = v0.get('af_state',  freeze({}))
+    aux_inputs = v0.get('aux_inputs', freeze({}))
+    const     = v0.get('const',     freeze({}))
+
+    # ★ 注意：state 需要是“顶层集合字典”
+    state = {'af_state': af_state}
+
+    from collections import namedtuple
+    Model = namedtuple('Model', 'module initvar overlaps name')
+    return Model(mod, (params, state, aux_inputs, const, sparams), ol, name)
 
 # ---------------------------
 # 任务一致：Bit-BCE & 常量
