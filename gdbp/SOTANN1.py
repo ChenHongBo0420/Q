@@ -160,7 +160,7 @@ def model_init(data: gdat.Input,
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
     const = v0['const']
-    return Model(mod, (params, state, aux, const, sparams), ol, name)
+    return Model(mod, (params, const, sparams), ol, name)
 
 
 
