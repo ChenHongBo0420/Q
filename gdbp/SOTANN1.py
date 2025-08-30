@@ -17,147 +17,63 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
-import optax
-from commplax.coding.qc_ldpc_ste import qc_ldpc_encode, init_G_soft
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
-_CONST = jnp.array(
-    [-3-3j, -3-1j, -3+3j, -3+1j,
-     -1-3j, -1-1j, -1+3j, -1+1j,
-      3-3j,  3-1j,  3+3j,  3+1j,
-      1-3j,  1-1j,  1+3j,  1+1j], dtype=jnp.complex64) / jnp.sqrt(10.)
 
-_BIT_MAP = jnp.array([
-   (0,0,0,0),(0,0,0,1),(0,0,1,0),(0,0,1,1),
-   (0,1,0,0),(0,1,0,1),(0,1,1,0),(0,1,1,1),
-   (1,0,0,0),(1,0,0,1),(1,0,1,0),(1,0,1,1),
-   (1,1,0,0),(1,1,0,1),(1,1,1,0),(1,1,1,1)
-], dtype=jnp.float32)                                          # (16,4)
-
-def bits_to_sym(bits4: jnp.ndarray) -> jnp.ndarray:            # (M,4)
-    idx = jnp.dot(bits4, jnp.array([8,4,2,1], dtype=jnp.float32))
-    return _CONST[idx.astype(jnp.int32)]
-
-def sym_to_bits(sym: jnp.ndarray) -> jnp.ndarray:              # (...,)→(...,4)
-    d = jnp.abs(sym[..., None] - _CONST)
-    idx = jnp.argmin(d, axis=-1)
-    return _BIT_MAP[idx]
-
-class NeuralBP(nn.Module):
-    H: jnp.ndarray       # (M,N), parity matrix
-    n_iter: int = 5
-    learn_gamma: bool = True
-    def setup(self):
-        if self.learn_gamma:
-            self.gamma = self.param('gamma', nn.initializers.ones, ())
-    def __call__(self, llr: jnp.ndarray) -> jnp.ndarray:
-        g = self.gamma if self.learn_gamma else 1.0
-        for _ in range(self.n_iter):
-            llr = self._bp_iter(llr, g)
-        return llr
-    def _bp_iter(self, llr, γ):
-        # 单步 Min-Sum / Scaled-Min-Sum. 只做演示; 可换为 commplax.layer.ldpc.bp_iter
-        sign = jnp.sign(jnp.matmul(self.H, jnp.sign(llr)))
-        mag  = jnp.matmul(self.H, jnp.abs(llr))
-        msg  = γ * sign * mag
-        return llr + jnp.matmul(self.H.T, msg)
-
-def tx_pipeline(bits: jnp.ndarray,             # (K,)
-                G_soft: jnp.ndarray,           # (K,N-K)
-                Π: jnp.ndarray | None = None   # (4,4) 可学置换
-                ) -> jnp.ndarray:
-    cw   = qc_ldpc_encode(bits, G_soft)        # (N,)
-    bit4 = cw.reshape(-1,4)
-    if Π is not None:
-        bit4 = jnp.matmul(bit4, Π)             # 置换 / Power-alloc
-    return bits_to_sym(bit4)                   # (N/4,)
-
-_BIT_W = jnp.array([1.2,1.0,1.0,0.8], dtype=jnp.float32)
-
-@jax.jit
-def bit_bce_loss(pred_sym: jnp.ndarray,
-                 true_sym: jnp.ndarray) -> jnp.ndarray:
-    logits = -jnp.square(jnp.abs(pred_sym[...,None] - _CONST))
-    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    probs  = jnp.exp(logp)                                # (...,16)
-    p1     = probs @ _BIT_MAP
-    p0     = 1. - p1
-    idx    = jnp.argmin(jnp.square(jnp.abs(true_sym[...,None]-_CONST)), axis=-1)
-    bits   = _BIT_MAP[idx]                                # (...,4)
-    bce    = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
-    return (bce * _BIT_W).mean()
-                   
-## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
-                     mode: str = 'train'):
+                     mode: str = 'train',
+                     use_qal: bool = False):          # ← 新增
 
     _assert_taps(dtaps, ntaps, rtaps)
-
     d_init, n_init = init_fn
 
-    if mode == 'train':
-        mimo_train = True
-    elif mode == 'test':
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+    # 是否在训练期让 MIMO/FOE 参与
+    if mode == 'train' and use_qal:
+        mimo_train = False                         # 训练期不更新自适应
+        foe_block  = layer.Identity(name='FOE_off')   # ← 最稳妥：旁路
+        mimo_block = layer.Identity(name='MIMO_off')  # ← 旁路
     else:
-        raise ValueError('invalid mode %s' % mode)
+        mimo_train = (mode == 'train')
+        foe_block  = layer.MIMOFOEAf(name='FOEAf',
+                                     w0=w0, train=mimo_train,
+                                     preslicer=core.conv1d_slicer(rtaps),
+                                     foekwargs={})
+        mimo_block = layer.MIMOAF(train=mimo_train)
 
-    # 定义串联的 FDBP 层
     fdbp_series = layer.Serial(
-        layer.FDBP(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init,
-                    name='fdbp1'),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                   d_init=d_init, n_init=n_init, name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf1',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
+        foe_block,                                    # ← 用上面的开关
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
+        mimo_block,
         name='fdbp_series'
     )
 
-    # 定义原有的串行分支
     serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
+        layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                    d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
+        foe_block,                                    # ← 同步
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
-        name='serial_branch'  # 添加名称
+        mimo_block,
+        name='serial_branch'
     )
 
-    # 定义基础模块
     base = layer.Serial(
         layer.FanOut(num=2),
-        layer.Parallel(
-            fdbp_series,
-            serial_branch
-        ),
+        layer.Parallel(fdbp_series, serial_branch),
         layer.FanInMean()
     )
-
     return base
-  
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -313,6 +229,18 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
+def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
+    """
+    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
+    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
+    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
+    """
+    z = jnp.vdot(yhat, y)                          # <yhat, y>
+    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
+    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
+    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
+    return alpha * yhp, alpha, jnp.angle(p)
+  
 CONST_16QAM = jnp.array([
     -3-3j, -3-1j, -3+3j, -3+1j,
     -1-3j, -1-1j, -1+3j, -1+1j,
@@ -367,43 +295,49 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
 
-
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):             # ← IB-KL 权重
+def loss_fn(module, params, state, y, x, aux, const, sparams,
+            β_ce: float = 0.5, λ_kl: float = 1e-4):
 
     params_net = util.dict_merge(params, sparams)
-
-    # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state}, core.Signal(y))
+        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y)
+    )
 
-    aligned_x = x[z_out.t.start:z_out.t.stop]
+    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
+    yhat  = z_out.val                       # 预测复符号
 
-    # ── (1) SNR + EVM  ───────────────────────────────
-    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
-    loss_main = snr + 0.1 * evm
+    # --- 仅移除相位（商空间代表），并 stop-gradient ---
+    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
+    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
+    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
+    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
+    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
 
-    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
-    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
-    loss_main += β_ce * bit_bce
+    # --- 任务一致计分（在 y_al 上）---
+    # EVM（Q²代理）
+    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
+           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
 
-    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
-    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
+    # SI-SNR（复数版）
+    t = x_ref.reshape(-1); e = y_al.reshape(-1)
+    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
+    s = a * t
+    snr = -10.0 * jnp.log10(
+        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
+        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
+    )
+
+    # Bit-BCE（对齐后星座）
+    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
+
+    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
+
+    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
     total_loss = loss_main + λ_kl * kl_ib
-
     return total_loss, state_new
-
+              
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -534,26 +468,10 @@ def test(model: Model,
                        eval_range=eval_range)
     return metric, z
 
-def build_optimizers(param_tree: Dict,
-                     lr1=1e-4, lr2=1e-4, lr3=1e-5):
-    """
-    param_tree keys 约定：
-      {"dsp":…, "G":…, "Π":…, "bp":…}
-    """
-    mask1 = jax.tree_map(lambda _: False, param_tree)
-    mask1['dsp'] = True
 
-    mask2 = jax.tree_map(lambda _: True, param_tree)
-    mask2['dsp'] = False
 
-    mask3 = jax.tree_map(lambda _: True, param_tree)
 
-    opt1 = optax.chain(optax.masked(optax.adam(lr1), mask1))
-    opt2 = optax.chain(optax.masked(optax.adam(lr2), mask2))
-    opt3 = optax.adam(lr3)
 
-    return opt1, opt2, opt3
-                       
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
