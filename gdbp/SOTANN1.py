@@ -40,74 +40,62 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train',
-                     use_qal: bool = False):     # ★ 新增：训练期旁路开关
+                     use_qal: bool = False):
     _assert_taps(dtaps, ntaps, rtaps)
-
     d_init, n_init = init_fn
 
     if mode == 'train':
-        mimo_train = True
+        mimo_train_flag = True
     elif mode == 'test':
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+        mimo_train_flag = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError(f'invalid mode {mode}')
 
-    # ── 训练期若 use_qal=True：旁路 FOE/MIMOAF，避免“吃梯度” ──
+    # ★ QAL：训练期只旁路 FOE，保留 MIMOAF 但冻结（train=False）
     if mode == 'train' and use_qal:
-        # 名字仍然叫 FOEAf1 / FOEAf，以保证与原图一致（但用 Identity 旁路）
-        foe_block_series = _id_block('FOEAf1')   # 代替原 FOEAf1
-        mimo_block_series = _id_block('MIMOAF1') # 代替原 MIMOAF（该名字仅用于标识）
-        foe_block_serial = _id_block('FOEAf')    # 代替原 FOEAf
-        mimo_block_serial = _id_block('MIMOAF')  # 代替原 MIMOAF
+        foe_block_series  = layer.Identity(name='FOEAf1')   # 旁路 FOE
+        foe_block_serial  = layer.Identity(name='FOEAf')    # 旁路 FOE
+        mimo_block_series = layer.MIMOAF(train=False)       # 保留 MIMOAF 做降采/整形
+        mimo_block_serial = layer.MIMOAF(train=False)
     else:
-        foe_block_series = layer.MIMOFOEAf(name='FOEAf1',
-                                           w0=w0, train=mimo_train,
-                                           preslicer=core.conv1d_slicer(rtaps),
-                                           foekwargs={})
-        mimo_block_series = layer.MIMOAF(train=mimo_train)
+        foe_block_series  = layer.MIMOFOEAf(name='FOEAf1',
+                                            w0=w0, train=mimo_train_flag,
+                                            preslicer=core.conv1d_slicer(rtaps),
+                                            foekwargs={})
+        foe_block_serial  = layer.MIMOFOEAf(name='FOEAf',
+                                            w0=w0, train=mimo_train_flag,
+                                            preslicer=core.conv1d_slicer(rtaps),
+                                            foekwargs={})
+        mimo_block_series = layer.MIMOAF(train=mimo_train_flag)
+        mimo_block_serial = layer.MIMOAF(train=mimo_train_flag)
 
-        foe_block_serial = layer.MIMOFOEAf(name='FOEAf',
-                                           w0=w0, train=mimo_train,
-                                           preslicer=core.conv1d_slicer(rtaps),
-                                           foekwargs={})
-        mimo_block_serial = layer.MIMOAF(train=mimo_train)
-
-    # ── 分支 1：FDBP 串联 ──
     fdbp_series = layer.Serial(
-        layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init,
-                   name='fdbp1'),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                   d_init=d_init, n_init=n_init, name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_series,                                 # ← 由上面的开关控制
+        foe_block_series,
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
         mimo_block_series,
         name='fdbp_series'
     )
 
-    # ── 分支 2：原有串行分支 ──
     serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init),
+        layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                    d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_serial,                                  # ← 同步控制
+        foe_block_serial,
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         mimo_block_serial,
         name='serial_branch'
     )
 
-    # ── 汇合 ──
     base = layer.Serial(
         layer.FanOut(num=2),
         layer.Parallel(fdbp_series, serial_branch),
         layer.FanInMean()
     )
     return base
+
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
