@@ -51,13 +51,22 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError(f'invalid mode {mode}')
 
-    # ★ QAL：训练期只旁路 FOE，保留 MIMOAF 但冻结（train=False）
+    # ---------------- QAL 训练期：FOE 打开、MIMOAF 冻结 ----------------
     if mode == 'train' and use_qal:
-        foe_block_series  = layer.Identity(name='FOEAf1')   # 旁路 FOE
-        foe_block_serial  = layer.Identity(name='FOEAf')    # 旁路 FOE
-        mimo_block_series = layer.MIMOAF(train=False)       # 保留 MIMOAF 做降采/整形
+        # FOE 仍然使用原来的名字，保证 checkpoint/path 不变
+        foe_block_series  = layer.MIMOFOEAf(name='FOEAf1',
+                                            w0=w0, train=True,
+                                            preslicer=core.conv1d_slicer(rtaps),
+                                            foekwargs={})
+        foe_block_serial  = layer.MIMOFOEAf(name='FOEAf',
+                                            w0=w0, train=True,
+                                            preslicer=core.conv1d_slicer(rtaps),
+                                            foekwargs={})
+        # MIMOAF 仅用于符号率整形/降采，冻结自适应
+        mimo_block_series = layer.MIMOAF(train=False)
         mimo_block_serial = layer.MIMOAF(train=False)
     else:
+        # 测试或非 QAL：全部按原逻辑
         foe_block_series  = layer.MIMOFOEAf(name='FOEAf1',
                                             w0=w0, train=mimo_train_flag,
                                             preslicer=core.conv1d_slicer(rtaps),
@@ -95,6 +104,7 @@ def make_base_module(steps: int = 3,
         layer.FanInMean()
     )
     return base
+
 
 
 
