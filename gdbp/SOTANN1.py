@@ -211,24 +211,50 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     bce    = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
     return (bce * BIT_WEIGHTS).mean()
 
-# ---------------------------
-# 核心：QAL 损失（仅移除相位 + stop-grad；不对齐幅度）
-# ---------------------------
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state : Dict,
-            y     : Array,
-            x     : Array,
-            aux   : Dict,
-            const : Dict,
-            sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):
+def _align_xy_for_qal(yhat, x_ref):
     """
-    QAL：把输出与真值在 U(1) 上对齐（只去全局相位），
-    对齐相位的因子不反传；幅度不对齐，交给 BN/MIMOAF。
-    在去相位后的 y_al 上算 EVM、SI-SNR、Bit-BCE；
-    KL 仍作用在未对齐 yhat 上（能量正则）。
+    形状与长度对齐：
+    - 去掉单例维
+    - 若存在 (...,1) 这种情况，自动 squeeze 到一维
+    - 仅按时间长度裁剪到一致
+    """
+    y2 = jnp.squeeze(jnp.asarray(yhat))
+    x2 = jnp.squeeze(jnp.asarray(x_ref))
+
+    # 常见情况： (N,1) vs (N,)  → squeeze
+    if y2.ndim == 2 and y2.shape[-1] == 1:
+        y2 = y2[..., 0]
+    if x2.ndim == 2 and x2.shape[-1] == 1:
+        x2 = x2[..., 0]
+
+    # 仅对时间长度做截断对齐
+    L = min(y2.shape[0], x2.shape[0])
+    y2 = y2[:L]
+    x2 = x2[:L]
+
+    # 允许 1D 或 2D（多极化）格式；如果都是 2D，保证极化数一致
+    if y2.ndim != x2.ndim:
+        # 允许一边 1D 一边 2D 且 P==1 的情况（已经在上面 squeeze 成 1D 了）
+        raise ValueError(f"[QAL] ndim mismatch after squeeze: yhat {yhat.shape}->{y2.shape}, x {x_ref.shape}->{x2.shape}")
+    if y2.ndim == 2 and y2.shape[1] != x2.shape[1]:
+        raise ValueError(f"[QAL] pol dim mismatch: yhat {y2.shape}, x {x2.shape}")
+
+    return y2, x2
+
+
+def loss_fn(module,
+            params,
+            state,
+            y,
+            x,
+            aux,
+            const,
+            sparams,
+            β_ce: float = 0.5,
+            λ_kl: float = 1e-4):
+    """
+    QAL：只移除全局相位（单位模长 e^{-jφ}）、并 stop-grad；不做幅度对齐。
+    在去相位输出上计算 EVM / SI-SNR / Bit-BCE；KL 仍作用在未对齐输出上。
     """
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
@@ -236,19 +262,24 @@ def loss_fn(module: layer.Layer,
         core.Signal(y)
     )
 
-    x_ref = x[z_out.t.start:z_out.t.stop]    # 参考符号
-    yhat  = z_out.val                        # 预测复符号
+    # 参考与预测（裁掉过渡段）
+    x_ref = x[z_out.t.start:z_out.t.stop]
+    yhat  = z_out.val
 
-    # —— 相位闭式对齐 + 停止反传 ——（不做幅度 alpha）
-    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))  # <ŷ, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)                      # e^{jφ*}
-    psg  = lax.stop_gradient(jnp.conj(p))                 # ★ 不反传 φ*
-    y_al = yhat * psg                                     # 去相位输出
+    # 形状与长度护栏
+    yhat, x_ref = _align_xy_for_qal(yhat, x_ref)
+
+    # —— 只做相位对齐（单位模长）+ stop-grad —— 绝不把幅度带进相位子
+    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))     # <ŷ, x>
+    phi  = jnp.angle(zc)                                     # 只取角度
+    psg  = lax.stop_gradient(jnp.exp(-1j * phi))             # e^{-jφ*}，不反传
+    y_al = yhat * psg                                        # 去相位输出
 
     # —— 任务一致计分（在 y_al 上）——
-    # 1) EVM（Q² 代理）
+    # 1) EVM（归一化 MSE）
     evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
            (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
+
     # 2) SI-SNR（复数版）
     t = x_ref.reshape(-1); e = y_al.reshape(-1)
     a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
@@ -257,15 +288,18 @@ def loss_fn(module: layer.Layer,
         (jnp.real(jnp.vdot(s, s)) + 1e-8) /
         (jnp.real(jnp.vdot(err, err)) + 1e-8)
     )
-    # 3) Bit-BCE
+
+    # 3) Bit-BCE（支持 1D 或 2D [N,P]）
     bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
 
-    # 4) 信息瓶颈 KL（在未对齐 yhat）
+    # 4) 信息瓶颈 KL（约束未对齐输出的能量）
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
 
     loss_main  = snr + 0.1 * evm + β_ce * bit_bce
     total_loss = loss_main + λ_kl * kl_ib
     return total_loss, state_new
+
+
 
 # ---------------------------
 # 单步更新
@@ -332,14 +366,16 @@ def train(model: Model,
 # ---------------------------
 # 测试：同样不喂 truth（与训练一致）
 # ---------------------------
-def test(model: Model,
-         params: Dict,
+def test(model,
+         params,
          data,
-         eval_range: Tuple[int, int]=(300000, -20000),
-         metric_fn=comm.qamqot):
+         eval_range: Tuple[int, int] = (300000, -20000),
+         metric_fn = comm.qamqot):
+    """
+    测试评测前做一次“只移除全局相位”的对齐，避免 slicer 因整体旋转而 0.5 BER。
+    不改网络输出与状态，仅改变送入 metric 的 y。
+    """
     state, aux, const, sparams = model.initvar[1:]
-    # ★ 测试同样不喂 truth
-    # aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
@@ -349,10 +385,19 @@ def test(model: Model,
         'const': const,
         **state
     }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
+
+    start, stop = z.t.start, z.t.stop
+    x_ref = data.x[start:stop]
+    yhat  = z.val
+
+    # 形状与长度护栏
+    yhat, x_ref = _align_xy_for_qal(yhat, x_ref)
+
+    # 评测前的相位对齐（单位模长；不反传）
+    phi_eval = jnp.angle(jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1)))
+    y_eval   = yhat * jnp.exp(-1j * phi_eval)
+
+    metric = metric_fn(y_eval, x_ref, scale=np.sqrt(10), eval_range=eval_range)
     return metric, z
 
 # ---------------------------
