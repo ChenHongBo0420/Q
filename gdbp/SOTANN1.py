@@ -33,58 +33,62 @@ def make_base_module(steps: int = 3,
                      w0=0.,
                      mode: str = 'train'):
     _assert_taps(dtaps, ntaps, rtaps)
+
     d_init, n_init = init_fn
 
-    # ---- No-Op 版本的 FOE/MIMOAF，但保留原来的名字以兼容旧 ckpt ----
-    try:
-        Identity = layer.Identity
-    except Exception:
-        class Identity(nn.Module):
-            @nn.compact
-            def __call__(self, sig):
-                return sig
+    if mode == 'train':
+        mimo_train = True
+    elif mode == 'test':
+        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+    else:
+        raise ValueError('invalid mode %s' % mode)
 
-    # 显式 slicer：复用原来 FOEAf 的 preslicer 行为（采样->符号）
-    class _Slicer(nn.Module):
-        rtaps: int
-        @nn.compact
-        def __call__(self, sig: core.Signal):
-            fn = core.conv1d_slicer(self.rtaps)  # 和原 preslicer 完全一致
-            return fn(sig)
-
-    foe_block_series  = Identity(name='FOEAf1')   # 保留名字
-    foe_block_serial  = Identity(name='FOEAf')
-    mimo_block_series = Identity(name='MIMOAF')
-    mimo_block_serial = Identity(name='MIMOAF_2')
-
+    # —— 关键点：保留 FOEAf（含 preslicer）与 MIMOAF 原本的命名与结构 ——
     fdbp_series = layer.Serial(
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
-                   d_init=d_init, n_init=n_init, name='fdbp1'),
+        layer.FDBP(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init,
+                   name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_series,                                   # No-Op
+        layer.MIMOFOEAf(name='FOEAf1',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        _Slicer(rtaps=rtaps, name='Slicer1'),               # ★ 补上切片（关键）
-        mimo_block_series,                                  # No-Op
+        layer.MIMOAF(train=mimo_train),
         name='fdbp_series'
     )
 
     serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
-                    d_init=d_init, n_init=n_init),
+        layer.FDBP1(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_serial,                                   # No-Op
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        _Slicer(rtaps=rtaps, name='Slicer'),                # ★ 补上切片（关键）
-        mimo_block_serial,                                  # No-Op
+        layer.MIMOAF(train=mimo_train),
         name='serial_branch'
     )
 
     base = layer.Serial(
         layer.FanOut(num=2),
-        layer.Parallel(fdbp_series, serial_branch),
+        layer.Parallel(
+            fdbp_series,
+            serial_branch
+        ),
         layer.FanInMean()
     )
     return base
+
 
 
 
@@ -138,6 +142,7 @@ def fdbp_init(a: dict,
 
 from flax.core import freeze
 
+
 def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
@@ -152,15 +157,16 @@ def model_init(data: gdat.Input,
 
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
 
-    # 这些集合在 No-Op 结构下可能不存在 → 用空的 FrozenDict 兜底
+    # 这些集合有的版本可能不存在 → 用空 dict 兜底
     af_state   = v0.get('af_state',   freeze({}))
     aux_inputs = v0.get('aux_inputs', freeze({}))
     const      = v0.get('const',      freeze({}))
 
-    # apply(**state) 需要顶层集合字典
+    # apply(**state) 需要“顶层集合字典”
     state = {'af_state': af_state}
 
     return Model(mod, (params, state, aux_inputs, const, sparams), ol, name)
+
 
 
 
