@@ -22,7 +22,6 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
-## Two ##
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
@@ -30,54 +29,51 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
-
     _assert_taps(dtaps, ntaps, rtaps)
-
     d_init, n_init = init_fn
 
-    if mode == 'train':
-        mimo_train = True
-    elif mode == 'test':
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
-    else:
-        raise ValueError('invalid mode %s' % mode)
+    # —— 保留命名，但把 FOE/MIMOAF 变成空操作（等价于“移除”）——
+    try:
+        Identity = layer.Identity
+    except Exception:
+        # 兜底：简单 No-Op（输入/输出都是 core.Signal）
+        class Identity(nn.Module):
+            @nn.compact
+            def __call__(self, sig):
+                return sig
 
-    # 定义串联的 FDBP 层
+    foe_block_series  = Identity(name='FOEAf1')   # 原 FOEAf1 → No-Op
+    foe_block_serial  = Identity(name='FOEAf')    # 原 FOEAf  → No-Op
+    mimo_block_series = Identity(name='MIMOAF')   # 原 MIMOAF → No-Op
+    mimo_block_serial = Identity(name='MIMOAF_2') # 仅用于保持结构
+
     fdbp_series = layer.Serial(
-        layer.FDBP(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init,
-                    name='fdbp1'),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                   d_init=d_init, n_init=n_init, name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
+        foe_block_series,                                   # ← 已是 No-Op
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        mimo_block_series,                                  # ← 已是 No-Op
         name='fdbp_series'
     )
 
-    # 定义原有的串行分支
     serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
+        layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
+                    d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
+        foe_block_serial,                                   # ← 已是 No-Op
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        name='serial_branch'  # 添加名称
+        mimo_block_serial,                                   # ← 已是 No-Op
+        name='serial_branch'
     )
 
-    # 定义基础模块
     base = layer.Serial(
         layer.FanOut(num=2),
-        layer.Parallel(
-            fdbp_series,
-            serial_branch
-        ),
+        layer.Parallel(fdbp_series, serial_branch),
         layer.FanInMean()
     )
-
     return base
+
   
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
@@ -159,8 +155,10 @@ def model_init(data: gdat.Input,
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+    state = v0['af_state']
+    aux = v0['aux_inputs']
     const = v0['const']
-    return Model(mod, (params, const, sparams), ol, name)
+    return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
 
@@ -490,7 +488,7 @@ def train(model: Model,
             yield loss, trained parameters, module state
     '''
 
-    params, const, sparams = model.initvar
+    params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
@@ -506,40 +504,35 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+def test(model: Model, params: Dict, data: gdat.Input,
+         eval_range: tuple=(300000, -20000), metric_fn=comm.qamqot):
     state, aux, const, sparams = model.initvar[1:]
-    aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
-      params = model.initvar[0]
+    if params is None: params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
+    z, _ = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux, 'const': const, **state
+    }, core.Signal(data.y))
+
+    x_ref = data.x[z.t.start:z.t.stop]
+    yhat  = z.val
+    yv, xv = jnp.squeeze(yhat), jnp.squeeze(x_ref)
+    if yv.ndim == 2 and yv.shape[-1] == 1: yv = yv[...,0]
+    if xv.ndim == 2 and xv.shape[-1] == 1: xv = xv[...,0]
+    L = min(yv.shape[0], xv.shape[0])
+    yv, xv = yv[:L], xv[:L]
+
+    # 相位对齐
+    zc  = jnp.vdot(yv.reshape(-1), xv.reshape(-1))
+    phi = jnp.where(jnp.abs(zc)>1e-20, jnp.angle(zc), 0.0)
+    yph = yv * jnp.exp(-1j*phi)
+
+    # 幅度闭式对齐
+    num = jnp.real(jnp.vdot(yph.reshape(-1), xv.reshape(-1)))
+    den = jnp.real(jnp.vdot(yph.reshape(-1), yph.reshape(-1))) + 1e-12
+    y_eval = (num/den) * yph
+
+    metric = metric_fn(y_eval, xv, scale=np.sqrt(10), eval_range=eval_range)
     return metric, z
 
 
