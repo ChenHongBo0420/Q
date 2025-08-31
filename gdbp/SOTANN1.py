@@ -22,6 +22,9 @@ Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
+from flax import linen as flnn
+from flax.core import freeze  # 后面 model_init 也会用到
+
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
@@ -36,9 +39,8 @@ def make_base_module(steps: int = 3,
     try:
         Identity = layer.Identity
     except Exception:
-        # 兜底：简单 No-Op（输入/输出都是 core.Signal）
-        class Identity(nn.Module):
-            @nn.compact
+        class Identity(flnn.Module):
+            @flnn.compact
             def __call__(self, sig):
                 return sig
 
@@ -63,7 +65,7 @@ def make_base_module(steps: int = 3,
         layer.BatchPowerNorm(mode=mode),
         foe_block_serial,                                   # ← 已是 No-Op
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        mimo_block_serial,                                   # ← 已是 No-Op
+        mimo_block_serial,                                  # ← 已是 No-Op
         name='serial_branch'
     )
 
@@ -73,6 +75,7 @@ def make_base_module(steps: int = 3,
         layer.FanInMean()
     )
     return base
+
 
   
 
@@ -129,36 +132,29 @@ def model_init(data: gdat.Input,
                n_symbols: int = 4000,
                sps : int = 2,
                name='Model'):
-    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-    depending on given N-filter length and trainable parameters
-
-    Args:
-        data:
-        base_conf: a dict of kwargs to make base module, see `make_base_module`
-        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-            For example, assume base module has parameters represented as nested dict
-            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supportted.
-        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-            memory
-        sps: sample per symbol. Only integer sps is supported now.
-
-    Returns:
-        a initialized model wrapped by a namedtuple
-    '''
-    
+    """
+    与原接口兼容；当变量集合不存在时给空的 FrozenDict，
+    并把 module_state 组织成 {'af_state': ...} 这种顶层集合字典。
+    """
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
+
+    # 可训练 vs 静态参数拆分
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-    state = v0['af_state']
-    aux = v0['aux_inputs']
-    const = v0['const']
-    return Model(mod, (params, state, aux, const, sparams), ol, name)
+
+    # 这些集合在你的 No-Op 版本里可能不存在 → 用空字典兜底
+    af_state   = v0.get('af_state',   freeze({}))
+    aux_inputs = v0.get('aux_inputs', freeze({}))
+    const      = v0.get('const',      freeze({}))
+
+    # apply(**state) 需要是“顶层集合字典”
+    state = {'af_state': af_state}
+
+    return Model(mod, (params, state, aux_inputs, const, sparams), ol, name)
+
 
 
 
@@ -471,39 +467,29 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
+
+
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
-    ''' training process (1 epoch)
-
-        Args:
-            model: Model namedtuple return by `model_init`
-            data: dataset
-            batch_size: batch size
-            opt: optimizer
-
-        Returns:
-            yield loss, trained parameters, module state
-    '''
-
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
+    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter, desc='training', leave=False):
         if i >= n_iter: break
-        aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
+        # ★ 不要 teacher-forcing（不要把 truth 喂给 aux）
+        # aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(
+            model.module, opt, i, opt_state, module_state, y, x, aux, const, sparams
+        )
         yield loss, opt.params_fn(opt_state), module_state
-                                
-                       
+
+
 def test(model: Model, params: Dict, data: gdat.Input,
          eval_range: tuple=(300000, -20000), metric_fn=comm.qamqot):
     state, aux, const, sparams = model.initvar[1:]
@@ -514,26 +500,28 @@ def test(model: Model, params: Dict, data: gdat.Input,
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
 
+    # —— 评测前做 φ+α 闭式对齐（只影响评测，不参与梯度）——
     x_ref = data.x[z.t.start:z.t.stop]
     yhat  = z.val
     yv, xv = jnp.squeeze(yhat), jnp.squeeze(x_ref)
-    if yv.ndim == 2 and yv.shape[-1] == 1: yv = yv[...,0]
-    if xv.ndim == 2 and xv.shape[-1] == 1: xv = xv[...,0]
+    if yv.ndim == 2 and yv.shape[-1] == 1: yv = yv[..., 0]
+    if xv.ndim == 2 and xv.shape[-1] == 1: xv = xv[..., 0]
     L = min(yv.shape[0], xv.shape[0])
     yv, xv = yv[:L], xv[:L]
 
-    # 相位对齐
+    # 相位
     zc  = jnp.vdot(yv.reshape(-1), xv.reshape(-1))
-    phi = jnp.where(jnp.abs(zc)>1e-20, jnp.angle(zc), 0.0)
-    yph = yv * jnp.exp(-1j*phi)
+    phi = jnp.where(jnp.abs(zc) > 1e-20, jnp.angle(zc), 0.0)
+    yph = yv * jnp.exp(-1j * phi)
 
-    # 幅度闭式对齐
+    # 幅度
     num = jnp.real(jnp.vdot(yph.reshape(-1), xv.reshape(-1)))
     den = jnp.real(jnp.vdot(yph.reshape(-1), yph.reshape(-1))) + 1e-12
-    y_eval = (num/den) * yph
+    y_eval = (num / den) * yph
 
     metric = metric_fn(y_eval, xv, scale=np.sqrt(10), eval_range=eval_range)
     return metric, z
+
 
 
 
