@@ -35,27 +35,36 @@ def make_base_module(steps: int = 3,
     _assert_taps(dtaps, ntaps, rtaps)
     d_init, n_init = init_fn
 
-    # —— 保留命名，但把 FOE/MIMOAF 变成空操作（等价于“移除”）——
+    # ---- No-Op 版本的 FOE/MIMOAF，但保留原来的名字以兼容旧 ckpt ----
     try:
         Identity = layer.Identity
     except Exception:
-        class Identity(flnn.Module):
-            @flnn.compact
+        class Identity(nn.Module):
+            @nn.compact
             def __call__(self, sig):
                 return sig
 
-    foe_block_series  = Identity(name='FOEAf1')   # 原 FOEAf1 → No-Op
-    foe_block_serial  = Identity(name='FOEAf')    # 原 FOEAf  → No-Op
-    mimo_block_series = Identity(name='MIMOAF')   # 原 MIMOAF → No-Op
-    mimo_block_serial = Identity(name='MIMOAF_2') # 仅用于保持结构
+    # 显式 slicer：复用原来 FOEAf 的 preslicer 行为（采样->符号）
+    class _Slicer(nn.Module):
+        rtaps: int
+        @nn.compact
+        def __call__(self, sig: core.Signal):
+            fn = core.conv1d_slicer(self.rtaps)  # 和原 preslicer 完全一致
+            return fn(sig)
+
+    foe_block_series  = Identity(name='FOEAf1')   # 保留名字
+    foe_block_serial  = Identity(name='FOEAf')
+    mimo_block_series = Identity(name='MIMOAF')
+    mimo_block_serial = Identity(name='MIMOAF_2')
 
     fdbp_series = layer.Serial(
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps,
                    d_init=d_init, n_init=n_init, name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_series,                                   # ← 已是 No-Op
+        foe_block_series,                                   # No-Op
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        mimo_block_series,                                  # ← 已是 No-Op
+        _Slicer(rtaps=rtaps, name='Slicer1'),               # ★ 补上切片（关键）
+        mimo_block_series,                                  # No-Op
         name='fdbp_series'
     )
 
@@ -63,9 +72,10 @@ def make_base_module(steps: int = 3,
         layer.FDBP1(steps=steps, dtaps=dtaps, ntaps=ntaps,
                     d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        foe_block_serial,                                   # ← 已是 No-Op
+        foe_block_serial,                                   # No-Op
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        mimo_block_serial,                                  # ← 已是 No-Op
+        _Slicer(rtaps=rtaps, name='Slicer'),                # ★ 补上切片（关键）
+        mimo_block_serial,                                  # No-Op
         name='serial_branch'
     )
 
@@ -77,7 +87,7 @@ def make_base_module(steps: int = 3,
     return base
 
 
-  
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -126,31 +136,28 @@ def fdbp_init(a: dict,
     return d_init, n_init
 
 
+from flax.core import freeze
+
 def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
                sps : int = 2,
                name='Model'):
-    """
-    与原接口兼容；当变量集合不存在时给空的 FrozenDict，
-    并把 module_state 组织成 {'af_state': ...} 这种顶层集合字典。
-    """
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
 
-    # 可训练 vs 静态参数拆分
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
 
-    # 这些集合在你的 No-Op 版本里可能不存在 → 用空字典兜底
+    # 这些集合在 No-Op 结构下可能不存在 → 用空的 FrozenDict 兜底
     af_state   = v0.get('af_state',   freeze({}))
     aux_inputs = v0.get('aux_inputs', freeze({}))
     const      = v0.get('const',      freeze({}))
 
-    # apply(**state) 需要是“顶层集合字典”
+    # apply(**state) 需要顶层集合字典
     state = {'af_state': af_state}
 
     return Model(mod, (params, state, aux_inputs, const, sparams), ol, name)
