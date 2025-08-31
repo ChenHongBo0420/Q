@@ -432,38 +432,6 @@ def train(model: Model,
         yield loss, opt.params_fn(opt_state), module_state
 
 
-def test(model: Model, params: Dict, data: gdat.Input,
-         eval_range: tuple=(300000, -20000), metric_fn=comm.qamqot):
-    state, aux, const, sparams = model.initvar[1:]
-    if params is None: params = model.initvar[0]
-
-    z, _ = jit(model.module.apply, backend='cpu')({
-        'params': util.dict_merge(params, sparams),
-        'aux_inputs': aux, 'const': const, **state
-    }, core.Signal(data.y))
-
-    # —— 评测前做 φ+α 闭式对齐（只影响评测，不参与梯度）——
-    x_ref = data.x[z.t.start:z.t.stop]
-    yhat  = z.val
-    yv, xv = jnp.squeeze(yhat), jnp.squeeze(x_ref)
-    if yv.ndim == 2 and yv.shape[-1] == 1: yv = yv[..., 0]
-    if xv.ndim == 2 and xv.shape[-1] == 1: xv = xv[..., 0]
-    L = min(yv.shape[0], xv.shape[0])
-    yv, xv = yv[:L], xv[:L]
-
-    # 相位
-    zc  = jnp.vdot(yv.reshape(-1), xv.reshape(-1))
-    phi = jnp.where(jnp.abs(zc) > 1e-20, jnp.angle(zc), 0.0)
-    yph = yv * jnp.exp(-1j * phi)
-
-    # 幅度
-    num = jnp.real(jnp.vdot(yph.reshape(-1), xv.reshape(-1)))
-    den = jnp.real(jnp.vdot(yph.reshape(-1), yph.reshape(-1))) + 1e-12
-    y_eval = (num / den) * yph
-
-    metric = metric_fn(y_eval, xv, scale=np.sqrt(10), eval_range=eval_range)
-    return metric, z
-
 
 
 
