@@ -490,7 +490,7 @@ def train(model: Model,
             yield loss, trained parameters, module state
     '''
 
-    params, module_state, aux, const, sparams = model.initvar
+    params, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
