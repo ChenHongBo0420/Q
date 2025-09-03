@@ -110,9 +110,9 @@ def _match_y_x(yhat: jnp.ndarray, x_ref: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.
 @jax.custom_vjp
 def align_phase_route(yhat: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
     """
-    前向：仅去全局相位，y_al = yhat * conj(p), p = <yhat,x>/|<yhat,x>|
-    反向：把上传梯度 g_al * p 映回 yhat 坐标后，剔除落在 span{yhat, i*yhat} 的分量
-          （即丢弃增益/相位方向的“规范”梯度，只回传“物理水平”梯度）。
+    前向：仅去全局相位，y_al = yhat * conj(p),  p = <yhat,x>/|<yhat,x>|
+    反向：把梯度映回 yhat 坐标后，剔除落在 span{yhat, i*yhat} 的分量
+          （只保留“物理水平”梯度，屏蔽增益/相位的规范分量）。
     """
     eps = 1e-8
     zc = jnp.vdot(yhat.reshape(-1), x.reshape(-1))
@@ -124,29 +124,30 @@ def _align_phase_fwd(yhat: jnp.ndarray, x: jnp.ndarray):
     zc = jnp.vdot(yhat.reshape(-1), x.reshape(-1))
     p  = zc / (jnp.abs(zc) + eps)
     y_al = yhat * jnp.conj(p)
-    return y_al, (yhat, p)  # 残差里存 yhat、p
+    # 关键：把 x 一并放进残差，供反向阶段 zeros_like(x) 使用
+    return y_al, (yhat, x, p)
 
 def _align_phase_bwd(res, g_al):
-    yhat, p = res
+    yhat, x, p = res
     eps = 1e-8
 
-    # 把梯度从 y_al 坐标映回 yhat：y_al = conj(p) * yhat ⇒ dyhat = p * dy_al
+    # 把梯度从 y_al 坐标映回 yhat：y_al = conj(p)*yhat  ⇒  dyhat = p * dy_al
     g_back = p * g_al
 
-    # 规范基（vertical）：span{yhat, i*yhat}
+    # 规范基 span{yhat, i*yhat} 上的分量去掉，只回传水平分量
     yh = yhat.reshape(-1)
     g  = g_back.reshape(-1)
     n2 = jnp.real(jnp.vdot(yh, yh)) + eps
-    u1 = yh / jnp.sqrt(n2)       # 幅度方向
-    u2 = 1j * u1                 # 相位方向
+    u1 = yh / jnp.sqrt(n2)      # 幅度方向
+    u2 = 1j * u1                # 相位方向
 
-    c1 = jnp.vdot(u1, g)         # 投影系数
+    c1 = jnp.vdot(u1, g)
     c2 = jnp.vdot(u2, g)
-    g_vert  = u1 * c1 + u2 * c2  # 规范分量
-    g_horiz = g - g_vert         # 水平（物理）分量
+    g_vert  = u1 * c1 + u2 * c2
+    g_horiz = g - g_vert
 
     g_yhat = g_horiz.reshape(yhat.shape)
-    g_x    = jnp.zeros_like(x)   # 不让对齐算子“推真值”
+    g_x    = jnp.zeros_like(x)  # 不把梯度推回真值分支
     return (g_yhat, g_x)
 
 align_phase_route.defvjp(_align_phase_fwd, _align_phase_bwd)
