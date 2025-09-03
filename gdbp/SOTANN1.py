@@ -1,6 +1,6 @@
 # =========================================
 # SOTANN1 with Gradient Routing on Quotient Space
-# 保留原有结构/命名；只新增“梯度路由对齐”与形状护栏
+# 保留原有结构/命名；新增“梯度路由对齐”+ 形状护栏 + 轻量超参
 # =========================================
 from typing import Any, Optional, Union, Tuple
 from collections import namedtuple
@@ -24,7 +24,14 @@ Dict  = Union[dict, flax.core.FrozenDict]
 Model = namedtuple('Model', 'module initvar overlaps name')
 
 # -----------------------------------------------------------------------------
-# 16QAM 常量 & Bit-BCE
+# 轻量可调超参（可按需 sweep）
+# -----------------------------------------------------------------------------
+ROUTE_KEEP_PHASE = 0.30   # 反向保留的“相位分量”比例（0~1）
+ROUTE_MASK_GUARD = 2048   # 相位估计的中心窗“护边”长度（符号/样本）
+BCE_TEMP         = 0.85   # Bit-BCE 的 softmax 温度（<1 更“锐”）
+
+# -----------------------------------------------------------------------------
+# 16QAM 常量 & Bit-BCE（带温度，支持多通道输入，内部扁平化）
 # -----------------------------------------------------------------------------
 CONST_16QAM = jnp.array([
     -3-3j, -3-1j, -3+3j, -3+1j,
@@ -43,46 +50,44 @@ BIT_MAP     = jnp.array(_bits, dtype=jnp.float32)          # [16,4]
 BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], jnp.float32) # [4]
 
 def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))     # [N,16]
-    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)   # [N,16]
+    # 扁平化，兼容 [L] 或 [L,C]
+    ps = pred_sym.reshape(-1)
+    ts = true_sym.reshape(-1)
+    # 温度 <1 让分布更锐，判决更“果断”
+    logits = -jnp.square(jnp.abs(ps[..., None] - CONST_16QAM)) / BCE_TEMP  # [N,16]
+    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)     # [N,16]
     probs  = jnp.exp(logp)
-    p1     = (probs @ BIT_MAP)                                           # [N,4]
+    p1     = (probs @ BIT_MAP)                                             # [N,4]
     p0     = 1.0 - p1
-    idx    = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits   = BIT_MAP[idx]                                                # [N,4]
+    idx    = jnp.argmin(jnp.square(jnp.abs(ts[..., None] - CONST_16QAM)), axis=-1)
+    bits   = BIT_MAP[idx]                                                  # [N,4]
     bce    = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
     return (bce * BIT_WEIGHTS).mean()
 
 # -----------------------------------------------------------------------------
-# [ADDED] 形状护栏：统一时间长度与通道维（避免 vdot 维度不齐）
+# 形状护栏：统一时间长度与通道维（避免 vdot 维度不齐）
 # -----------------------------------------------------------------------------
 def _match_y_x(yhat: jnp.ndarray, x_ref: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     统一 yhat 与 x_ref 的时间长度与通道维：
       - 截齐时间长度 L = min(Ty, Tx)
       - 若 x_ref 无通道维或为 1 通道，广播到 yhat 的通道数
-      - 返回形状完全一致的 (yv, xv)
+    返回形状一致的 (yv, xv)
     """
-    # squeeze 单通道尾维
     def _squeeze_last1(a):
         return a[..., 0] if (a.ndim >= 2 and a.shape[-1] == 1) else a
 
     yv = _squeeze_last1(yhat)
     xv = _squeeze_last1(x_ref)
 
-    # 时间维对齐
-    Ty = yv.shape[0]
-    Tx = xv.shape[0]
-    L  = Ty if Tx is None else min(Ty, Tx)
-    yv = yv[:L]
-    xv = xv[:L]
+    Ty = yv.shape[0]; Tx = xv.shape[0]
+    L  = min(Ty, Tx)
+    yv = yv[:L]; xv = xv[:L]
 
-    # 通道维对齐
+    # 通道对齐
     if yv.ndim == 1 and xv.ndim == 1:
-        # 都是 [L]，直接返回
         return yv, xv
     if yv.ndim == 2 and xv.ndim == 1:
-        # y=[L,C], x=[L] → 把 x 广播到 C 通道
         C = yv.shape[-1]
         xv = jnp.repeat(xv[:, None], C, axis=1)
         return yv, xv
@@ -93,61 +98,81 @@ def _match_y_x(yhat: jnp.ndarray, x_ref: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.
         if Cx == 1:
             xv = jnp.repeat(xv, Cy, axis=1)
             return yv, xv
-        # 其它不匹配场景：退回只取前 min(Cy,Cx)
         C = min(Cy, Cx)
         return yv[:, :C], xv[:, :C]
     if yv.ndim == 1 and xv.ndim == 2:
-        # 罕见：把 y 扩到多通道（复制）
         C = xv.shape[-1]
         yv = jnp.repeat(yv[:, None], C, axis=1)
         return yv, xv
-
     return yv, xv
 
 # -----------------------------------------------------------------------------
-# [ADDED] 梯度路由：自定义 VJP 的相位对齐（前向去相位；反向投影掉相位/增益梯度）
+# 中心窗 mask（相位估计更稳）
+# -----------------------------------------------------------------------------
+def _center_mask(length: int, guard: int) -> jnp.ndarray:
+    g = jnp.minimum(guard, length // 4)              # 自适应护边，避免过宽
+    idx = jnp.arange(length)
+    return ((idx >= g) & (idx < length - g)).astype(jnp.float32)
+
+# -----------------------------------------------------------------------------
+# 梯度路由：自定义 VJP 的相位对齐（前向去相位；反向投影掉相位/增益梯度）
 # -----------------------------------------------------------------------------
 @jax.custom_vjp
 def align_phase_route(yhat: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
     """
-    前向：仅去全局相位，y_al = yhat * conj(p),  p = <yhat,x>/|<yhat,x>|
-    反向：把梯度映回 yhat 坐标后，剔除落在 span{yhat, i*yhat} 的分量
-          （只保留“物理水平”梯度，屏蔽增益/相位的规范分量）。
+    前向：仅去全局相位，y_al = yhat * conj(p),  p = <yhat,x>/|<yhat,x>| （用中心窗估计）
+    反向：把梯度映回 yhat 坐标后，剔除 span{yhat, i*yhat} 的分量；
+          并保留 ROUTE_KEEP_PHASE 比例的相位分量，防止把有益相位修正完全抹掉。
     """
     eps = 1e-8
-    zc = jnp.vdot(yhat.reshape(-1), x.reshape(-1))
+    if yhat.ndim == 1:
+        L = yhat.shape[0]
+        m = _center_mask(L, ROUTE_MASK_GUARD)
+        zc = jnp.vdot(yhat * m, x * m)
+    else:
+        L = yhat.shape[0]
+        m = _center_mask(L, ROUTE_MASK_GUARD)[:, None]                 # [L,1]
+        zc = jnp.vdot((yhat * m).reshape(-1), (x * m).reshape(-1))
     p  = zc / (jnp.abs(zc) + eps)
     return yhat * jnp.conj(p)
 
 def _align_phase_fwd(yhat: jnp.ndarray, x: jnp.ndarray):
     eps = 1e-8
-    zc = jnp.vdot(yhat.reshape(-1), x.reshape(-1))
+    if yhat.ndim == 1:
+        L = yhat.shape[0]
+        m = _center_mask(L, ROUTE_MASK_GUARD)
+        zc = jnp.vdot(yhat * m, x * m)
+    else:
+        L = yhat.shape[0]
+        m = _center_mask(L, ROUTE_MASK_GUARD)[:, None]
+        zc = jnp.vdot((yhat * m).reshape(-1), (x * m).reshape(-1))
     p  = zc / (jnp.abs(zc) + eps)
     y_al = yhat * jnp.conj(p)
-    # 关键：把 x 一并放进残差，供反向阶段 zeros_like(x) 使用
     return y_al, (yhat, x, p)
 
 def _align_phase_bwd(res, g_al):
     yhat, x, p = res
     eps = 1e-8
 
-    # 把梯度从 y_al 坐标映回 yhat：y_al = conj(p)*yhat  ⇒  dyhat = p * dy_al
+    # 把梯度从 y_al 坐标映回 yhat： y_al = conj(p)*yhat  ⇒  dyhat = p * dy_al
     g_back = p * g_al
 
-    # 规范基 span{yhat, i*yhat} 上的分量去掉，只回传水平分量
+    # 规范基 span{yhat, i*yhat} 上的分量去掉，只回传“物理水平”分量；
+    # 相位方向保留 ROUTE_KEEP_PHASE 比例，避免全抹掉。
     yh = yhat.reshape(-1)
     g  = g_back.reshape(-1)
     n2 = jnp.real(jnp.vdot(yh, yh)) + eps
-    u1 = yh / jnp.sqrt(n2)      # 幅度方向
-    u2 = 1j * u1                # 相位方向
+    u1 = yh / jnp.sqrt(n2)          # 幅度方向
+    u2 = 1j * u1                    # 相位方向
 
     c1 = jnp.vdot(u1, g)
     c2 = jnp.vdot(u2, g)
-    g_vert  = u1 * c1 + u2 * c2
+
+    g_vert  = u1 * c1 + (1.0 - ROUTE_KEEP_PHASE) * (u2 * c2)
     g_horiz = g - g_vert
 
     g_yhat = g_horiz.reshape(yhat.shape)
-    g_x    = jnp.zeros_like(x)  # 不把梯度推回真值分支
+    g_x    = jnp.zeros_like(x)      # 不把梯度推回真值支路
     return (g_yhat, g_x)
 
 align_phase_route.defvjp(_align_phase_fwd, _align_phase_bwd)
@@ -231,7 +256,6 @@ def fdbp_init(a: dict, xi: float = 1.1, steps: Optional[int] = None):
             a['lpdbm'] - 3,
             virtual_spans=steps)
         return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
-
     return d_init, n_init
 
 # -----------------------------------------------------------------------------
@@ -251,7 +275,6 @@ def model_init(data,
 
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
 
-    # 兼容无 af_state/aux_inputs/const 的版本
     af_state   = v0.get('af_state',   freeze({}))
     aux_inputs = v0.get('aux_inputs', freeze({}))
     const      = v0.get('const',      freeze({}))
@@ -260,7 +283,7 @@ def model_init(data,
     return Model(mod, (params, state, aux_inputs, const, sparams), ol, name)
 
 # -----------------------------------------------------------------------------
-# 一些度量（与原逻辑一致/相近）
+# 简单度量
 # -----------------------------------------------------------------------------
 def si_snr_complex(tx: jnp.ndarray, rx: jnp.ndarray, eps=1e-8) -> jnp.ndarray:
     t = tx.reshape(-1); e = rx.reshape(-1)
@@ -287,8 +310,8 @@ def loss_fn(module: layer.Layer,
             aux   : Dict,
             const : Dict,
             sparams: Dict,
-            β_ce : float = 0.5,
-            λ_kl : float = 1e-4):
+            β_ce : float = 1.2,     # ↑ 分类头更有牵引力
+            λ_kl : float = 2e-5):   # ↓ 限幅更温和
 
     params_net = util.dict_merge(params, sparams)
 
@@ -302,15 +325,15 @@ def loss_fn(module: layer.Layer,
     x_ref = x[z_out.t.start:z_out.t.stop]
     yv, xv = _match_y_x(yhat, x_ref)
 
-    # [ADDED] 商空间相位对齐 + 梯度路由（只回传水平梯度）
+    # 商空间相位对齐 + 梯度路由（只回传“物理水平”梯度）
     y_al = align_phase_route(yv, xv)
 
-    # 任务损失（在对齐后计算）
+    # 任务损失（对齐后）
     evm    = evm_norm(xv, y_al)
     snr    = si_snr_complex(xv, y_al)
     bit_ce = _bit_bce_loss_16qam(y_al, xv)
 
-    # 信息瓶颈（未对齐输出，限制能量）
+    # 信息瓶颈（用未对齐输出，限制能量）
     kl_ib  = 0.5 * jnp.mean(jnp.square(jnp.abs(yv)))
 
     loss_main  = snr + 0.1 * evm + β_ce * bit_ce
