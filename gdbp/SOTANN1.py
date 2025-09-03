@@ -273,16 +273,29 @@ def evm_norm(tx: jnp.ndarray, rx: jnp.ndarray, eps=1e-8) -> jnp.ndarray:
 # -----------------------------------------------------------------------------
 # 梯度裁剪
 # -----------------------------------------------------------------------------
+from flax.core import freeze, FrozenDict
+from flax.traverse_util import flatten_dict, unflatten_dict
+
 def _global_l2(tree):
+    """全局 L2 范数（跳过 None）"""
+    def _acc(acc, x):
+        if x is None:
+            return acc
+        x = jnp.asarray(x)
+        return acc + jnp.sum(jnp.square(x))
     sqsum = 0.0
-    for x in jax.tree_util.tree_leaves(tree):
-        sqsum = sqsum + jnp.sum(jnp.square(jnp.asarray(x)))
-    return jnp.sqrt(sqsum)
+    for leaf in jax.tree_util.tree_leaves(tree):
+        sqsum = _acc(sqsum, leaf)
+    return jnp.sqrt(sqsum + 1e-12)
 
 def _clip_by_global_norm(grads, clip_norm: float):
-    gnorm = _global_l2(grads) + 1e-12
-    scale = jnp.minimum(1.0, clip_norm / gnorm)
-    return jax.tree_map(lambda g: g * scale, grads)
+    """按全局范数裁剪（保持容器类型，跳过 None）"""
+    gnorm = _global_l2(grads)
+    scale = jnp.minimum(1.0, clip_norm / (gnorm + 1e-12))
+    return jax.tree_util.tree_map(lambda g: None if g is None else g * scale, grads)
+
+
+
 
 # -----------------------------------------------------------------------------
 # 梯度路由（JAX-safe，无 Python 分支）
@@ -307,18 +320,32 @@ def _rules_with_i(i) -> List[Tuple[Tuple[str, ...], jnp.ndarray]]:
         (("FOEAf", "FOEAf1"),                                      jnp.array(1.0)),
     ]
 
-def _scale_grads_by_rules(grads: Dict, rules) -> Dict:
-    flat = flatten_dict(grads, keep_empty_nodes=True)
+def _scale_grads_by_rules(grads: Dict, rules):
+    """
+    按命名规则缩放梯度。
+    - 保持输入容器类型（FrozenDict ↔ FrozenDict）
+    - 跳过 None 叶子
+    """
+    is_frozen = isinstance(grads, FrozenDict)
+    base = flax.core.unfreeze(grads) if is_frozen else grads  # 先解冻成 dict
+    flat = flatten_dict(base, keep_empty_nodes=True)
+
     new_flat = {}
     for k, v in flat.items():
-        name = "/".join(k)
+        if v is None:
+            new_flat[k] = None
+            continue
+        name = "/".join(k)  # k 是元组键，拼成路径字符串
         fac = 1.0
+        # 这里用 Python 的字符串包含判断，不依赖 Tracer，JIT 安全
         for pats, f in rules:
             if any(p in name for p in pats):
-                fac = fac * f  # f 是 0D DeviceArray，jit 安全
+                fac = fac * float(jnp.asarray(f))  # f 是 0D DeviceArray，转成 float 使用
         new_flat[k] = v * fac
-    return unflatten_dict(new_flat)
 
+    out = unflatten_dict(new_flat)
+    return freeze(out) if is_frozen else out
+    
 # -----------------------------------------------------------------------------
 # 损失：商空间相位对齐（反向投影）＋ 分布一致性（Bit-BCE/EVM/SI-SNR）＋ IB-KL
 # -----------------------------------------------------------------------------
