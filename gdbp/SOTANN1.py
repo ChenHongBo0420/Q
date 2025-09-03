@@ -320,14 +320,18 @@ def _rules_with_i(i) -> List[Tuple[Tuple[str, ...], jnp.ndarray]]:
         (("FOEAf", "FOEAf1"),                                      jnp.array(1.0)),
     ]
 
-def _scale_grads_by_rules(grads: Dict, rules):
+from flax.core import freeze, FrozenDict
+from flax.traverse_util import flatten_dict, unflatten_dict
+
+def _scale_grads_by_rules(grads, rules):
     """
-    按命名规则缩放梯度。
-    - 保持输入容器类型（FrozenDict ↔ FrozenDict）
-    - 跳过 None 叶子
+    按命名规则缩放梯度（JAX-safe）：
+    - 不把系数 f 转成 python float，保持 JAX 0-D DeviceArray
+    - 叶子为 None 时跳过
+    - 保留输入容器类型（FrozenDict ↔ FrozenDict）
     """
     is_frozen = isinstance(grads, FrozenDict)
-    base = flax.core.unfreeze(grads) if is_frozen else grads  # 先解冻成 dict
+    base = flax.core.unfreeze(grads) if is_frozen else grads
     flat = flatten_dict(base, keep_empty_nodes=True)
 
     new_flat = {}
@@ -335,16 +339,15 @@ def _scale_grads_by_rules(grads: Dict, rules):
         if v is None:
             new_flat[k] = None
             continue
-        name = "/".join(k)  # k 是元组键，拼成路径字符串
-        fac = 1.0
-        # 这里用 Python 的字符串包含判断，不依赖 Tracer，JIT 安全
+        name = "/".join(k)
+        fac = jnp.array(1.0)             # JAX 标量（会随 i 动态）
         for pats, f in rules:
-            if any(p in name for p in pats):
-                fac = fac * float(jnp.asarray(f))  # f 是 0D DeviceArray，转成 float 使用
-        new_flat[k] = v * fac
-
+            if any(p in name for p in pats):  # 纯 python 字符串匹配，不依赖 tracer
+                fac = fac * f                 # 仍是 JAX 标量，jit 安全
+        new_flat[k] = v * fac                 # 实际缩放
     out = unflatten_dict(new_flat)
     return freeze(out) if is_frozen else out
+
     
 # -----------------------------------------------------------------------------
 # 损失：商空间相位对齐（反向投影）＋ 分布一致性（Bit-BCE/EVM/SI-SNR）＋ IB-KL
