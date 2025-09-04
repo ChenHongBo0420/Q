@@ -7,7 +7,7 @@ from jax import numpy as jnp, random, jit, value_and_grad
 import jax
 from jax import lax
 import flax
-from commplax import util, comm, cxopt, op, optim
+from commplax import util, comm1, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
@@ -276,8 +276,11 @@ def train(model: Model,
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
+         eval_range: tuple = (300000, -20000),
+         L: int = None,                 # 每复维星座大小（16/64/256...）；不填则按旧口径假定16QAM缩放
+         d4_dims: int = 2,              # DP=2（4D）
+         pilot_frac: float = 0.0,       # 导频占比（算 AIR 用）
+         use_elliptical_llr: bool = True):
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
@@ -288,11 +291,23 @@ def test(model: Model,
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
 
-    metric = metric_fn(
-        z.val, data.x[z.t.start:z.t.stop],
-        scale=np.sqrt(10), eval_range=eval_range
+    # 参考序列与缩放
+    xref = data.x[z.t.start:z.t.stop]
+    # 若给了 L，则用 canonical 缩放；否则沿用你们原先的 sqrt(10)（相当于16QAM口径）
+    scale = comm1.qamscale(L) if L is not None else np.sqrt(10)
+
+    # 直接用扩展指标（含 BER/Q/EVM/SNR、GMI/NGMI/AIR、C4D与Gap）
+    metric = comm.qamqot_ext(
+        z.val, xref,
+        L=L,
+        d4_dims=d4_dims,
+        eval_range=eval_range,
+        scale=scale,
+        pilot_frac=pilot_frac,
+        use_elliptical_llr=use_elliptical_llr
     )
     return metric, z
+
 
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
@@ -305,3 +320,4 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq  = np.asarray(z.val[:,0])
     s_ref = np.asarray(data.x)[start:stop,0]
     return z_eq, s_ref
+
