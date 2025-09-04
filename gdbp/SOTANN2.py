@@ -396,7 +396,7 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     ETA_PHASE = 0.5     # 去相位比例 η ∈ [0,1]
     TAU_BCE   = 1.5     # Bit-BCE 温度 >1 更平滑
     TAIL_WIN  = 16384   # 用尾段估计全局相位（常量，JIT安全）
-    GAMMA_PHI = 0.10    # ★ 相位梯度软削弱系数（0=关闭；建议 0.05~0.15）
+    GAMMA_PHI = 0.05
 
     # ---- 前向 ----
     params_net = util.dict_merge(params, sparams)
@@ -560,3 +560,4 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq  = np.asarray(z.val[:,0])          # equalized
     s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
     return z_eq, s_ref
+
