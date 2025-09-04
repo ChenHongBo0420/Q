@@ -385,19 +385,19 @@ def _bit_bce_loss_16qam_temp(pred_sym, true_sym, tau=1.5):
     bce  = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
     return (bce * BIT_WEIGHTS).mean()
 
-# ====== 替换你的 loss_fn（仅插入 GPB-Lite 钩子；其余保持你现在的“温和相位去除+温度BCE”不变）======
 def loss_fn(module, params, state, y, x, aux, const, sparams,
-            β_ce: float = 0.5, λ_kl: float = 1e-4):
+            β_ce: float = 0.5, λ_kl: float = 1e-4,
+            *,
+            ETA_PHASE: float = 0.5,   # 主损里：仅去除 η·φ*（温和；保持你现在的做法）
+            TAU_BCE:  float = 1.5,    # 主损里：bit-BCE 温度
+            ALPHA_QUOT: float = 0.10  # ★ 新增：商空间副损权重（小）
+            ):
     """
-    温和版：不改网络/训练流程，只在损失里做小幅相位去除与Bit-BCE温度平滑；
-    再加一个前向恒等、反向只抑制相位梯度的小钩子（GPB-Lite）。
+    主损 L_full：在“部分去相位(η) + 温度(τ)”后的 y_al 上计算（与你当前配方一致）
+    副损 L_quot：在“完全去相位”的 y_q 上再算一次 bit-BCE（相位不反传），小权重 α
+    总损： L = L_full + α·L_quot + λ·KL
+    目的：保留 FDBP 的相位/增益强监督（主损），同时用一个小的相位不变正则稳 CDC/判决面
     """
-    # ---- 超参（仅本函数内使用，保持外部接口不变）----
-    ETA_PHASE = 0.35     # 去相位比例 η ∈ [0,1]
-    TAU_BCE   = 1.3     # Bit-BCE 温度 >1 更平滑
-    TAIL_WIN  = 65536
-    GAMMA_PHI = 0.05
-
     # ---- 前向 ----
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
@@ -405,32 +405,31 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
         core.Signal(y)
     )
 
-    # 参考与预测
-    x_ref = x[z_out.t.start:z_out.t.stop]
-    yhat  = z_out.val
+    # 裁剪对齐
+    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号（T 或 T×C）
+    yhat  = z_out.val                       # 预测复符号（T 或 T×C）
 
-    # ---- ★ 插入：相位梯度软投影（前向恒等，仅改反向）----
-    yhat = phase_grad_gate(yhat, jnp.array(GAMMA_PHI, dtype=jnp.float32))
-
-    # ---- 仅相位温和对齐（不改幅度）----
+    # ---- 用固定尾窗估计全局相位 φ*（与现有实现一致），估计不回传 ----
+    TAIL_WIN = 16384
     T  = int(yhat.shape[0])
     W  = min(TAIL_WIN, T)
     ys = yhat[-W:].reshape(-1)
     xs = x_ref[-W:].reshape(-1)
+    zc = jnp.vdot(ys, xs)
+    p  = zc / (jnp.abs(zc) + 1e-8)
+    p  = lax.stop_gradient(p)               # ★ 不让相位估计反传
+    phi = jnp.angle(p)
 
-    zc   = jnp.vdot(ys, xs)                    # <y, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)           # 单位相位子
-    p    = lax.stop_gradient(p)                # 相位估计不回传
-    phi  = jnp.angle(p)                        # 标量全局相位
+    # ---- 主损：仅去除 η·φ*（温和），其余与你现在一致 ----
     phase_factor = jnp.exp(-1j * ETA_PHASE * phi)
-    y_al = yhat * phase_factor                 # 只去掉 η·φ*
+    y_al = yhat * phase_factor
 
     # EVM
     evm_num = jnp.mean(jnp.abs(y_al - x_ref)**2)
     evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
     evm = evm_num / evm_den
 
-    # SI-SNR
+    # SI-SNR（复数版）
     t = x_ref.reshape(-1)
     e = y_al.reshape(-1)
     a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
@@ -441,25 +440,35 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
         (jnp.real(jnp.vdot(err, err)) + 1e-8)
     )
 
-    # Bit-BCE（带温度）
-    logits = -jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM)) / (TAU_BCE * TAU_BCE)  # [...,16]
+    # bit-BCE（温度）
+    logits = -jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM)) / (TAU_BCE * TAU_BCE)
     logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
     probs  = jnp.exp(logp)
-
-    p1     = (probs @ BIT_MAP)                 # [...,4]
+    p1     = (probs @ BIT_MAP)
     p0     = 1.0 - p1
     idx    = jnp.argmin(jnp.square(jnp.abs(x_ref[..., None] - CONST_16QAM)), axis=-1)
-    bits   = BIT_MAP[idx]                      # [...,4]
+    bits   = BIT_MAP[idx]
     bce    = -(bits * jnp.log(p1 + 1e-12) + (1. - bits) * jnp.log(p0 + 1e-12))
-    bit_bce = (bce * BIT_WEIGHTS).mean()
+    bit_bce_main = (bce * BIT_WEIGHTS).mean()
 
-    # 信息瓶颈（未对齐输出）
+    # ---- 新增：商空间副损（完全去相位），只算一个小权重的 bit-BCE ----
+    y_q = yhat * jnp.conj(p)                # 完全去相位（不回传 φ*）
+    logits_q = -jnp.square(jnp.abs(y_q[..., None] - CONST_16QAM)) / (TAU_BCE * TAU_BCE)
+    logp_q   = logits_q - jax.nn.logsumexp(logits_q, axis=-1, keepdims=True)
+    probs_q  = jnp.exp(logp_q)
+    p1_q     = (probs_q @ BIT_MAP)
+    p0_q     = 1.0 - p1_q
+    bce_q    = -(bits * jnp.log(p1_q + 1e-12) + (1. - bits) * jnp.log(p0_q + 1e-12))
+    bit_bce_quot = (bce_q * BIT_WEIGHTS).mean()
+
+    # ---- KL 信息瓶颈（未对齐输出上）----
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
 
-    # 组合
-    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
-    total_loss = loss_main + λ_kl * kl_ib
+    # ---- 总损 ----
+    loss_main  = snr + 0.1 * evm + β_ce * bit_bce_main
+    total_loss = loss_main + ALPHA_QUOT * bit_bce_quot + λ_kl * kl_ib
     return total_loss, state_new
+
 
 
               
@@ -560,6 +569,7 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq  = np.asarray(z.val[:,0])          # equalized
     s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
     return z_eq, s_ref
+
 
 
 
