@@ -394,7 +394,7 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     """
     # ---- 超参（仅本函数内使用，保持外部接口不变）----
     ETA_PHASE = 0.35     # 去相位比例 η ∈ [0,1]
-    TAU_BCE   = 1.5     # Bit-BCE 温度 >1 更平滑
+    TAU_BCE   = 1.3     # Bit-BCE 温度 >1 更平滑
     TAIL_WIN  = 65536
     GAMMA_PHI = 0.05
 
@@ -560,6 +560,7 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq  = np.asarray(z.val[:,0])          # equalized
     s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
     return z_eq, s_ref
+
 
 
 
