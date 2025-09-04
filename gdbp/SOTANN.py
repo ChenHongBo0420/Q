@@ -1,4 +1,5 @@
-# CE/BCE loss weighted bit-BCE
+# [np.float64(8.488569856531333), np.float64(8.810227272425061)]
+# [np.float64(0.0039393303488155194), np.float64(0.0029124958132475207)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
