@@ -297,7 +297,7 @@ def test(model: Model,
     scale = comm1.qamscale(L) if L is not None else np.sqrt(10)
 
     # 直接用扩展指标（含 BER/Q/EVM/SNR、GMI/NGMI/AIR、C4D与Gap）
-    metric = comm.qamqot_ext(
+    metric = comm1.qamqot_ext(
         z.val, xref,
         L=L,
         d4_dims=d4_dims,
@@ -320,5 +320,6 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq  = np.asarray(z.val[:,0])
     s_ref = np.asarray(data.x)[start:stop,0]
     return z_eq, s_ref
+
 
 
