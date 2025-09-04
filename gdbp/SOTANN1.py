@@ -338,95 +338,76 @@ def _match_y_x_static(yhat, x_ref):
         return yv, xv
     return yv, xv
 
-def _evm_norm_s(tx, rx, eps=1e-8):
-    return jnp.mean(jnp.abs(rx - tx)**2) / (jnp.mean(jnp.abs(tx)**2) + eps)
 
-def _si_snr_complex_s(tx, rx, eps=1e-8):
-    t = tx.reshape(-1); e = rx.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + eps)
-    s = a * t
-    err = e - s
-    return -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + eps) / (jnp.real(jnp.vdot(err, err)) + eps)
-    )
-
-def _bit_bce_loss_16qam_temp(pred_sym, true_sym, tau=1.5):
-    """在你现有 BIT_MAP/CONST_16QAM 基础上引入温度 tau>1 软化 logits。"""
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM)) / tau  # [...,16]
-    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    probs  = jnp.exp(logp)                                                  # [...,16]
-    p1     = (probs @ BIT_MAP)                                              # [...,4]
-    p0     = 1. - p1
-
-    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits = BIT_MAP[idx]                                                     # [...,4]
-    bce  = -(bits*jnp.log(p1+1e-12) + (1.-bits)*jnp.log(p0+1e-12))
-    return (bce * BIT_WEIGHTS).mean()
-
-# ====== 替换你的 loss_fn（签名保持不变；新增参数有默认值）======
-def loss_fn(module,
-            params,
-            state,
-            y,
-            x,
-            aux,
-            const,
-            sparams,
-            β_ce: float = 0.5,
-            λ_kl: float = 1e-4,
-            *,
-            eta_phase: float = 0.5,   # 只去除 η·全局相位（0~1），默认 0.5（温和）
-            tau_bce:  float = 1.5,    # Bit-BCE 温度，>1 更平滑
-            w_evm:    float = 0.10,   # EVM 权重，保持与你原先一致
-            tail_win: int   = 16384   # 用尾段估计全局相位，静态切片
-            ):
+def loss_fn(module, params, state, y, x, aux, const, sparams,
+            β_ce: float = 0.5, λ_kl: float = 1e-4):
     """
-    温和版“商空间 + 分布一致性”损失：
-      - 仅去除尾段估计到的全局相位的一部分（η），不做幅度对齐；
-      - Bit-BCE 使用温度平滑以稳住早期训练；
-      - 其他项（EVM、SI-SNR、KL）保持原配方；
-      - 全部切片用 Python int，jit 安全。
+    温和版：不改网络/训练流程，只在损失里做小幅相位去除与Bit-BCE温度平滑。
+      - 用尾段固定窗口估计全局相位 φ*，只去除 η·φ*（η=0.5）
+      - 不做幅度对齐（把幅度学习留给网络本身）
+      - Bit-BCE logits / τ^2（τ=1.5）以降低早期梯度噪声
+      - 组合：SI-SNR + 0.1*EVM + β_ce*Bit-BCE + λ_kl*IB
     """
+    # ---- 超参（仅本函数内使用，保持外部接口不变）----
+    ETA_PHASE = 0.5     # 去相位比例 η ∈ [0,1]，0=不去相位，1=全去
+    TAU_BCE   = 1.5     # Bit-BCE 温度 >1 更平滑
+    TAIL_WIN  = 16384   # 用尾段估计全局相位的窗口（常量，JIT安全）
+
+    # ---- 前向 ----
     params_net = util.dict_merge(params, sparams)
-
-    # 前向
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
         core.Signal(y)
     )
 
-    # 对齐形状
-    yhat  = z_out.val
-    x_ref = x[z_out.t.start:z_out.t.stop]
-    yv, xv = _match_y_x_static(yhat, x_ref)
+    # 参考与预测
+    x_ref = x[z_out.t.start:z_out.t.stop]     # 裁剪后的真值符号（形状与原实现一致）
+    yhat  = z_out.val                          # 预测复符号（complex）
 
-    # --- 仅相位对齐（温和）：尾窗估计全局相位，再乘 e^{-j η φ}；不改幅度 ---
-    T = int(yv.shape[0])
-    W = min(tail_win, T)           # Python int，静态切片
-    if yv.ndim == 1:               # 单极化
-        ys = yv[T-W:T];  xs = xv[T-W:T]
-        zc = jnp.vdot(ys, xs)
-        p  = zc / (jnp.abs(zc) + 1e-8)
-        p  = lax.stop_gradient(p)  # 相位估计不回传
-        phi = jnp.angle(p)
-        y_al = yv * jnp.exp(-1j * eta_phase * phi)
-    else:                           # 多极化，逐通道
-        ys = yv[T-W:T, :];  xs = xv[T-W:T, :]
-        zc_vec = jnp.sum(jnp.conj(ys) * xs, axis=0)       # [C]
-        p_vec  = zc_vec / (jnp.abs(zc_vec) + 1e-8)        # [C]
-        p_vec  = lax.stop_gradient(p_vec)
-        phi    = jnp.angle(p_vec)                         # [C]
-        y_al   = yv * jnp.exp(-1j * eta_phase * phi[None, :])
+    # ---- 仅相位温和对齐（不改幅度）----
+    # 用固定尾窗估计全局相位；为保持与原实现一致，这里对全通道展平统一估计一个相位
+    T  = int(yhat.shape[0])
+    W  = min(TAIL_WIN, T)
+    ys = yhat[-W:].reshape(-1)
+    xs = x_ref[-W:].reshape(-1)
 
-    # 任务损失（在相位温和对齐后的输出上）
-    evm    = _evm_norm_s(xv, y_al)
-    snr    = _si_snr_complex_s(xv, y_al)
-    bit_ce = _bit_bce_loss_16qam_temp(y_al, xv, tau=tau_bce)
+    zc   = jnp.vdot(ys, xs)                    # <y, x>
+    p    = zc / (jnp.abs(zc) + 1e-8)           # 单位相位子
+    p    = lax.stop_gradient(p)                # 相位估计不回传
+    phi  = jnp.angle(p)                        # 标量全局相位
+    phase_factor = jnp.exp(-1j * ETA_PHASE * phi)
+    y_al = yhat * phase_factor                 # 只去掉 η·φ*
 
-    # 信息瓶颈（未对齐输出，限制能量；对 FDBP 友好）
-    kl_ib  = 0.5 * jnp.mean(jnp.square(jnp.abs(yv)))
+    evm_num = jnp.mean(jnp.abs(y_al - x_ref)**2)
+    evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
+    evm = evm_num / evm_den
 
-    loss_main  = snr + w_evm * evm + β_ce * bit_ce
+    t = x_ref.reshape(-1)
+    e = y_al.reshape(-1)
+    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
+    s = a * t
+    err = e - s
+    snr = -10.0 * jnp.log10(
+        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
+        (jnp.real(jnp.vdot(err, err)) + 1e-8)
+    )
+
+    logits = -jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM)) / (TAU_BCE * TAU_BCE)  # [...,16]
+    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    probs  = jnp.exp(logp)
+
+    p1     = (probs @ BIT_MAP)                 # [...,4]
+    p0     = 1.0 - p1
+    idx    = jnp.argmin(jnp.square(jnp.abs(x_ref[..., None] - CONST_16QAM)), axis=-1)
+    bits   = BIT_MAP[idx]                      # [...,4]
+    bce    = -(bits * jnp.log(p1 + 1e-12) + (1. - bits) * jnp.log(p0 + 1e-12))
+    bit_bce = (bce * BIT_WEIGHTS).mean()
+
+    # ---- 信息瓶颈 KL 正则（保持原实现；用未对齐输出以限制绝对幅度/能量）----
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
+
+    # ---- 组合 ----
+    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
     total_loss = loss_main + λ_kl * kl_ib
     return total_loss, state_new
 
