@@ -328,7 +328,7 @@ def _loss_equivariant(y_pred, x_ref, beta_ce=0.5, tau_bce=1.5):
     snr_loss = -10.0 * jnp.log10((jnp.real(jnp.vdot(s_hat, s_hat))+1e-8) /
                                  (jnp.real(jnp.vdot(err, err))+1e-8))
     evm = _evm_rms(y_pred, x_ref)
-    bce = _bit_bce_loss_16qam(y_pred, x_ref, tau=tau_bce)
+    bce = _bit_bce_loss_16qam(y_pred, x_ref)
     return snr_loss + 0.1 * evm + beta_ce * bce
 
 def _loss_invariant(y_pred, x_ref, beta_ce=0.5, tau_bce=1.5):
