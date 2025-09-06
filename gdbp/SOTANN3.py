@@ -1,5 +1,5 @@
-# [np.float64(8.48925186936627), np.float64(8.81030223238995)]
-# [np.float64(0.00393689270997609), np.float64(0.0029122838257802197)]
+# [np.float64(8.263075435507282), np.float64(8.809552824900607)]
+# [np.float64(0.004810945210357634), np.float64(0.002914403700453229)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
