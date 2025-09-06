@@ -95,7 +95,52 @@ def make_base_module(steps: int = 3,
     )
     return base
 
+def _assert_taps(dtaps, ntaps, rtaps, sps=2):
+    ''' we force odd taps to ease coding '''
+    assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
+    assert ntaps % sps, f'ntaps must be odd number, got {ntaps} instead'
+    assert rtaps % sps, f'rtaps must be odd number, got {rtaps} instead'
 
+
+def fdbp_init(a: dict,
+              xi: float = 1.1,
+              steps: Optional[int] = None):
+    '''
+        initializer for the base module
+
+        Args:
+            xi: NLC scaling factor
+            steps: GDBP steps, used to calculate the theoretical profiles of D- and N-filters
+
+        Returns:
+            a pair of functions to initialize D- and N-filters
+    '''
+
+    def d_init(key, shape, dtype=jnp.complex64):
+        dtaps = shape[0]
+        d0, _ = comm.dbp_params(
+            a['samplerate'],
+            a['distance'] / a['spans'],
+            a['spans'],
+            dtaps,
+            a['lpdbm'] - 3,  # rescale as input power which has been norm to 2 in dataloader
+            virtual_spans=steps)
+        return d0[0, :, 0]
+
+    def n_init(key, shape, dtype=jnp.float32):
+        dtaps = shape[0]
+        _, n0 = comm.dbp_params(
+            a['samplerate'],
+            a['distance'] / a['spans'],
+            a['spans'],
+            dtaps,
+            a['lpdbm'] - 3,  # rescale
+            virtual_spans=steps)
+
+        return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
+
+    return d_init, n_init
+                
 # ========= 2) model_init：兼容 tuple 输出，取两路时间交集算 overlaps =========
 def model_init(data: gdat.Input,
                base_conf: dict,
