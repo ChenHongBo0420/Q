@@ -2,19 +2,27 @@
 # Modified: Split-loss + Gradient Routing for invariant (back-end) vs equivariant (front-end)
 # Drop-in replacement: same public API (train/test/equalize_dataset); add test_ext for GMI/NGMI.
 
-from jax import numpy as jnp, random, jit, value_and_grad, lax
+from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from flax.core import freeze, unfreeze
-from flax.traverse_util import flatten_dict, unflatten_dict
-from flax import linen as nn
 from commplax import util, comm, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
 from collections import namedtuple
 from tqdm.auto import tqdm
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Tuple
+from . import data as gdat
 import jax
+from scipy import signal
+from flax import linen as nn
+from sklearn.neighbors import KernelDensity
+from jax.scipy.stats import norm
+from jax import jit, lax
+from typing import Tuple
+import matplotlib.pyplot as plt
+Model = namedtuple('Model', 'module initvar overlaps name')
+Array = Any
+Dict = Union[dict, flax.core.FrozenDict]
 
 # -------------------- Types --------------------
 Model = namedtuple('Model', 'module initvar overlaps name')
