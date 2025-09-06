@@ -200,6 +200,125 @@ def _evm_rms(y, x, eps=1e-8):
     den = jnp.mean(jnp.abs(x)**2) + eps
     return num / den
 
+def _rms(sig, eps=1e-12):
+    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
+
+def _proj_mse(z, s):
+    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
+    return jnp.mean(jnp.abs(z - alpha*s)**2)
+
+def energy(x):
+    return jnp.sum(jnp.square(x))
+
+def si_snr(target, estimate, eps=1e-8):
+    target_energy = energy(target)
+    dot_product = jnp.sum(target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value 
+
+
+def evm_ring(tx, rx, eps=1e-8,
+             thr_in=0.60, thr_mid=1.10,
+             w_in=1.0, w_mid=1.5, w_out=2.0):
+    r    = jnp.abs(tx)
+    err2 = jnp.abs(rx - tx)**2
+    sig2 = jnp.abs(tx)**2
+
+    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    m_in  = (r < thr_in).astype(jnp.float32)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
+
+    def _evm(mask):
+        num = jnp.sum(err2 * mask)
+        den = jnp.sum(sig2 * mask)
+        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+        return num / den
+
+    return (w_in  * _evm(m_in) +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
+
+        
+def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
+    """幅度|·|，两极化展平后算 α，再平分给两路"""
+    s  = jnp.reshape(jnp.abs(tx), (-1,))
+    x  = jnp.reshape(jnp.abs(rx), (-1,))
+    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
+    e  = x - alpha * s
+    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
+                              (jnp.vdot(e, e).real + eps) )
+    return -snr_db                   
+
+def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
+    """
+    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
+    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
+    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
+    """
+    z = jnp.vdot(yhat, y)                          # <yhat, y>
+    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
+    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
+    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
+    return alpha * yhp, alpha, jnp.angle(p)
+  
+CONST_16QAM = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j
+], dtype=jnp.complex64) / jnp.sqrt(10.)
+
+# 2. CE-loss helper  (可 jit / vmap)
+def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    """
+    pred_sym : [N] complex  — 网络输出符号
+    true_sym : [N] complex  — 对齐后的发送符号
+    return    : 标量 cross-entropy 损失
+    """
+    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
+    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+
+    # 每个真实符号对应的 QAM 点下标
+    label_idx = jnp.argmin(
+        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
+        axis=-1)                                                      # [N]
+
+    # softmax-cross-entropy:
+    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
+
+    return ce.mean()
+
+_bits = (
+    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
+    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
+    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
+    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
+)
+BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
+# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
+BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
+
+def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
+    probs   = jnp.exp(logp)                                             # [N,16]
+
+    # bit 概率 & 真值
+    p1 = (probs @ BIT_MAP)                    # P(bit=1)
+    p0 = 1.0 - p1
+
+    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
+    bits = BIT_MAP[idx]                       # 真值 bits
+
+    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
+    return (bce * BIT_WEIGHTS).mean()          # 加权平均
+        
 def _loss_equivariant(y_pred, x_ref, beta_ce=0.5, tau_bce=1.5):
     """等变主损（不去相位）：Si-SNR + 0.1*EVM + β*Bit-BCE"""
     s = x_ref.reshape(-1); e = y_pred.reshape(-1)
