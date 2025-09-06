@@ -336,7 +336,7 @@ def _loss_invariant(y_pred, x_ref, beta_ce=0.5, tau_bce=1.5):
     yq = _align_phase_only(y_pred, x_ref)
     xq = _align_phase_only(x_ref,  x_ref)
     mse = jnp.mean(jnp.abs(yq - xq)**2)
-    bce = _bit_bce_loss_16qam(yq, xq, tau=tau_bce)
+    bce = _bit_bce_loss_16qam(yq, xq)
     return 0.5 * mse + beta_ce * bce
 
 def loss_fn(module, params, state, y, x, aux, const, sparams,
