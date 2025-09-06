@@ -249,7 +249,38 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     ib = 0.5 * (jnp.mean(jnp.abs(yA)**2) + jnp.mean(jnp.abs(yB)**2))
     return (L_main + lam_aux * L_aux + 1e-4 * ib), state_new
 
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
 
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
+
+    params, module_state, aux, const, sparams = model.initvar
+    opt_state = opt.init_fn(params)
+
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
+                               
 # ========= 5) test：外部融合（默认均值；要换置信度收缩告诉我） =========
 def test(model: Model,
          params: Dict,
