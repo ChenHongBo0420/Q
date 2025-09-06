@@ -1,6 +1,10 @@
 # [np.float64(8.263075435507282), np.float64(8.809552824900607)]
 # [np.float64(0.004810945210357634), np.float64(0.002914403700453229)]
 
+# Copyright 2021 The Commplax Authors.
+# Modified: Split-loss + Gradient Routing for invariant (back-end) vs equivariant (front-end)
+# Drop-in replacement: same public API (train/test/equalize_dataset)
+
 from jax import numpy as jnp, random, jit, value_and_grad, lax
 import flax
 from flax import linen as nn
@@ -14,14 +18,25 @@ from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 import jax
-import matplotlib.pyplot as plt
 
-# ======= Types =======
+# -------------------- Types --------------------
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
-Dict = Union[dict, flax.core.FrozenDict]
+Dict  = Union[dict, flax.core.FrozenDict]
 
-# ======= Base module (unchanged) =======
+# -------------------- Hyperparams (可按需改) --------------------
+# 副损（bit-BCE）整体权重：训练时推荐 alpha_aux=0.8（train() 里可传参）
+BACK_LR_MULT        = 2.0       # 末端参数上对副损梯度放大倍数（1.5~3.0）
+ETA_PHASE           = 0.5       # 在副损/边距损里移除 ETA*phi* 的全局相位（温和去相位）
+TAU_BCE             = 1.5       # bit-BCE 温度，>1 更平滑
+PHASE_LOSS_WEIGHT   = 1e-3      # 仅打 FOEAf 的相位相干损权重（5e-4~5e-3）
+MARGIN_W            = 0.05      # 末端 margin 副损权重（0.02~0.1）
+MARGIN_M            = 0.25      # 最近-次近星座间隔 margin
+
+# back-end 路由命中的模块名（副损只更新这些；不要包含 FOEAf）
+_BACK_KEYS = ('RConv','MIMOAF','CDC','Demap','demap')
+
+# -------------------- Base module（保持不变） --------------------
 def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
@@ -30,7 +45,6 @@ def make_base_module(steps: int = 3,
                      w0 = 0.,
                      mode: str = 'train'):
     _assert_taps(dtaps, ntaps, rtaps)
-
     d_init, n_init = init_fn
     if mode == 'train':
         mimo_train = True
@@ -38,57 +52,33 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-        
     base = layer.Serial(
-        layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
+    )
     return base
-  
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
-    assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
-    assert ntaps % sps, f'ntaps must be odd number, got {ntaps} instead'
-    assert rtaps % sps, f'rtaps must be odd number, got {rtaps} instead'
+    assert dtaps % sps, f'dtaps must be odd number, got {dtaps}'
+    assert ntaps % sps, f'ntaps must be odd number, got {ntaps}'
+    assert rtaps % sps, f'rtaps must be odd number, got {rtaps}'
 
-
-def fdbp_init(a: dict,
-              xi: float = 1.1,
-              steps: Optional[int] = None):
+def fdbp_init(a: dict, xi: float = 1.1, steps: Optional[int] = None):
     def d_init(key, shape, dtype=jnp.complex64):
         dtaps = shape[0]
-        d0, _ = comm.dbp_params(
-            a['samplerate'],
-            a['distance'] / a['spans'],
-            a['spans'],
-            dtaps,
-            a['lpdbm'] - 3,
-            virtual_spans=steps)
+        d0, _ = comm.dbp_params(a['samplerate'], a['distance']/a['spans'], a['spans'],
+                                dtaps, a['lpdbm'] - 3, virtual_spans=steps)
         return d0[0, :, 0]
-
     def n_init(key, shape, dtype=jnp.float32):
         dtaps = shape[0]
-        _, n0 = comm.dbp_params(
-            a['samplerate'],
-            a['distance'] / a['spans'],
-            a['spans'],
-            dtaps,
-            a['lpdbm'] - 3,
-            virtual_spans=steps)
+        _, n0 = comm.dbp_params(a['samplerate'], a['distance']/a['spans'], a['spans'],
+                                dtaps, a['lpdbm'] - 3, virtual_spans=steps)
         return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
-
     return d_init, n_init
-
 
 def model_init(data,
                base_conf: dict,
@@ -102,123 +92,50 @@ def model_init(data,
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-    state = v0['af_state']
-    aux = v0['aux_inputs']
-    const = v0['const']
+    state = v0['af_state']; aux = v0['aux_inputs']; const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
-# ======= helpers =======
-def l2_normalize(x, axis=None, epsilon=1e-12):
-    square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
-    x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
-    return x / x_inv_norm
+# -------------------- helpers --------------------
+def energy(x): return jnp.sum(jnp.square(x))
 
-def _estimate_kmean(y, x, blk=16384):
-    kap=[]
-    for i in range(0, len(x)-blk, blk):
-        kap.append(np.abs(np.vdot(y[i:i+blk], x[i:i+blk]) /
-                          np.vdot(x[i:i+blk], x[i:i+blk])))
-    return float(np.mean(kap))
-
-def _rms(sig, eps=1e-12):
-    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
-
-def _proj_mse(z, s):
-    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
-    return jnp.mean(jnp.abs(z - alpha*s)**2)
-
-def energy(x):
-    return jnp.sum(jnp.square(x))
-
-def si_snr(target, estimate, eps=1e-8):
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
-
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    r    = jnp.abs(tx)
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
-    def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)
-        return num / den
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
-
-def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
-    s  = jnp.reshape(jnp.abs(tx), (-1,))
-    x  = jnp.reshape(jnp.abs(rx), (-1,))
-    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
-    e  = x - alpha * s
-    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
-                              (jnp.vdot(e, e).real + eps) )
-    return -snr_db                   
-
-def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
-    z = jnp.vdot(yhat, y)
-    p = z / (jnp.abs(z) + eps)
-    yhp = yhat * jnp.conj(p)
-    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
-    return alpha * yhp, alpha, jnp.angle(p)
-
-# ====== 16QAM constellation & bit maps (for aux loss) ======
+# 16QAM 常量（与你们原口径一致）
 CONST_16QAM = jnp.array([
     -3-3j, -3-1j, -3+3j, -3+1j,
     -1-3j, -1-1j, -1+3j, -1+1j,
      3-3j,  3-1j,  3+3j,  3+1j,
      1-3j,  1-1j,  1+3j,  1+1j
 ], dtype=jnp.complex64) / jnp.sqrt(10.)
-
 _bits = (
     (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
     (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
     (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
     (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
 )
-BIT_MAP = jnp.array(_bits, dtype=jnp.float32)          # [16,4]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
+BIT_MAP      = jnp.array(_bits, dtype=jnp.float32)             # [16,4]
+BIT_WEIGHTS  = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
 
-# ======== Aux loss settings ========
-ETA_PHASE = 0.5   # remove ETA_PHASE * phi* (phi* estimated on tail window), then stop-grad
-TAU_BCE   = 1.5   # temperature for bit-BCE logits
-
-# ===========================================================
-#      parameter mask (route aux-grad only to back-end)
-# ===========================================================
-# IMPORTANT: 默认不包含 'FOEAf'，避免副损去改相位旋钮；如需，可自行加回。
-_BACK_KEYS = ('RConv', 'MIMOAF', 'CDC', 'Demap', 'demap')
-
+# -------------------- 掩膜（梯度路由） --------------------
 def make_back_mask(params: Dict) -> Dict:
-    """Return a mask tree (1 for back-end params, 0 otherwise) with same structure as params."""
-    flat = flatten_dict(unfreeze(params))  # keys = tuple path
+    flat = flatten_dict(unfreeze(params))
     mflat = {}
     for path, leaf in flat.items():
-        keystr = '/'.join([str(p) for p in path])
-        hit = any(tag in keystr for tag in _BACK_KEYS)
+        key = '/'.join([str(p) for p in path])
+        hit = any(tag in key for tag in _BACK_KEYS)
         mflat[path] = jnp.ones_like(leaf) if hit else jnp.zeros_like(leaf)
     return freeze(unflatten_dict(mflat))
 
-# ===========================================================
-#            split loss (main equivariant / aux invariant)
-# ===========================================================
+def make_foe_mask(params: Dict) -> Dict:
+    flat = flatten_dict(unfreeze(params))
+    mflat = {}
+    for path, leaf in flat.items():
+        key = '/'.join([str(p) for p in path])
+        hit = ('FOEAf' in key)
+        mflat[path] = jnp.ones_like(leaf) if hit else jnp.zeros_like(leaf)
+    return freeze(unflatten_dict(mflat))
+
+# -------------------- 损失函数（主/三种副损） --------------------
 def loss_main_fn(module, params, state, y, x, aux, const, sparams, λ_kl: float = 1e-4):
-    """
-    主损（等变）：与你旧版一致的“SI-SNR + 0.1*EVM + 轻正则”，
-    —— 不做相位对齐（把相位敏感梯度留给 F/LDBP 学习）
-    """
+    """主损：SI-SNR + 0.1*EVM + 轻正则（不做相位对齐 → 等变，留梯度给 F/LDBP）"""
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
@@ -227,10 +144,8 @@ def loss_main_fn(module, params, state, y, x, aux, const, sparams, λ_kl: float 
     x_ref = x[z_out.t.start:z_out.t.stop]
     yhat  = z_out.val
 
-    # EVM
     evm = jnp.mean(jnp.abs(yhat - x_ref)**2) / (jnp.mean(jnp.abs(x_ref)**2) + 1e-8)
 
-    # SI-SNR（幅度等变；不做相位/幅度对齐）
     t = x_ref.reshape(-1); e = yhat.reshape(-1)
     a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
     s = a * t
@@ -238,52 +153,69 @@ def loss_main_fn(module, params, state, y, x, aux, const, sparams, λ_kl: float 
     si_snr_neg = -10.0 * jnp.log10(
         (jnp.real(jnp.vdot(s, s)) + 1e-8) / (jnp.real(jnp.vdot(err, err)) + 1e-8)
     )
-
-    reg = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))  # 轻正则（原 KL-IB 口径）
-
+    reg = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
     loss = si_snr_neg + 0.1 * evm + λ_kl * reg
     return loss, state_new
 
-
-def loss_aux_fn(module, params, state, y, x, aux, const, sparams,
-                tau: float = TAU_BCE):
-    """
-    副损（不变）：尾窗估计全局相位 φ*（stop-grad），去除 ETA_PHASE·φ* 后做 16QAM Bit-BCE。
-    注意：这里返回“未乘 β_ce 的 BCE”，权重交给外部 alpha_aux 来乘。
-    """
+def loss_aux_fn(module, params, state, y, x, aux, const, sparams, tau: float = TAU_BCE):
+    """副损1（不变）：温和去相位后的 16QAM bit-BCE（只路由到末端）"""
     params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
+    z_out, _ = module.apply({'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+                            core.Signal(y))
     x_ref = x[z_out.t.start:z_out.t.stop]
     yhat  = z_out.val
 
-    # 尾窗估计全局相位并 stop-grad
     TAIL_WIN = 16384
     T  = int(yhat.shape[0]); W = min(TAIL_WIN, T)
-    ys = yhat[-W:].reshape(-1)
-    xs = x_ref[-W:].reshape(-1)
-    zc = jnp.vdot(ys, xs)
-    p  = lax.stop_gradient(zc / (jnp.abs(zc) + 1e-8))     # 单位相位，不回传
-    # 温和去相位：只去 ETA_PHASE * φ*
+    ys = yhat[-W:].reshape(-1); xs = x_ref[-W:].reshape(-1)
+    p  = lax.stop_gradient(jnp.vdot(ys, xs) / (jnp.abs(jnp.vdot(ys, xs)) + 1e-8))
     y_al = yhat * jnp.power(jnp.conj(p), ETA_PHASE)
 
-    # 16QAM Bit-BCE（沿用 BIT_MAP / BIT_WEIGHTS / TAU_BCE）
     logits = -jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM)) / (tau * tau)
     logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
     probs  = jnp.exp(logp)
     p1     = (probs @ BIT_MAP); p0 = 1.0 - p1
-
     idx    = jnp.argmin(jnp.square(jnp.abs(x_ref[..., None] - CONST_16QAM)), axis=-1)
     bits   = BIT_MAP[idx]
     bce    = -(bits * jnp.log(p1 + 1e-12) + (1. - bits) * jnp.log(p0 + 1e-12))
-    loss   = (bce * BIT_WEIGHTS).mean()   # ← 不乘 β_ce，这个权重交给 alpha_aux
-    return loss, state_new
+    loss   = (bce * BIT_WEIGHTS).mean()
+    return loss
 
-# ===========================================================
-#                update_step (gradient routing)
-# ===========================================================
+def loss_phase_foe_fn(module, params, state, y, x, aux, const, sparams):
+    """副损2：仅对 FOEAf 的相位相干度（1 - |corr|）"""
+    params_net = util.dict_merge(params, sparams)
+    z_out, _ = module.apply({'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+                            core.Signal(y))
+    x_ref = x[z_out.t.start:z_out.t.stop]
+    yhat  = z_out.val
+    TAIL_WIN = 16384
+    T  = int(yhat.shape[0]); W = min(TAIL_WIN, T)
+    ys = yhat[-W:].reshape(-1); xs = x_ref[-W:].reshape(-1)
+    num = jnp.abs(jnp.vdot(ys, xs))
+    den = jnp.linalg.norm(ys) * jnp.linalg.norm(xs) + 1e-8
+    return 1.0 - num / den
+
+def loss_margin_fn(module, params, state, y, x, aux, const, sparams):
+    """副损3：末端 margin（最近-次近星座距离要拉开）"""
+    params_net = util.dict_merge(params, sparams)
+    z_out, _ = module.apply({'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+                            core.Signal(y))
+    x_ref = x[z_out.t.start:z_out.t.stop]
+    yhat  = z_out.val
+
+    # 复用温和相位去除
+    TAIL_WIN = 16384
+    T  = int(yhat.shape[0]); W = min(TAIL_WIN, T)
+    ys = yhat[-W:].reshape(-1); xs = x_ref[-W:].reshape(-1)
+    p  = lax.stop_gradient(jnp.vdot(ys, xs) / (jnp.abs(jnp.vdot(ys, xs)) + 1e-8))
+    y_al = yhat * jnp.power(jnp.conj(p), ETA_PHASE)
+
+    d2 = jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM))  # [N,16]
+    d_sorted = jnp.sort(d2, axis=-1)
+    d1, d2n  = d_sorted[..., 0], d_sorted[..., 1]
+    return jnp.maximum(0.0, MARGIN_M + d1 - d2n).mean()
+
+# -------------------- Update step（梯度路由总线） --------------------
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -296,40 +228,46 @@ def update_step(module: layer.Layer,
                 const: Dict,
                 sparams: Dict,
                 alpha_aux: float,
-                mask_back: Dict):
-    """
-    单步更新（梯度路由版）：
-      - g_main：主损梯度（等变），更新所有可训练参数
-      - g_aux ：副损梯度（不变），只路由到 '末端' 参数（mask_back==1）
-    """
+                mask_back: Dict,
+                mask_foe: Dict):
     params = opt.params_fn(opt_state)
 
-    # 主损梯度
+    # 主损
     (Lm, state_main), g_main = value_and_grad(
         loss_main_fn, argnums=1, has_aux=True)(
         module, params, module_state, y, x, aux, const, sparams
     )
-    # 副损梯度（状态不采用，只取梯度）
-    (La, _), g_aux = value_and_grad(
-        loss_aux_fn, argnums=1, has_aux=True)(
-        module, params, module_state, y, x, aux, const, sparams
-    )
 
-    # 路由：副损梯度只加到末端参数
-    g_routed = jax.tree_map(lambda gm, ga, mb: gm + alpha_aux * ga * mb,
-                            g_main, g_aux, mask_back)
+    # 副损1：bit-BCE（末端）
+    La, g_aux = value_and_grad(
+        lambda p: loss_aux_fn(module, p, module_state, y, x, aux, const, sparams)
+    )(params)
 
-    # 按你原工程的 optimizer API：update_fn 返回新的 opt_state（内部已更新 params）
+    # 副损2：FOEAf 相位相干（仅 FOEAf）
+    Lphi, g_phi = value_and_grad(
+        lambda p: loss_phase_foe_fn(module, p, module_state, y, x, aux, const, sparams)
+    )(params)
+    g_phi_routed = jax.tree_map(lambda gp, mf: PHASE_LOSS_WEIGHT * gp * mf, g_phi, mask_foe)
+
+    # 副损3：末端 margin
+    Lmg, g_mg = value_and_grad(
+        lambda p: loss_margin_fn(module, p, module_state, y, x, aux, const, sparams)
+    )(params)
+    g_mg_routed = jax.tree_map(lambda gm, mb: MARGIN_W * gm * mb, g_mg, mask_back)
+
+    # 先把两路结构化副损加到主梯度（都已路由）
+    g_sum = jax.tree_map(lambda gm, a, b: gm + a + b, g_main, g_phi_routed, g_mg_routed)
+
+    # 再叠加“末端 bit-BCE 副损”，并放大到 BACK_LR_MULT
+    g_routed = jax.tree_map(lambda gm, ga, mb: gm + alpha_aux * ga * mb * BACK_LR_MULT,
+                            g_sum, g_aux, mask_back)
+
     opt_state = opt.update_fn(i, g_routed, opt_state)
-    return (Lm, La, Lm + alpha_aux * La), opt_state, state_main
+    Ltot = Lm + alpha_aux * La + PHASE_LOSS_WEIGHT * Lphi + MARGIN_W * Lmg
+    return (Lm, La, Lphi, Lmg, Ltot), opt_state, state_main
 
-# ===========================================================
-#                     Data batching (unchanged)
-# ===========================================================
-def get_train_batch(ds,
-                    batchsize: int,
-                    overlaps: int,
-                    sps: int = 2):
+# -------------------- Data batching（保持不变） --------------------
+def get_train_batch(ds, batchsize: int, overlaps: int, sps: int = 2):
     flen = batchsize + overlaps
     fstep = batchsize
     ds_y = op.frame_gen(ds.y, flen * sps, fstep * sps)
@@ -337,20 +275,18 @@ def get_train_batch(ds,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-# ===========================================================
-#                 train (add alpha_aux & mask)
-# ===========================================================
+# -------------------- train（新增 alpha_aux、内部生成掩膜） --------------------
 def train(model: Model,
           data,
           batch_size: int = 500,
           n_iter = None,
-          alpha_aux: float = 0.5,   # ☆ 默认=0.5，对应你原 β_ce；若想弱化副损可改小到 0.01~0.1
+          alpha_aux: float = 0.8,   # ☆ 推荐：0.8
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
-    # ☆ 只需构造一次末端掩膜（与参数树同形状）
-    mask_back = make_back_mask(params)
+    mask_back = make_back_mask(params)  # 末端掩膜
+    mask_foe  = make_foe_mask(params)   # FOEAf 掩膜
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
@@ -358,17 +294,15 @@ def train(model: Model,
     for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter, desc='training', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-
-        (Lm, La, Ltot), opt_state, module_state = update_step(
+        (Lm, La, Lphi, Lmg, Ltot), opt_state, module_state = update_step(
             model.module, opt, i, opt_state, module_state,
             y, x, aux, const, sparams,
-            alpha_aux, mask_back
+            alpha_aux, mask_back, mask_foe
         )
+        # 对外接口保持：yield 总损 / 最新参数 / 模块状态
         yield float(Ltot), opt.params_fn(opt_state), module_state
 
-# ===========================================================
-#                           test (unchanged)
-# ===========================================================
+# -------------------- test（保持不变；可传 metric_fn=comm.qamqot_ext） --------------------
 def test(model: Model,
          params: Dict,
          data,
@@ -378,28 +312,21 @@ def test(model: Model,
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
-
     z, _ = jit(model.module.apply, backend='cpu')({
         'params': util.dict_merge(params, sparams),
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
-
-    metric = metric_fn(
-        z.val, data.x[z.t.start:z.t.stop],
-        scale=np.sqrt(10), eval_range=eval_range
-    )
+    metric = metric_fn(z.val, data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10), eval_range=eval_range)
     return metric, z
 
-# ===========================================================
-#                equalize_dataset (unchanged)
-# ===========================================================
+# -------------------- equalize_dataset（保持不变） --------------------
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
         core.Signal(data.y))
-
     start, stop = z.t.start, z.t.stop
     z_eq  = np.asarray(z.val[:,0])
     s_ref = np.asarray(data.x)[start:stop,0]
