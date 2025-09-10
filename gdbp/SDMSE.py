@@ -144,25 +144,6 @@ def model_init(data: gdat.Input,
                n_symbols: int = 4000,
                sps : int = 2,
                name='Model'):
-    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-    depending on given N-filter length and trainable parameters
-
-    Args:
-        data:
-        base_conf: a dict of kwargs to make base module, see `make_base_module`
-        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-            For example, assume base module has parameters represented as nested dict
-            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supportted.
-        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-            memory
-        sps: sample per symbol. Only integer sps is supported now.
-
-    Returns:
-        a initialized model wrapped by a namedtuple
-    '''
     
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
@@ -191,168 +172,23 @@ def _estimate_kmean(y, x, blk=16384):
                           np.vdot(x[i:i+blk], x[i:i+blk])))
     return float(np.mean(kap))
 
-def _rms(sig, eps=1e-12):
-    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
-
-def _proj_mse(z, s):
-    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
-    return jnp.mean(jnp.abs(z - alpha*s)**2)
-
-def energy(x):
-    return jnp.sum(jnp.square(x))
-
-def si_snr(target, estimate, eps=1e-8):
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
 
 
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    r    = jnp.abs(tx)
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
-
-    def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-        return num / den
-
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
-
-        
-def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
-    """幅度|·|，两极化展平后算 α，再平分给两路"""
-    s  = jnp.reshape(jnp.abs(tx), (-1,))
-    x  = jnp.reshape(jnp.abs(rx), (-1,))
-    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
-    e  = x - alpha * s
-    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
-                              (jnp.vdot(e, e).real + eps) )
-    return -snr_db                   
-
-def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
-    """
-    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
-    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
-    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
-    """
-    z = jnp.vdot(yhat, y)                          # <yhat, y>
-    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
-    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
-    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
-    return alpha * yhp, alpha, jnp.angle(p)
-  
-CONST_16QAM = jnp.array([
-    -3-3j, -3-1j, -3+3j, -3+1j,
-    -1-3j, -1-1j, -1+3j, -1+1j,
-     3-3j,  3-1j,  3+3j,  3+1j,
-     1-3j,  1-1j,  1+3j,  1+1j
-], dtype=jnp.complex64) / jnp.sqrt(10.)
-
-# 2. CE-loss helper  (可 jit / vmap)
-def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    """
-    pred_sym : [N] complex  — 网络输出符号
-    true_sym : [N] complex  — 对齐后的发送符号
-    return    : 标量 cross-entropy 损失
-    """
-    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-
-    # 每个真实符号对应的 QAM 点下标
-    label_idx = jnp.argmin(
-        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
-        axis=-1)                                                      # [N]
-
-    # softmax-cross-entropy:
-    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
-
-    return ce.mean()
-
-_bits = (
-    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
-    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
-    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
-    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
-)
-BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
-# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
-
-def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
-    probs   = jnp.exp(logp)                                             # [N,16]
-
-    # bit 概率 & 真值
-    p1 = (probs @ BIT_MAP)                    # P(bit=1)
-    p0 = 1.0 - p1
-
-    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits = BIT_MAP[idx]                       # 真值 bits
-
-    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
-    return (bce * BIT_WEIGHTS).mean()          # 加权平均
-        
-
-def loss_fn(module, params, state, y, x, aux, const, sparams,
-            β_ce: float = 0.5, λ_kl: float = 1e-4):
-
-    params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
-
-    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
-    yhat  = z_out.val                       # 预测复符号
-
-    # --- 仅移除相位（商空间代表），并 stop-gradient ---
-    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
-    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
-    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
-    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
-
-    # --- 任务一致计分（在 y_al 上）---
-    # EVM（Q²代理）
-    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
-           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
-
-    # SI-SNR（复数版）
-    t = x_ref.reshape(-1); e = y_al.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-    s = a * t
-    snr = -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
-    )
-
-    # Bit-BCE（对齐后星座）
-    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
-
-    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
-
-    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
-    total_loss = loss_main + λ_kl * kl_ib
-    return total_loss, state_new
+    return mse_loss, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
