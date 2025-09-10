@@ -1,687 +1,500 @@
-# Copyright 2021 The Commplax Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-
-import re
+# [np.float64(8.488569856531333), np.float64(8.810227272425061)]
+# [np.float64(0.0039393303488155194), np.float64(0.0029124958132475207)]
+from jax import numpy as jnp, random, jit, value_and_grad, nn
+import flax
+from commplax import util, comm, cxopt, op, optim
+from commplax.module import core, layer
 import numpy as np
-import pandas as pd
-from scipy import signal, special
-from commplax import op
+from functools import partial
+from collections import namedtuple
+from tqdm.auto import tqdm
+from typing import Any, Optional, Union, Tuple
+from . import data as gdat
+import jax
+from scipy import signal
+from flax import linen as nn
+from sklearn.neighbors import KernelDensity
+from jax.scipy.stats import norm
+from jax import jit, lax
+from typing import Tuple
 import matplotlib.pyplot as plt
-import quantumrandom
+Model = namedtuple('Model', 'module initvar overlaps name')
+Array = Any
+Dict = Union[dict, flax.core.FrozenDict]
 
 
-quasigray_32xqam = np.array([
-    -3.+5.j, -1.+5.j, -3.-5.j, -1.-5.j, -5.+3.j, -5.+1.j, -5.-3.j,
-    -5.-1.j, -1.+3.j, -1.+1.j, -1.-3.j, -1.-1.j, -3.+3.j, -3.+1.j,
-    -3.-3.j, -3.-1.j,  3.+5.j,  1.+5.j,  3.-5.j,  1.-5.j,  5.+3.j,
-    5.+1.j,  5.-3.j,  5.-1.j,  1.+3.j,  1.+1.j,  1.-3.j,  1.-1.j,
-    3.+3.j,  3.+1.j,  3.-3.j,  3.-1.j
-])
+## Two ##
+def make_base_module(steps: int = 3,
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0=0.,
+                     mode: str = 'train'):
 
+    _assert_taps(dtaps, ntaps, rtaps)
 
-def qammod(x, L):
-    if is_square_qam(L):
-        y = square_qam_mod(x, L)
+    d_init, n_init = init_fn
+
+    if mode == 'train':
+        mimo_train = True
+    elif mode == 'test':
+        mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
-        y = cross_qam_mod(x, L)
-    return y
+        raise ValueError('invalid mode %s' % mode)
+
+    # 定义串联的 FDBP 层
+    fdbp_series = layer.Serial(
+        layer.FDBP(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp1'),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf1',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='fdbp_series'
+    )
+
+    # 定义原有的串行分支
+    serial_branch = layer.Serial(
+        layer.FDBP1(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='serial_branch'  # 添加名称
+    )
+
+    # 定义基础模块
+    base = layer.Serial(
+        layer.FanOut(num=2),
+        layer.Parallel(
+            fdbp_series,
+            serial_branch
+        ),
+        layer.FanInMean()
+    )
+
+    return base
+  
+
+def _assert_taps(dtaps, ntaps, rtaps, sps=2):
+    ''' we force odd taps to ease coding '''
+    assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
+    assert ntaps % sps, f'ntaps must be odd number, got {ntaps} instead'
+    assert rtaps % sps, f'rtaps must be odd number, got {rtaps} instead'
 
 
-def qamdecision(x, L):
-    if is_square_qam(L):
-        y = square_qam_decision(x, L)
-    else:
-        y = cross_qam_decision(x, L)
-    return y
+def fdbp_init(a: dict,
+              xi: float = 1.1,
+              steps: Optional[int] = None):
+    '''
+        initializer for the base module
+
+        Args:
+            xi: NLC scaling factor
+            steps: GDBP steps, used to calculate the theoretical profiles of D- and N-filters
+
+        Returns:
+            a pair of functions to initialize D- and N-filters
+    '''
+
+    def d_init(key, shape, dtype=jnp.complex64):
+        dtaps = shape[0]
+        d0, _ = comm.dbp_params(
+            a['samplerate'],
+            a['distance'] / a['spans'],
+            a['spans'],
+            dtaps,
+            a['lpdbm'] - 3,  # rescale as input power which has been norm to 2 in dataloader
+            virtual_spans=steps)
+        return d0[0, :, 0]
+
+    def n_init(key, shape, dtype=jnp.float32):
+        dtaps = shape[0]
+        _, n0 = comm.dbp_params(
+            a['samplerate'],
+            a['distance'] / a['spans'],
+            a['spans'],
+            dtaps,
+            a['lpdbm'] - 3,  # rescale
+            virtual_spans=steps)
+
+        return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
+
+    return d_init, n_init
 
 
-def qamdemod(x, L):
-    if is_square_qam(L):
-        d = square_qam_demod(x, L)
-    else:
-        d = cross_qam_decision(x, L, return_int=True)
-    return d
+def model_init(data: gdat.Input,
+               base_conf: dict,
+               sparams_flatkeys: list,
+               n_symbols: int = 4000,
+               sps : int = 2,
+               name='Model'):
+    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+    depending on given N-filter length and trainable parameters
 
+    Args:
+        data:
+        base_conf: a dict of kwargs to make base module, see `make_base_module`
+        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+            For example, assume base module has parameters represented as nested dict
+            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+            regexp key is supportted.
+        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+            memory
+        sps: sample per symbol. Only integer sps is supported now.
 
-def cross_qam_decision(x, L, return_int=False):
-    x = np.asarray(x)
-    c = const(L)
-    idx = np.argmin(np.abs(x[:, None] - c[None, :])**2, axis=1)
-    y = c[idx]
-    return idx if return_int else y
-
-
-def is_power_of_two(n):
-    return (n != 0) and (n & (n-1) == 0)
-
-
-def is_square_qam(L):
-    return is_power_of_two(L) and int(np.log2(L)) % 2 == 0
-
-
-def is_cross_qam(L):
-    return is_power_of_two(L) and int(np.log2(L)) % 2 == 1
-
-
-def cross_qam_mod(x, L):
-    if L == 32:
-        return quasigray_32xqam[x]
-    else:
-        raise ValueError(f'Cross QAM size{L} is not implemented')
-
-
-def randpam(s, n, p=None):
-    a = np.linspace(-s+1, s-1, s)
-    return np.random.choice(a, n, p=p) + 1j * np.random.choice(a, n, p=p)
-
-
-def randqam(s, n, p=None):
-    m = np.int(np.sqrt(s))
-    a = np.linspace(-m+1, m-1, m, dtype=np.float64)
-    return np.random.choice(a, n, p=p) + 1j * np.random.choice(a, n, p=p)
-
-
-def grayenc_int(x):
-    x = np.asarray(x, dtype=int)
-    return x ^ (x >> 1)
-
-
-def graydec_int(x):
-    x = np.atleast_1d(np.asarray(x, dtype=int))
-    mask = np.array(x)
-    while mask.any():
-        I       = mask > 0
-        mask[I] >>= 1
-        x[I]    ^= mask[I]
-    return x
-
-
-def square_qam_grayenc_int(x, L):
-    """
-    Wesel, R.D., Liu, X., Cioffi, J.M. and Komninakis, C., 2001.
-    Constellation labeling for linear encoders. IEEE Transactions
-    on Information Theory, 47(6), pp.2417-2431.
-    """
-    x = np.asarray(x, dtype=int)
-    M = int(np.sqrt(L))
-    B = int(np.log2(M))
-    x1 = x // M
-    x2 = x %  M
-    return (grayenc_int(x1) << B) + grayenc_int(x2)
-
-
-def square_qam_graydec_int(x, L):
-    x = np.asarray(x, dtype=int)
-    M = int(np.sqrt(L))
-    B = int(np.log2(M))
-    x1 = graydec_int(x >> B)
-    x2 = graydec_int(x % (1 << B))
-    return x1 * M + x2
-
-
-def pamdecision(x, L):
-    x = np.asarray(x)
-    y = np.atleast_1d((np.round(x / 2 + 0.5) - 0.5) * 2).astype(int)
-    # apply bounds
-    bd = L - 1
-    y[y >  bd] =  bd
-    y[y < -bd] = -bd
-    return y
+    Returns:
+        a initialized model wrapped by a namedtuple
+    '''
     
-def pamdecision(x, L):
-    x = np.asarray(x)
-    y = np.atleast_1d((np.round(x / 2 + 0.5) - 0.5) * 2).astype(int)
-    # apply bounds
-    bd = L - 1
-    y[y >  bd] =  bd
-    y[y < -bd] = -bd
-    return y
+    mod = make_base_module(**base_conf, w0=data.w0)
+    y0 = data.y[:n_symbols * sps]
+    rng0 = random.PRNGKey(0)
+    z0, v0 = mod.init(rng0, core.Signal(y0))
+    ol = z0.t.start - z0.t.stop
+    sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+    state = v0['af_state']
+    aux = v0['aux_inputs']
+    const = v0['const']
+    return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
 
-def square_qam_decision(x, L):
-    x = np.atleast_1d(x)
-    M = int(np.sqrt(L))
-    if any(np.iscomplex(x)):
-        I = pamdecision(np.real(x), M)
-        Q = pamdecision(np.imag(x), M)
-        y = I + 1j*Q
-    else: # is tuple
-        I = pamdecision(x[0], M)
-        Q = pamdecision(x[1], M)
-        y = (I, Q)
-    return y
+def l2_normalize(x, axis=None, epsilon=1e-12):
+    square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
+    x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
+    return x / x_inv_norm
+  
 
 
-def square_qam_mod(x, L):
-    x = np.asarray(x, dtype=int)
-    M = int(np.sqrt(L))
-    A = np.linspace(-M+1, M-1, M, dtype=np.float64)
-    C = A[None,:] + 1j*A[::-1, None]
-    d = square_qam_graydec_int(x, L)
-    return C[d // M, d % M]
+def _estimate_kmean(y, x, blk=16384):
+    kap=[]
+    for i in range(0, len(x)-blk, blk):
+        kap.append(np.abs(np.vdot(y[i:i+blk], x[i:i+blk]) /
+                          np.vdot(x[i:i+blk], x[i:i+blk])))
+    return float(np.mean(kap))
+
+def _rms(sig, eps=1e-12):
+    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
+
+def _proj_mse(z, s):
+    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
+    return jnp.mean(jnp.abs(z - alpha*s)**2)
+
+def energy(x):
+    return jnp.sum(jnp.square(x))
+
+def si_snr(target, estimate, eps=1e-8):
+    target_energy = energy(target)
+    dot_product = jnp.sum(target * estimate)
+    s_target = dot_product / (target_energy + eps) * target
+    e_noise = estimate - s_target
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value 
 
 
-def square_qam_demod(x, L):
-    x = np.asarray(x)
-    M = int(np.sqrt(L))
-    x = square_qam_decision(x, L)
-    c = ((np.real(x) + M - 1) // 2).astype(int)
-    r = ((M - 1 - np.imag(x)) // 2).astype(int)
-    d = square_qam_grayenc_int(r * M + c, L)
-    return d
+def evm_ring(tx, rx, eps=1e-8,
+             thr_in=0.60, thr_mid=1.10,
+             w_in=1.0, w_mid=1.5, w_out=2.0):
+    r    = jnp.abs(tx)
+    err2 = jnp.abs(rx - tx)**2
+    sig2 = jnp.abs(tx)**2
 
+    # 0/1 masks — 必须是 float32 / float64，不能用 complex
+    m_in  = (r < thr_in).astype(jnp.float32)
+    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
+    m_out = (r >= thr_mid).astype(jnp.float32)
 
-def int2bit(d, M):
-    M = np.asarray(M, dtype=int)  # 或 np.int64 / np.int32 根据需要
-    d = np.atleast_1d(d).astype(np.uint8)
-    b = np.unpackbits(d[:, None], axis=1)[:,-M:]
-    return b
+    def _evm(mask):
+        num = jnp.sum(err2 * mask)
+        den = jnp.sum(sig2 * mask)
+        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
+        return num / den
 
+    return (w_in  * _evm(m_in) +
+            w_mid * _evm(m_mid) +
+            w_out * _evm(m_out))
 
-def bit2int(b, M):
-    b = np.asarray(b, dtype=np.uint8)
-    d = np.packbits(np.pad(b.reshape((-1,M)), ((0,0),(8-M,0))))
-    return d
+        
+def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
+    """幅度|·|，两极化展平后算 α，再平分给两路"""
+    s  = jnp.reshape(jnp.abs(tx), (-1,))
+    x  = jnp.reshape(jnp.abs(rx), (-1,))
+    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
+    e  = x - alpha * s
+    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
+                              (jnp.vdot(e, e).real + eps) )
+    return -snr_db                   
 
+def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
+    """
+    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
+    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
+    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
+    """
+    z = jnp.vdot(yhat, y)                          # <yhat, y>
+    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
+    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
+    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
+    return alpha * yhp, alpha, jnp.angle(p)
+  
+CONST_16QAM = jnp.array([
+    -3-3j, -3-1j, -3+3j, -3+1j,
+    -1-3j, -1-1j, -1+3j, -1+1j,
+     3-3j,  3-1j,  3+3j,  3+1j,
+     1-3j,  1-1j,  1+3j,  1+1j
+], dtype=jnp.complex64) / jnp.sqrt(10.)
 
-def grayqamplot(L):
-    M = int(np.log2(L))
-    x = range(L)
-    y = qammod(x, L)
-    fstr = "{:0" + str(M) + "b}"
+# 2. CE-loss helper  (可 jit / vmap)
+def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    """
+    pred_sym : [N] complex  — 网络输出符号
+    true_sym : [N] complex  — 对齐后的发送符号
+    return    : 标量 cross-entropy 损失
+    """
+    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
+    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
 
-    I = np.real(y)
-    Q = np.imag(y)
+    # 每个真实符号对应的 QAM 点下标
+    label_idx = jnp.argmin(
+        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
+        axis=-1)                                                      # [N]
 
-    plt.figure(num=None, figsize=(8, 6), dpi=100)
-    plt.axis('equal')
-    plt.scatter(I, Q, s=1)
+    # softmax-cross-entropy:
+    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
 
-    for i in range(L):
-        plt.annotate(fstr.format(x[i]), (I[i], Q[i]))
+    return ce.mean()
 
+_bits = (
+    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
+    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
+    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
+    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
+)
+BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
+# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
+BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
 
-def parseqamorder(type_str):
-    if type_str.lower() == 'qpsk':
-        type_str = '4QAM'
-    M = int(re.findall(r'\d+', type_str)[0])
-    T = re.findall(r'[a-zA-Z]+', type_str)[0].lower()
-    if T != 'qam':
-        raise ValueError('{} is not implemented yet'.format(T))
-    return M
+def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
+    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
+    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
+    probs   = jnp.exp(logp)                                             # [N,16]
 
+    # bit 概率 & 真值
+    p1 = (probs @ BIT_MAP)                    # P(bit=1)
+    p0 = 1.0 - p1
 
-def const(type_str=None, norm=False):
-    ''' generate constellation given its natrual names '''
+    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
+    bits = BIT_MAP[idx]                       # 真值 bits
 
-    if isinstance(type_str, str):
-        M = parseqamorder(type_str)
-    else:
-        M = type_str
-    C = qammod(range(M), M)
-    if norm:
-        C /= np.sqrt(2*(M-1)/3)
-    return C
+    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
+    return (bce * BIT_WEIGHTS).mean()          # 加权平均
+        
 
+def loss_fn(module, params, state, y, x, aux, const, sparams,
+            β_ce: float = 0.5, λ_kl: float = 1e-4):
 
-def canonical_qam_scale(M):
-    if isinstance(M, str):
-        M = parseqamorder(M)
-    return np.sqrt((M-1) * 2 / 3)
+    params_net = util.dict_merge(params, sparams)
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y)
+    )
 
+    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
+    yhat  = z_out.val                       # 预测复符号
 
-def anuqrng_bit(L):
-    ''' https://github.com/lmacken/quantumrandom '''
-    L    = int(L)
-    N    = 0
-    bits = []
+    # --- 仅移除相位（商空间代表），并 stop-gradient ---
+    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
+    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
+    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
+    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
+    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
 
-    while N < L:
-        b = np.unpackbits(np.frombuffer(quantumrandom.binary(), dtype=np.uint8))
-        N += len(b)
-        bits.append(b)
+    # --- 任务一致计分（在 y_al 上）---
+    # EVM（Q²代理）
+    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
+           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
 
-    bits = np.concatenate(bits)[:L]
+    # SI-SNR（复数版）
+    t = x_ref.reshape(-1); e = y_al.reshape(-1)
+    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
+    s = a * t
+    snr = -10.0 * jnp.log10(
+        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
+        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
+    )
 
-    return bits
+    # Bit-BCE（对齐后星座）
+    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
 
+    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
 
-def rcosdesign(beta, span, sps, shape='normal', dtype=np.float64):
-    ''' ref:
-        [1] https://en.wikipedia.org/wiki/Root-raised-cosine_filter
-        [2] https://en.wikipedia.org/wiki/Raised-cosine_filter
-        [3] Matlab R2019b `rcosdesign`
+    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
+    total_loss = loss_main + λ_kl * kl_ib
+    return total_loss, state_new
+              
+@partial(jit, backend='cpu', static_argnums=(0, 1))
+def update_step(module: layer.Layer,
+                opt: cxopt.Optimizer,
+                i: int,
+                opt_state: tuple,
+                module_state: Dict,
+                y: Array,
+                x: Array,
+                aux: Dict,
+                const: Dict,
+                sparams: Dict):
+    ''' single backprop step
+
+        Args:
+            model: model returned by `model_init`
+            opt: optimizer
+            i: iteration counter
+            opt_state: optimizer state
+            module_state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
+
+        Return:
+            loss, updated module state
     '''
 
-    delay = span * sps / 2
-    t = np.arange(-delay, delay + 1, dtype=dtype) / sps
-    b = np.zeros_like(t)
-    eps = np.finfo(dtype).eps
+    params = opt.params_fn(opt_state)
+    (loss, module_state), grads = value_and_grad(
+        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
+                                          aux, const, sparams)
+    opt_state = opt.update_fn(i, grads, opt_state)
+    return loss, opt_state, module_state
+                  
+                        
+def get_train_batch(ds: gdat.Input,
+                    batchsize: int,
+                    overlaps: int,
+                    sps: int = 2):
+    ''' generate overlapped batch input for training
 
-    if beta == 0:
-        beta = np.finfo(dtype).tiny
+        Args:
+            ds: dataset
+            batchsize: batch size in symbol unit
+            overlaps: overlaps in symbol unit
+            sps: samples per symbol
 
-    if shape == 'normal':
-        denom = 1 - (2 * beta * t) ** 2
-
-        ind1 = np.where(abs(denom) >  np.sqrt(eps), True, False)
-        ind2 = ~ind1
-
-        b[ind1] = np.sinc(t[ind1]) * (np.cos(np.pi * beta * t[ind1]) / denom[ind1]) / sps
-        b[ind2] = beta * np.sin(np.pi / (2 * beta)) / (2 * sps)
-
-    elif shape == 'sqrt':
-        ind1 = np.where(t == 0, True, False)
-        ind2 = np.where(abs(abs(4 * beta * t) - 1.0) < np.sqrt(eps), True, False)
-        ind3 = ~(ind1 | ind2)
-
-        b[ind1] = -1 / (np.pi * sps) * (np.pi * (beta - 1) - 4 * beta)
-        b[ind2] = (
-            1 / (2 * np.pi * sps)
-            * (np.pi * (beta + 1) * np.sin(np.pi * (beta + 1) / (4 * beta))
-            - 4 * beta * np.sin(np.pi * (beta - 1) / (4 * beta))
-            + np.pi * (beta - 1) * np.cos(np.pi * (beta - 1) / (4 * beta)))
-        )
-        b[ind3] = (
-            -4 * beta / sps * (np.cos((1 + beta) * np.pi * t[ind3]) +
-                               np.sin((1 - beta) * np.pi * t[ind3]) / (4 * beta * t[ind3]))
-            / (np.pi * ((4 * beta * t[ind3])**2 - 1))
-        )
-
-    else:
-        raise ValueError('invalid shape')
-
-    b /= np.sqrt(np.sum(b**2)) # normalize filter gain
-
-    return b
-
-
-def upsample(x, n, axis=0, trim=False):
-    x = np.atleast_1d(x)
-    x = signal.upfirdn([1], x, n, axis=axis)
-    pads = np.zeros((x.ndim, 2), dtype=int)
-    pads[axis, 1] = n - 1
-    y = x if trim else np.pad(x, pads)
-    return y
-
-
-def resample(x, p, q, axis=0):
-    p = int(p)
-    q = int(q)
-    gcd = np.gcd(p, q)
-    return signal.resample_poly(x, p//gcd, q//gcd, axis=axis)
-
-
-def shape_signal(x):
-    x = np.atleast_1d(np.asarray(x))
-
-    if x.ndim == 1:
-        x = x[..., None]
-
-    return x
-
-
-def getpower(x, real=False):
-    ''' get signal power '''
-    return np.mean(x.real**2, axis=0) + np.array(1j) * np.mean(x.imag**2, axis=0) \
-        if real else np.mean(abs(x)**2, axis=0)
-
-
-def normpower(x, real=False):
-    ''' normalize signal power '''
-    if real:
-        p = getpower(x, real=True)
-        return x.real / np.sqrt(p.real) + 1j * x.imag / np.sqrt(p.imag)
-    else:
-        return x / np.sqrt(getpower(x))
-
-
-def delta(taps, dims=None, dtype=np.complex64):
-    mf = np.zeros(taps, dtype=dtype)
-    mf[(taps - 1) // 2] = 1.
-    return mf if dims is None else np.tile(mf[:, None], dims)
-
-
-def gauss(bw, taps=None, oddtaps=True, dtype=np.float64):
-    """ https://en.wikipedia.org/wiki/Gaussian_filter """
-    eps = 1e-8 # stablize to work with gauss_minbw
-    gamma = 1 / (2 * np.pi * bw * 1.17741)
-    mintaps = int(np.ceil(6 * gamma - 1 - eps))
-    if taps is None:
-        taps = mintaps
-    elif taps < mintaps:
-        raise ValueError('required {} taps which is less than minimal default {}'.format(taps, mintaps))
-
-    if oddtaps is not None:
-        if oddtaps:
-            taps = mintaps if mintaps % 2 == 1 else mintaps + 1
-        else:
-            taps = mintaps if mintaps % 2 == 0 else mintaps + 1
-    return gauss_kernel(taps, gamma, dtype=dtype)
-
-
-def gauss_minbw(taps):
-    return 1 / (2 * np.pi * ((taps + 1) / 6) * 1.17741)
-
-
-def gauss_kernel(n=11, sigma=1, dims=None, dtype=np.complex64):
-    r = np.arange(-int(n / 2), int(n / 2) + 1) if n % 2 else np.linspace(-int(n / 2) + 0.5, int(n / 2) - 0.5, n)
-    w = np.array([1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-float(x)**2 / (2 * sigma**2)) for x in r]).astype(dtype)
-    return w if dims is None else np.tile(w[:, None], dims)
-
-
-def qamscale(modformat):
-    if isinstance(modformat, str):
-        M = parseqamorder(modformat)
-    else:
-        M = modformat
-    return np.sqrt((M - 1) * 2 / 3) if is_square_qam(M) else np.sqrt(2/3 * (M * 31/32 - 1))
-
-
-def dbp_params(
-    sample_rate,                                      # sample rate of target signal [Hz]
-    span_length,                                      # length of each fiber span [m]
-    spans,                                            # number of fiber spans
-    freqs,                                            # resulting size of linear operator
-    launch_power=0,                                   # launch power [dBm]
-    steps_per_span=1,                                 # steps per span
-    virtual_spans=None,                               # number of virtual spans
-    carrier_frequency=194.1e12,                       # carrier frequency [Hz]
-    fiber_dispersion=16.7E-6,                         # [s/m^2]
-    fiber_dispersion_slope=0.08e3,                    # [s/m^3]
-    fiber_loss=.2E-3,                                 # loss of fiber [dB]
-    fiber_core_area=80E-12,                           # effective area of fiber [m^2]
-    fiber_nonlinear_index=2.6E-20,                    # nonlinear index [m^2/W]
-    fiber_reference_frequency=194.1e12,      # fiber reference frequency [Hz]
-    ignore_beta3=False,
-    polmux=True,
-    domain='time',
-    step_method="uniform"):
-
-    domain = domain.lower()
-    assert domain == 'time' or domain == 'frequency'
-
-    # short names
-    pi  = np.pi
-    log = np.log
-    exp = np.exp
-    ifft = np.fft.ifft
-
-    # virtual span is used in cases where we do not use physical span settings
-    if virtual_spans is None:
-        virtual_spans = spans
-
-    C       = 299792458. # speed of light [m/s]
-    lambda_ = C / fiber_reference_frequency
-    B_2     = -fiber_dispersion * lambda_**2 / (2 * pi * C)
-    B_3     = 0. if ignore_beta3 else \
-        (fiber_dispersion_slope * lambda_**2 + 2 * fiber_dispersion * lambda_) * (lambda_ / (2 * pi * C))**2
-    gamma   = 2 * pi * fiber_nonlinear_index / lambda_ / fiber_core_area
-    LP      = 10.**(launch_power / 10 - 3)
-    alpha   = fiber_loss / (10. / log(10.))
-    L_eff   = lambda h: (1 - exp(-alpha * h)) / alpha
-    NIter   = virtual_spans * steps_per_span
-    delay   = (freqs - 1) // 2
-    dw      = 2 * pi * (carrier_frequency - fiber_reference_frequency)
-    w_res   = 2 * pi * sample_rate / freqs
-    k       = np.arange(freqs)
-    w       = np.where(k > delay, k - freqs, k) * w_res # ifftshifted
-
-    if step_method.lower() == "uniform":
-        H   = exp(-1j * (-B_2 / 2 * (w + dw)**2 + B_3 / 6 * (w + dw)**3) * \
-                      span_length * spans / virtual_spans / steps_per_span)
-        H_casual = H * exp(-1j * w * delay / sample_rate)
-        h_casual = ifft(H_casual)
-
-        phi = spans / virtual_spans * gamma * L_eff(span_length / steps_per_span) * LP * \
-            exp(-alpha * span_length * (steps_per_span - np.arange(0, NIter) % steps_per_span-1) / steps_per_span)
-    else:
-        raise ValueError("step method '%s' not implemented" % step_method)
-
-    if polmux:
-        dims = 2
-    else:
-        dims = 1
-
-    H = np.tile(H[None, :, None], (NIter, 1, dims))
-    h_casual = np.tile(h_casual[None, :, None], (NIter, 1, dims))
-    phi = np.tile(phi[:, None, None], (1, dims, dims))
-
-    return (h_casual, phi) if domain == 'time' else (H, phi)
-
-
-def finddelay(x, y):
+        Returns:
+            number of symbols,
+            zipped batched triplet input: (recv, sent, fomul)
     '''
-    case 1:
-        X = [1, 2, 3]
-        Y = [0, 0, 1, 2, 3]
-        D = comm.finddelay(X, Y) # D = 2
-    case 2:
-        X = [0, 0, 1, 2, 3, 0]
-        Y = [0.02, 0.12, 1.08, 2.21, 2.95, -0.09]
-        D = comm.finddelay(X, Y) # D = 0
-    case 3:
-        X = [0, 0, 0, 1, 2, 3, 0, 0]
-        Y = [1, 2, 3, 0]
-        D = comm.finddelay(X, Y) # D = -3
-    case 4:
-        X = [0, 1, 2, 3]
-        Y = [1, 2, 3, 0, 0, 0, 0, 1, 2, 3, 0, 0]
-        D = comm.finddelay(X, Y) # D = -1
-    reference:
-        https://www.mathworks.com/help/signal/ref/finddelay.html
+
+    flen = batchsize + overlaps
+    fstep = batchsize
+    ds_y = op.frame_gen(ds.y, flen * sps, fstep * sps)
+    ds_x = op.frame_gen(ds.x, flen, fstep)
+    n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
+    return n_batches, zip(ds_y, ds_x)
+
+def train(model: Model,
+          data: gdat.Input,
+          batch_size: int = 500,
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
     '''
-    x = np.asarray(x)
-    y = np.asarray(y)
-    c = abs(signal.correlate(x, y, mode='full', method='fft'))
-    k = np.arange(-len(y)+1, len(x))
-    i = np.lexsort((np.abs(k), -c))[0] # lexsort to handle case 4
-    d = -k[i]
-    return d
 
-
-def align_periodic(y, x, begin=0, last=2000, b=0.5):
-
-    dims = x.shape[-1]
-    z = np.zeros_like(x)
-
-    def step(v, u):
-        c = abs(signal.correlate(u, v[begin:begin+last], mode='full', method='fft'))
-        c /= np.max(c)
-        k = np.arange(-len(x)+1, len(y))
-        #n = k[np.argmax(c)]
-
-        i = np.where(c > b)[0]
-        i = i[np.argsort(np.atleast_1d(c[i]))[::-1]]
-        j = -k[i] + begin + last
-
-        return j
-
-    r0 = step(y[:,0], x[:,0])
-
-    if dims > 1:
-        if len(r0) == 1: # PDM
-            r0 = r0[0]
-            r1 = step(y[:,1], x[:,1])[0]
-        elif len(r0) == 2: # PDM Emu. ?
-            r1 = r0[1]
-            r0 = r0[0]
-        else:
-            raise RuntimeError('bad input')
-
-        z[:,0] = np.roll(x[:,0], r0)
-        z[:,1] = np.roll(x[:,1], r1)
-        d = np.stack((r0, r1))
-    else:
-        z[:,0] = np.roll(x[:,0], r0)
-        d = r0
-
-    z = np.tile(z, (len(y)//len(z)+1,1))[:len(y),:]
-
-    return z, d
-
-
-def qamqot(y, x, count_dim=True, count_total=True, L=None, eval_range=(0, 0), scale=1):
-    #if checktruthscale:
-    #    assert L is not None
-    #    ux = np.unique(x)
-    #    powdiff = abs(getpower(ux) - getpower(const(str(L) + 'QAM')))
-    #    if  powdiff > 1e-4:
-    #        #TODO add warning colors
-    #        print("truth QAM data is not properly scaled to its canonical form, scale = %.5f" % powdiff)
-
-
-    assert y.shape[0] == x.shape[0]
-    y = y[eval_range[0]: y.shape[0] + eval_range[1] if eval_range[1] <= 0 else eval_range[1]] * scale
-    x = x[eval_range[0]: x.shape[0] + eval_range[1] if eval_range[1] <= 0 else eval_range[1]] * scale
-
-    y = shape_signal(y)
-    x = shape_signal(x)
-
-    # check if scaled x is canonical
-    p = np.rint(x.real) + 1j * np.rint(x.imag)
-    if np.max(np.abs(p - x)) > 1e-2:
-        raise ValueError('the scaled x is seemly not canonical')
-
-    if L is None:
-        L = len(np.unique(p))
-
-    D = y.shape[-1]
-
-    z = [(a, b) for a, b in zip(y.T, x.T)]
-
-    SNR_fn = lambda y, x: 10. * np.log10(getpower(x, False) / getpower(x - y, False))
-
-    def f(z):
-        y, x = z
-
-        M = np.sqrt(L)
-
-        by = int2bit(qamdemod(y, L), M).ravel()
-        bx = int2bit(qamdemod(x, L), M).ravel()
-
-        BER = np.count_nonzero(by - bx) / len(by)
-        with np.errstate(divide='ignore'):
-            QSq = 20 * np.log10(np.sqrt(2) * np.maximum(special.erfcinv(2 * BER), 0.))
-        SNR = SNR_fn(y, x)
-
-        return BER, QSq, SNR
-
-    qot = []
-    ind = []
-    df = None
-
-    if count_dim:
-        qot += list(map(f, z))
-        ind += ['dim' + str(n) for n in range(D)]
-
-    if count_total:
-        qot += [f((y.ravel(), x.ravel()))]
-        ind += ['total']
-
-    if len(qot) > 0:
-        df = pd.DataFrame(qot, columns=['BER', 'QSq', 'SNR'], index=ind)
-
-    return df
-
-
-def qamqot_local(y, x, frame_size=10000, L=None, scale=1, eval_range=None):
-
-    y = shape_signal(y)
-    x = shape_signal(x)
-
-    if L is None:
-        L = len(np.unique(x))
-
-    Y = op.frame(y, frame_size, frame_size, True)
-    X = op.frame(x, frame_size, frame_size, True)
-
-    zf = [(yf, xf) for yf, xf in zip(Y, X)]
-
-    f = lambda z: qamqot(z[0], z[1], count_dim=True, L=L, scale=scale).to_numpy()
-
-    qot_local = np.stack(list(map(f, zf)))
-
-    qot_local_ip = np.repeat(qot_local, frame_size, axis=0) # better interp method?
-
-    return {'BER': qot_local_ip[...,0], 'QSq': qot_local_ip[...,1], 'SNR': qot_local_ip[...,2]}
-
-
-def corr_local(y, x, frame_size=10000, L=None):
-
-    y = shape_signal(y)
-    x = shape_signal(x)
-
-    if L is None:
-        L = len(np.unique(x))
-
-    Y = op.frame(y, frame_size, frame_size, True)
-    X = op.frame(x, frame_size, frame_size, True)
-
-    zf = [(yf, xf) for yf, xf in zip(Y, X)]
-
-    f = lambda z: np.abs(np.sum(z[0] * z[1].conj(), axis=0))
-
-    qot_local = np.stack(list(map(f, zf)))
-
-    qot_local_ip = np.repeat(qot_local, frame_size, axis=0) # better interp method?
-
-    return qot_local_ip
-
-
-def snrstat(y, x, frame_size=10000, L=None, eval_range=(0, 0), scale=1):
-    assert y.shape[0] == x.shape[0]
-    y = y[eval_range[0]: y.shape[0] + eval_range[1] if eval_range[1] <= 0 else eval_range[1]] * scale
-    x = x[eval_range[0]: x.shape[0] + eval_range[1] if eval_range[1] <= 0 else eval_range[1]] * scale
-    snr_local = qamqot_local(y, x, frame_size, L)['SNR'][:, :2]
-    sl_mean = np.mean(snr_local, axis=0)
-    sl_std = np.std(snr_local, axis=0)
-    sl_max = np.max(snr_local, axis=0)
-    sl_min = np.min(snr_local, axis=0)
-    return np.stack((sl_mean, sl_std, sl_mean - sl_min, sl_max - sl_mean))
-
-
-def firfreqz(h, sr=1, N=8192, t0=None, bw=None):
-    if h.ndim == 1:
-        h = h[None,:]
-
-    T = h.shape[-1]
-
-    if t0 is None:
-        t0 = (T - 1) // 2 + 1
-
-    H = []
-    for hi in h:
-        w, Hi = signal.freqz(hi, worN=N, whole=True)
-        Hi *= np.exp(1j * w * (t0 - 1))
-        H.append(Hi)
-    H = np.array(H)
-
-    w = (w + np.pi) % (2 * np.pi) - np.pi
-
-    H = np.squeeze(np.fft.fftshift(H, axes=-1))
-    w = np.fft.fftshift(w, axes=-1) * sr / 2 / np.pi
-
-    if bw is not None:
-        s = int((sr - bw) / sr / 2 * len(w))
-        w = w[s: -s]
-        H = H[..., s: -s]
-
-    # w = np.fft.fftshift(np.fft.fftfreq(H.shape[-1], 1/sr))
-
-    return w, H
-
-
+    params, module_state, aux, const, sparams = model.initvar
+    opt_state = opt.init_fn(params)
+
+    n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
+    n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
+
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
+                                
+                       
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple=(300000, -20000),
+         metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
+
+    state, aux, const, sparams = model.initvar[1:]
+    aux = core.dict_replace(aux, {'truth': data.x})
+    if params is None:
+      params = model.initvar[0]
+
+    z, _ = jit(model.module.apply,
+               backend='cpu')({
+                   'params': util.dict_merge(params, sparams),
+                   'aux_inputs': aux,
+                   'const': const,
+                   **state
+               }, core.Signal(data.y))
+    metric = metric_fn(z.val,
+                       data.x[z.t.start:z.t.stop],
+                       scale=np.sqrt(10),
+                       eval_range=eval_range)
+    return metric, z
+
+
+def equalize_dataset(model_te, params, state_bundle, data):
+    module_state, aux, const, sparams = state_bundle
+    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+        {'params': util.dict_merge(params, sparams),
+         'aux_inputs': aux, 'const': const, **module_state},
+        core.Signal(data.y))
+
+    start, stop = z.t.start, z.t.stop
+    z_eq  = np.asarray(z.val[:,0])          # equalized
+    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
+    return z_eq, s_ref
