@@ -483,7 +483,7 @@ def test(model: Model,
 
     # —— 取对齐区间，并做 canonical 缩放（让 x_ref 变成标准 QAM 网格） —— #
     x_ref = data.x[z.t.start:z.t.stop]
-    scale = qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
+    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
     y_eq  = z.val * scale
     x_ref = x_ref * scale
 
@@ -505,7 +505,7 @@ def test(model: Model,
         bitwidth=bitwidth,
         return_artifacts=return_artifacts
     )
-    res = evaluate_hd_and_sd(
+    res = comm2.evaluate_hd_and_sd(
         y_1d, x_1d,
         L=L if L is not None else 16,
         decoder=decoder,
