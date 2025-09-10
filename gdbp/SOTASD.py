@@ -1,8 +1,6 @@
-# [np.float64(8.488569856531333), np.float64(8.810227272425061)]
-# [np.float64(0.0039393303488155194), np.float64(0.0029124958132475207)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from commplax import util, comm, cxopt, op, optim
+from commplax import util, comm, comm2, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
@@ -451,40 +449,86 @@ def train(model: Model,
                                 
                        
 def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+            params: Dict,
+            data: gdat.Input,
+            eval_range: tuple = (300000, -20000),
+            L: int = 16,                 # 星座大小（每复维）：16/64/256...
+            d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
+            pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
+            use_oracle_noise: bool = True,
+            use_elliptical_llr: bool = True,
+            temp_grid: tuple = (0.75, 1.0, 1.25),
+            bitwidth: int = 6,
+            decoder=None,                # 可传入你的 ldpc_decoder_adapter；没有就 None
+            return_artifacts: bool = False):
+    """
+    统一返回：
+      res = {
+        'HD':  DataFrame(only 'total' 行，含 BER/Q/SNR),
+        'SD':  dict(含 GMI/NGMI、4D 聚合、可选 post-FEC 与调参信息)
+      }, z = 等化后的信号对象
+    依赖：先把我给你的“精简版 SD 评估文件”放到你的工程并导入：
+      from sd_eval import evaluate_hd_and_sd, qamscale
+    """
+    # —— 前向 —— #
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
+    z, _ = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux, 'const': const, **state
+    }, core.Signal(data.y))
+
+    # —— 取对齐区间，并做 canonical 缩放（让 x_ref 变成标准 QAM 网格） —— #
+    x_ref = data.x[z.t.start:z.t.stop]
+    scale = qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
+    y_eq  = z.val * scale
+    x_ref = x_ref * scale
+
+    # —— eval_range 裁剪（与原口径一致）—— #
+    s0, s1 = eval_range
+    s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
+    y_eq = y_eq[s0:s1]
+    x_ref = x_ref[s0:s1]
+
+    # —— 将多复维拍平成 1D（把两极化当做同一分布的样本聚合，便于统一 LLR/GMI）—— #
+    y_1d = y_eq.reshape(-1)
+    x_1d = x_ref.reshape(-1)
+
+    # —— SD 评估（内部会：估噪→LLR→极性校→温度扫描→量化→（可选）软解码→GMI）—— #
+    sd_kwargs = dict(
+        use_oracle_noise=use_oracle_noise,
+        elliptical_llr=use_elliptical_llr,
+        temp_grid=temp_grid,
+        bitwidth=bitwidth,
+        return_artifacts=return_artifacts
+    )
+    res = evaluate_hd_and_sd(
+        y_1d, x_1d,
+        L=L if L is not None else 16,
+        decoder=decoder,
+        sd_kwargs=sd_kwargs
+    )
+
+    # —— 4D 聚合指标（基于同一份 LLR 结果）—— #
+    m_per_dim = int(np.log2(L if L is not None else 16))
+    gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
+    gmi_4d    = gmi_dim * d4_dims
+    ngmi_4d   = gmi_4d / (m_per_dim * d4_dims)
+    air_4d    = gmi_4d * (1.0 - pilot_frac)
+
+    res['SD'].update({
+        'GMI_bits_per_4D': gmi_4d,
+        'NGMI_4D': ngmi_4d,
+        'AIR_bits_per_4D': air_4d,
+        'pilot_frac': pilot_frac,
+        'd4_dims': d4_dims
+    })
+
+    return res, z
+
 
 
 def equalize_dataset(model_te, params, state_bundle, data):
