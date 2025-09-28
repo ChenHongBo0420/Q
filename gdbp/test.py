@@ -341,139 +341,81 @@ def _match_y_x_static(yhat, x_ref):
 
 import jax, jax.numpy as jnp
 
-# 需要你已有的 16QAM 常量与比特映射：
-# CONST_16QAM: shape [16] complex, 归一化好的星座点
-# BIT_MAP:     shape [16, 4]  该星座点的4个比特(0/1)，Gray 映射一致即可
 
-def bit_ce_pnaware(
-    y_pred: jnp.ndarray,          # 预测等化后的复符号，shape [T] 或 [T, C]
-    x_true: jnp.ndarray,          # 参考发射复符号，    shape [T] 或 [T, C]
-    tau: float = 1.2,             # 温度 ~ 等化后噪声标准差（可调/可学）
-    sigma_phi_deg: float = 3.0,   # 残余相位噪声标准差（度），常见 2~5°
-    K: int = 12,                  # 相位采样数，8~16 即可
-    estimate_alpha: bool = True   # 是否用闭式 α 做幅度刻度对齐
+def bit_ce_pnaware_stable(
+    y_pred: jnp.ndarray,          # 预测符号 [T] 或 [T,C]
+    x_true: jnp.ndarray,          # 参考符号 [T] 或 [T,C]
+    tau: float = 1.2,             # “温度”≈噪声标度
+    sigma_phi_deg: float = 3.0,   # 残余相位噪声(度)
+    K: int = 12,                  # 相位采样点数
+    estimate_alpha: bool = True,
+    eps: float = 1e-12
 ) -> jnp.ndarray:
-    """
-    PN-aware bit cross-entropy:
-      q(y|x) = ∫ N_C( y ; α e^{jφ} x , τ^2 I ) p(φ; σφ) dφ   （用 K 点采样逼近）
-      logits_k = log q(y|s_k)
-      loss = mean_bitwise_CE( logits → bit posteriors )
-    """
-    # 展平到 [T*C]
+    # 展平并清洗 NaN/Inf（只在 loss 内部）
     y = jnp.reshape(y_pred, (-1,))
     x = jnp.reshape(x_true, (-1,))
+    y = jnp.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # 可选：用闭式 α^* 做幅度刻度（stop-grad，避免泄梯度）
+    # 温度/相位噪声护栏（防 tau→0）
+    tau_eff = jnp.maximum(tau, 1e-3)
+    sigma_phi = jnp.maximum(jnp.deg2rad(sigma_phi_deg), 1e-4)
+
+    # 可选：闭式幅度对齐 α*（stop-grad，避免泄梯度）
     if estimate_alpha:
         num = jnp.real(jnp.vdot(y, x))
-        den = jnp.real(jnp.vdot(x, x)) + 1e-12
+        den = jnp.real(jnp.vdot(x, x)) + eps
         alpha = jax.lax.stop_gradient(num / den)
     else:
         alpha = 1.0
 
-    # 相位采样与权重（高斯先验）
-    sigma_phi = jnp.deg2rad(sigma_phi_deg)
-    phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)              # [K]
-    wphi = jnp.exp(-0.5 * (phis / sigma_phi)**2)
-    wphi = wphi / (jnp.sum(wphi) + 1e-12)                           # 归一化
+    # 相位离散化与权重
+    phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)                # [K]
+    wphi = jnp.exp(-0.5*(phis/sigma_phi)**2)
+    wphi = wphi / (jnp.sum(wphi) + eps)                               # [K]
 
-    # 旋转标签：x · e^{jφ}  →  [T, K]
-    x_rot = x[:, None] * jnp.exp(1j * phis)[None, :]
-
-    # 到每个星座点的距离平方：  [T, K, 16]
-    # 注意：alpha 只作用在“标签侧”（与 q 一致）
+    # 旋转标签并计算距离平方 d2: [T,K,16]
+    x_rot = x[:, None] * jnp.exp(1j*phis)[None, :]
     d2 = jnp.abs(y[:, None, None] - alpha * x_rot[:, :, None] * CONST_16QAM[None, None, :])**2
 
-    # 对 φ 边际化得到每个星座点的 log-likelihood（温度 tau 控制噪声标度）
-    # logits: [T, 16]
-    logits = jax.scipy.special.logsumexp(-(d2 / (tau * tau)) + jnp.log(wphi)[None, :, None], axis=1)
+    # ---- 核心稳定化：按样本中心化再 logsumexp，防全体下溢 ----
+    m = jnp.min(d2, axis=(1,2), keepdims=True)                        # [T,1,1]
+    # log ∑ exp( -(d2-m)/T + log wφ )  -  m/T
+    logits = jax.scipy.special.logsumexp(
+        -(d2 - m) / (tau_eff * tau_eff) + jnp.log(wphi)[None, :, None], axis=1
+    ) - (m[..., 0, 0] / (tau_eff * tau_eff))                          # [T,16]
 
-    # 转成 log 概率
-    logp = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)  # [T,16]
-
-    # 由符号概率得到每 bit 概率：p(b=1) = sum_s p(s) * bit(s)
-    p1 = jnp.exp(logp) @ BIT_MAP                                    # [T,4]
+    # 概率与 bit-CE
+    logp = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)   # [T,16]
+    probs = jnp.exp(logp)
+    p1 = probs @ BIT_MAP                                              # [T,4]
     p0 = 1.0 - p1
 
-    # 真实符号的比特标签（按最近星座点取索引）
     idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)
-    bits_true = BIT_MAP[idx]                                         # [T,4]
+    bits_true = BIT_MAP[idx]                                          # [T,4]
 
-    # bit-wise 交叉熵
-    bce = -(bits_true * jnp.log(p1 + 1e-12) + (1.0 - bits_true) * jnp.log(p0 + 1e-12))
+    # 夹一下，防 log(0)
+    p1c = jnp.clip(p1, 1e-9, 1.0 - 1e-9)
+    p0c = 1.0 - p1c
+    bce = -(bits_true * jnp.log(p1c) + (1. - bits_true) * jnp.log(p0c))
     return bce.mean()
 
 def loss_fn(module, params, state, y, x, aux, const, sparams,
-            β_ce: float = 0.5, λ_kl: float = 1e-4):
-    """
-    温和版：不改网络/训练流程，只在损失里做小幅相位去除与Bit-BCE温度平滑。
-      - 用尾段固定窗口估计全局相位 φ*，只去除 η·φ*（η=0.5）
-      - 不做幅度对齐（把幅度学习留给网络本身）
-      - Bit-BCE logits / τ^2（τ=1.5）以降低早期梯度噪声
-      - 组合：SI-SNR + 0.1*EVM + β_ce*Bit-BCE + λ_kl*IB
-    """
-    # ---- 超参（仅本函数内使用，保持外部接口不变）----
-    ETA_PHASE = 0.5     # 去相位比例 η ∈ [0,1]，0=不去相位，1=全去
-    TAU_BCE   = 1.5     # Bit-BCE 温度 >1 更平滑
-    TAIL_WIN  = 16384   # 用尾段估计全局相位的窗口（常量，JIT安全）
-
-    # ---- 前向 ----
+            tau: float = 1.2, sigma_phi_deg: float = 3.0, K: int = 12):
+    # 前向保持不变
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
         core.Signal(y)
     )
+    x_ref = x[z_out.t.start:z_out.t.stop]
+    yhat  = z_out.val
 
-    # 参考与预测
-    x_ref = x[z_out.t.start:z_out.t.stop]     # 裁剪后的真值符号（形状与原实现一致）
-    yhat  = z_out.val                          # 预测复符号（complex）
-
-    # ---- 仅相位温和对齐（不改幅度）----
-    # 用固定尾窗估计全局相位；为保持与原实现一致，这里对全通道展平统一估计一个相位
-    T  = int(yhat.shape[0])
-    W  = min(TAIL_WIN, T)
-    ys = yhat[-W:].reshape(-1)
-    xs = x_ref[-W:].reshape(-1)
-
-    zc   = jnp.vdot(ys, xs)                    # <y, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)           # 单位相位子
-    p    = lax.stop_gradient(p)                # 相位估计不回传
-    phi  = jnp.angle(p)                        # 标量全局相位
-    phase_factor = jnp.exp(-1j * ETA_PHASE * phi)
-    y_al = yhat * phase_factor                 # 只去掉 η·φ*
-
-    evm_num = jnp.mean(jnp.abs(y_al - x_ref)**2)
-    evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
-    evm = evm_num / evm_den
-
-    t = x_ref.reshape(-1)
-    e = y_al.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-    s = a * t
-    err = e - s
-    snr = -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-        (jnp.real(jnp.vdot(err, err)) + 1e-8)
-    )
-
-    logits = -jnp.square(jnp.abs(y_al[..., None] - CONST_16QAM)) / (TAU_BCE * TAU_BCE)  # [...,16]
-    logp   = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    probs  = jnp.exp(logp)
-
-    p1     = (probs @ BIT_MAP)                 # [...,4]
-    p0     = 1.0 - p1
-    idx    = jnp.argmin(jnp.square(jnp.abs(x_ref[..., None] - CONST_16QAM)), axis=-1)
-    bits   = BIT_MAP[idx]                      # [...,4]
-    bce    = -(bits * jnp.log(p1 + 1e-12) + (1. - bits) * jnp.log(p0 + 1e-12))
-    bit_bce = (bce * BIT_WEIGHTS).mean()
-
-    # ---- 信息瓶颈 KL 正则（保持原实现；用未对齐输出以限制绝对幅度/能量）----
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
-
-    # ---- 组合 ----
-    loss = bit_ce_pnaware(yhat, x_ref, tau=1.2, sigma_phi_deg=3.0, K=12, estimate_alpha=True)
-
+    # 唯一主损失：稳定版 PN-aware bit-CE
+    loss = bit_ce_pnaware_stable(yhat, x_ref, tau=tau, sigma_phi_deg=sigma_phi_deg, K=K,
+                                 estimate_alpha=True)
     return loss, state_new
+
 
 
               
