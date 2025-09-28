@@ -339,6 +339,69 @@ def _match_y_x_static(yhat, x_ref):
         return yv, xv
     return yv, xv
 
+import jax, jax.numpy as jnp
+
+# 需要你已有的 16QAM 常量与比特映射：
+# CONST_16QAM: shape [16] complex, 归一化好的星座点
+# BIT_MAP:     shape [16, 4]  该星座点的4个比特(0/1)，Gray 映射一致即可
+
+def bit_ce_pnaware(
+    y_pred: jnp.ndarray,          # 预测等化后的复符号，shape [T] 或 [T, C]
+    x_true: jnp.ndarray,          # 参考发射复符号，    shape [T] 或 [T, C]
+    tau: float = 1.2,             # 温度 ~ 等化后噪声标准差（可调/可学）
+    sigma_phi_deg: float = 3.0,   # 残余相位噪声标准差（度），常见 2~5°
+    K: int = 12,                  # 相位采样数，8~16 即可
+    estimate_alpha: bool = True   # 是否用闭式 α 做幅度刻度对齐
+) -> jnp.ndarray:
+    """
+    PN-aware bit cross-entropy:
+      q(y|x) = ∫ N_C( y ; α e^{jφ} x , τ^2 I ) p(φ; σφ) dφ   （用 K 点采样逼近）
+      logits_k = log q(y|s_k)
+      loss = mean_bitwise_CE( logits → bit posteriors )
+    """
+    # 展平到 [T*C]
+    y = jnp.reshape(y_pred, (-1,))
+    x = jnp.reshape(x_true, (-1,))
+
+    # 可选：用闭式 α^* 做幅度刻度（stop-grad，避免泄梯度）
+    if estimate_alpha:
+        num = jnp.real(jnp.vdot(y, x))
+        den = jnp.real(jnp.vdot(x, x)) + 1e-12
+        alpha = jax.lax.stop_gradient(num / den)
+    else:
+        alpha = 1.0
+
+    # 相位采样与权重（高斯先验）
+    sigma_phi = jnp.deg2rad(sigma_phi_deg)
+    phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)              # [K]
+    wphi = jnp.exp(-0.5 * (phis / sigma_phi)**2)
+    wphi = wphi / (jnp.sum(wphi) + 1e-12)                           # 归一化
+
+    # 旋转标签：x · e^{jφ}  →  [T, K]
+    x_rot = x[:, None] * jnp.exp(1j * phis)[None, :]
+
+    # 到每个星座点的距离平方：  [T, K, 16]
+    # 注意：alpha 只作用在“标签侧”（与 q 一致）
+    d2 = jnp.abs(y[:, None, None] - alpha * x_rot[:, :, None] * CONST_16QAM[None, None, :])**2
+
+    # 对 φ 边际化得到每个星座点的 log-likelihood（温度 tau 控制噪声标度）
+    # logits: [T, 16]
+    logits = jax.scipy.special.logsumexp(-(d2 / (tau * tau)) + jnp.log(wphi)[None, :, None], axis=1)
+
+    # 转成 log 概率
+    logp = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)  # [T,16]
+
+    # 由符号概率得到每 bit 概率：p(b=1) = sum_s p(s) * bit(s)
+    p1 = jnp.exp(logp) @ BIT_MAP                                    # [T,4]
+    p0 = 1.0 - p1
+
+    # 真实符号的比特标签（按最近星座点取索引）
+    idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)
+    bits_true = BIT_MAP[idx]                                         # [T,4]
+
+    # bit-wise 交叉熵
+    bce = -(bits_true * jnp.log(p1 + 1e-12) + (1.0 - bits_true) * jnp.log(p0 + 1e-12))
+    return bce.mean()
 
 def loss_fn(module, params, state, y, x, aux, const, sparams,
             β_ce: float = 0.5, λ_kl: float = 1e-4):
@@ -408,9 +471,9 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
 
     # ---- 组合 ----
-    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
-    total_loss = loss_main + λ_kl * kl_ib
-    return total_loss, state_new
+    loss = bit_ce_pnaware(yhat, x_ref, tau=1.2, sigma_phi_deg=3.0, K=12, estimate_alpha=True)
+
+    return loss, state_new
 
 
               
