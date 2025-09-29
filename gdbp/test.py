@@ -349,27 +349,32 @@ import jax, jax.numpy as jnp
 BIT_MASK1 = (BIT_MAP == 1.0)                # [16,4] bool
 BIT_MASK0 = (BIT_MAP == 0.0)                # [16,4] bool
 
-def bit_ce_pnaware_logspace(
-    y_pred: jnp.ndarray,          # [T] 或 [T,C] 复数
-    x_true: jnp.ndarray,          # [T] 或 [T,C] 复数
-    tau: float = 1.2,             # 温度（等化后噪声标度）
-    sigma_phi_deg: float = 3.0,   # 残余相位噪声(度)
-    K: int = 12,                  # 相位采样数
+
+
+
+import jax, jax.numpy as jnp
+
+# 你已有：
+# CONST_16QAM: [16] complex
+# BIT_MAP    : [16,4] (0/1) 按 Gray 顺序或任意固定顺序均可
+
+BIT_MASK1 = (BIT_MAP == 1.0)   # [16,4] bool
+BIT_MASK0 = ~BIT_MASK1         # [16,4] bool
+
+def bit_ce_awgn_logspace(
+    y_pred: jnp.ndarray,   # [T] 或 [T,C] 复数
+    x_true: jnp.ndarray,   # [T] 或 [T,C] 复数（只用来取 bit 标签 & 估计 α）
+    tau: float = 1.2,      # 温度≈等化后噪声标度；可学/可估
     estimate_alpha: bool = True,
     eps: float = 1e-12
 ) -> jnp.ndarray:
-    """稳定版 PN-aware bit-CE（全程 log-space，避免下溢/NaN）"""
-    # 展平 + 清理 NaN/Inf（仅在损失内部）
-    y = jnp.reshape(y_pred, (-1,))
-    x = jnp.reshape(x_true, (-1,))
-    y = jnp.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-    x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    # 展平 + 清理 NaN/Inf
+    y = jnp.reshape(jnp.nan_to_num(y_pred, nan=0.0, posinf=0.0, neginf=0.0), (-1,))
+    x = jnp.reshape(jnp.nan_to_num(x_true,  nan=0.0, posinf=0.0, neginf=0.0),  (-1,))
 
-    # 护栏
-    tau_eff   = jnp.maximum(tau, 1e-3)
-    sigma_phi = jnp.maximum(jnp.deg2rad(sigma_phi_deg), 1e-4)
+    tau2 = jnp.maximum(tau, 1e-3) ** 2
 
-    # 幅度刻度 α*（stop-grad）
+    # 幅度刻度 α*（用真标签，闭式、stop_grad；相位你可以先做全局对齐或分块对齐）
     if estimate_alpha:
         num = jnp.real(jnp.vdot(y, x))
         den = jnp.real(jnp.vdot(x, x)) + eps
@@ -377,73 +382,46 @@ def bit_ce_pnaware_logspace(
     else:
         alpha = 1.0
 
-    # 相位离散 + 权重
-    phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)                # [K]
-    wphi = jnp.exp(-0.5*(phis/sigma_phi)**2)
-    wphi = wphi / (jnp.sum(wphi) + eps)                               # [K]
-    logw = jnp.log(wphi + eps)
+    # 到 16 个星座点的距离平方：d2 ∈ [T,16]
+    # 注意：q(y|s)=CN(y; α s, τ^2 I) —— 不需要用到 x_true
+    y_col = y[:, None]                                  # [T,1]
+    s_col = (alpha * CONST_16QAM)[None, :]              # [1,16]
+    d2 = jnp.abs(y_col - s_col) ** 2                    # [T,16]
 
-    # 距离平方 d2: [T,K,16]
-    x_rot = x[:, None] * jnp.exp(1j*phis)[None, :]
-    d2 = jnp.abs(y[:, None, None] - alpha * x_rot[:, :, None] * CONST_16QAM[None, None, :])**2
+    # 中心化防下溢（全程 log-space）
+    m = jnp.min(d2, axis=1, keepdims=True)              # [T,1]
+    logits = -(d2 - m) / tau2 - m / tau2                # [T,16]
 
-    # 中心化以防下溢；m: [T,1,1], m_term: [T,1]
-    m = jnp.min(d2, axis=(1,2), keepdims=True)
-    m_term = (m[..., 0, 0] / (tau_eff * tau_eff))[:, None]
+    logZ   = jax.nn.logsumexp(logits, axis=-1, keepdims=True)   # [T,1]
 
-    # 对 φ 边际化得到每个星座点的 log-likelihood：logits: [T,16]
-    logits = (
-        jax.scipy.special.logsumexp(
-            -(d2 - m) / (tau_eff * tau_eff) + logw[None, :, None],
-            axis=1
-        ) - m_term
-    )  # [T,16]
+    # 每个 bit 的 log 概率（用掩码做 subset logsumexp）
+    LOG_ZERO = -1e30
+    def _logsum_subset(mask_col):                       # mask_col: [16]
+        sel = jnp.where(mask_col[None, :], logits, LOG_ZERO)    # [T,16]
+        return jax.nn.logsumexp(sel, axis=-1, keepdims=True)    # [T,1]
 
-    # logP(s|y)：logp_all用于规范化
-    logp_all = jax.nn.logsumexp(logits, axis=-1, keepdims=True)       # [T,1]
+    logP1 = jnp.concatenate([_logsum_subset(BIT_MASK1[:, b]) - logZ for b in range(4)], axis=1)  # [T,4]
+    logP0 = jnp.concatenate([_logsum_subset(BIT_MASK0[:, b]) - logZ for b in range(4)], axis=1)  # [T,4]
 
-    # —— 关键：直接在 log-space 做 bit 概率 —— #
-    # 对每个 bit，log P(b=1|y) = logsumexp( logits[s in S_b=1] ) - logsumexp(logits)
-    LOG_ZERO = -1e30  # 近似 -inf（JAX 对 -jnp.inf 也可，但这更稳）
-    # 把不属于该集合的 logits 置为 LOG_ZERO，再做 logsumexp
-    def _logsum_subset(logits_T16, mask16):  # logits_T16:[T,16], mask16:[16]
-        sel = jnp.where(mask16[None, :], logits_T16, LOG_ZERO)
-        return jax.nn.logsumexp(sel, axis=-1, keepdims=True)          # [T,1]
+    # 真实 bit 标签（按最近星座点取索引；若 x_true 本身就等于星座点，也没问题）
+    idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)   # [T]
+    bits_true = BIT_MAP[idx]                                                   # [T,4]
 
-    # 4 个 bit 分别计算（拼成 [T,4]）
-    logP1_list = []
-    logP0_list = []
-    for b in range(BIT_MASK1.shape[1]):
-        logP1 = _logsum_subset(logits, BIT_MASK1[:, b]) - logp_all    # [T,1]
-        logP0 = _logsum_subset(logits, BIT_MASK0[:, b]) - logp_all
-        logP1_list.append(logP1); logP0_list.append(logP0)
-    logP1 = jnp.concatenate(logP1_list, axis=-1)  # [T,4]
-    logP0 = jnp.concatenate(logP0_list, axis=-1)  # [T,4]
-
-    # 真实 bit 标签（按最近星座点取索引）
-    idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)
-    bits_true = BIT_MAP[idx]                                         # [T,4]
-
-    # 直接用 log 概率做 CE（避免 exp→log）
-    bce = -(bits_true * logP1 + (1. - bits_true) * logP0)
+    # 交叉熵（log-space，避免 log(0)）
+    bce = -(bits_true * logP1 + (1. - bits_true) * logP0)                      # [T,4]
     return jnp.mean(bce)
 
-
 def loss_fn(module, params, state, y, x, aux, const, sparams,
-            tau: float = 1.2, sigma_phi_deg: float = 3.0, K: int = 12):
-    # 前向
+            tau: float = 1.2):
     params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
-    x_ref = x[z_out.t.start:z_out.t.stop]
-    yhat  = z_out.val
+    z_out, state_new = module.apply({'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+                                    core.Signal(y))
+    x_ref = x[z_out.t.start:z_out.t.stop]            # [T]或[T,C]
+    yhat  = z_out.val                                # [T]或[T,C]
 
-    # 唯一主损失：PN-aware bit-CE（log-space 稳定版）
-    loss = bit_ce_pnaware_logspace(yhat, x_ref,
-                                   tau=tau, sigma_phi_deg=sigma_phi_deg, K=K,
-                                   estimate_alpha=True)
+    # 先用你已有的相位对齐（全局或分块都行），再喂给损失；没有也可先直接用
+    # yhat_aligned = yhat
+    loss = bit_ce_awgn_logspace(yhat, x_ref, tau=tau, estimate_alpha=True)
     return loss, state_new
 
 
