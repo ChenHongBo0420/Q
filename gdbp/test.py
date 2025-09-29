@@ -342,26 +342,28 @@ def _match_y_x_static(yhat, x_ref):
 import jax, jax.numpy as jnp
 
 
+import jax, jax.numpy as jnp
+
 def bit_ce_pnaware_stable(
-    y_pred: jnp.ndarray,          # 预测符号 [T] 或 [T,C]
-    x_true: jnp.ndarray,          # 参考符号 [T] 或 [T,C]
-    tau: float = 1.2,             # “温度”≈噪声标度
-    sigma_phi_deg: float = 3.0,   # 残余相位噪声(度)
-    K: int = 12,                  # 相位采样点数
+    y_pred: jnp.ndarray,          # [T] 或 [T,C]
+    x_true: jnp.ndarray,          # [T] 或 [T,C]
+    tau: float = 1.2,
+    sigma_phi_deg: float = 3.0,
+    K: int = 12,
     estimate_alpha: bool = True,
     eps: float = 1e-12
 ) -> jnp.ndarray:
-    # 展平并清洗 NaN/Inf（只在 loss 内部）
+    # 展平 + 清理 NaN/Inf
     y = jnp.reshape(y_pred, (-1,))
     x = jnp.reshape(x_true, (-1,))
     y = jnp.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
     x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # 温度/相位噪声护栏（防 tau→0）
-    tau_eff = jnp.maximum(tau, 1e-3)
+    # 护栏
+    tau_eff   = jnp.maximum(tau, 1e-3)
     sigma_phi = jnp.maximum(jnp.deg2rad(sigma_phi_deg), 1e-4)
 
-    # 可选：闭式幅度对齐 α*（stop-grad，避免泄梯度）
+    # 幅度刻度 α*（闭式；stop-grad）
     if estimate_alpha:
         num = jnp.real(jnp.vdot(y, x))
         den = jnp.real(jnp.vdot(x, x)) + eps
@@ -369,36 +371,40 @@ def bit_ce_pnaware_stable(
     else:
         alpha = 1.0
 
-    # 相位离散化与权重
+    # 相位采样与权重
     phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)                # [K]
     wphi = jnp.exp(-0.5*(phis/sigma_phi)**2)
     wphi = wphi / (jnp.sum(wphi) + eps)                               # [K]
 
-    # 旋转标签并计算距离平方 d2: [T,K,16]
+    # 距离平方 d2: [T,K,16]
     x_rot = x[:, None] * jnp.exp(1j*phis)[None, :]
     d2 = jnp.abs(y[:, None, None] - alpha * x_rot[:, :, None] * CONST_16QAM[None, None, :])**2
 
-    # ---- 核心稳定化：按样本中心化再 logsumexp，防全体下溢 ----
+    # —— 关键修正：把 m 变成 (T,1) 再做减法，避免 (T,16) ⊖ (T,) 的广播冲突 —— #
     m = jnp.min(d2, axis=(1,2), keepdims=True)                        # [T,1,1]
-    # log ∑ exp( -(d2-m)/T + log wφ )  -  m/T
-    logits = jax.scipy.special.logsumexp(
-        -(d2 - m) / (tau_eff * tau_eff) + jnp.log(wphi)[None, :, None], axis=1
-    ) - (m[..., 0, 0] / (tau_eff * tau_eff))                          # [T,16]
+    m_term = (m[..., 0, 0] / (tau_eff * tau_eff))[:, None]            # [T,1] ✅
 
-    # 概率与 bit-CE
-    logp = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)   # [T,16]
+    logits = (
+        jax.scipy.special.logsumexp(
+            -(d2 - m) / (tau_eff * tau_eff) + jnp.log(wphi)[None, :, None],
+            axis=1
+        ) - m_term                                                    # [T,16]
+    )
+
+    logp  = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [T,16]
     probs = jnp.exp(logp)
+
+    # bit 概率与交叉熵
     p1 = probs @ BIT_MAP                                              # [T,4]
+    p1 = jnp.clip(p1, 1e-9, 1.0 - 1e-9)
     p0 = 1.0 - p1
 
     idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)
     bits_true = BIT_MAP[idx]                                          # [T,4]
 
-    # 夹一下，防 log(0)
-    p1c = jnp.clip(p1, 1e-9, 1.0 - 1e-9)
-    p0c = 1.0 - p1c
-    bce = -(bits_true * jnp.log(p1c) + (1. - bits_true) * jnp.log(p0c))
+    bce = -(bits_true * jnp.log(p1) + (1. - bits_true) * jnp.log(p0))
     return bce.mean()
+
 
 def loss_fn(module, params, state, y, x, aux, const, sparams,
             tau: float = 1.2, sigma_phi_deg: float = 3.0, K: int = 12):
