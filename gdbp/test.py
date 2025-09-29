@@ -344,16 +344,22 @@ import jax, jax.numpy as jnp
 
 import jax, jax.numpy as jnp
 
-def bit_ce_pnaware_stable(
-    y_pred: jnp.ndarray,          # [T] 或 [T,C]
-    x_true: jnp.ndarray,          # [T] 或 [T,C]
-    tau: float = 1.2,
-    sigma_phi_deg: float = 3.0,
-    K: int = 12,
+# 预计算：每个 bit 的掩码（16 长度，True 表示该星座属于该 bit=1 或 0）
+# BIT_MAP: [16,4]，值为0/1
+BIT_MASK1 = (BIT_MAP == 1.0)                # [16,4] bool
+BIT_MASK0 = (BIT_MAP == 0.0)                # [16,4] bool
+
+def bit_ce_pnaware_logspace(
+    y_pred: jnp.ndarray,          # [T] 或 [T,C] 复数
+    x_true: jnp.ndarray,          # [T] 或 [T,C] 复数
+    tau: float = 1.2,             # 温度（等化后噪声标度）
+    sigma_phi_deg: float = 3.0,   # 残余相位噪声(度)
+    K: int = 12,                  # 相位采样数
     estimate_alpha: bool = True,
     eps: float = 1e-12
 ) -> jnp.ndarray:
-    # 展平 + 清理 NaN/Inf
+    """稳定版 PN-aware bit-CE（全程 log-space，避免下溢/NaN）"""
+    # 展平 + 清理 NaN/Inf（仅在损失内部）
     y = jnp.reshape(y_pred, (-1,))
     x = jnp.reshape(x_true, (-1,))
     y = jnp.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
@@ -363,7 +369,7 @@ def bit_ce_pnaware_stable(
     tau_eff   = jnp.maximum(tau, 1e-3)
     sigma_phi = jnp.maximum(jnp.deg2rad(sigma_phi_deg), 1e-4)
 
-    # 幅度刻度 α*（闭式；stop-grad）
+    # 幅度刻度 α*（stop-grad）
     if estimate_alpha:
         num = jnp.real(jnp.vdot(y, x))
         den = jnp.real(jnp.vdot(x, x)) + eps
@@ -371,44 +377,61 @@ def bit_ce_pnaware_stable(
     else:
         alpha = 1.0
 
-    # 相位采样与权重
+    # 相位离散 + 权重
     phis = jnp.linspace(-3*sigma_phi, 3*sigma_phi, K)                # [K]
     wphi = jnp.exp(-0.5*(phis/sigma_phi)**2)
     wphi = wphi / (jnp.sum(wphi) + eps)                               # [K]
+    logw = jnp.log(wphi + eps)
 
     # 距离平方 d2: [T,K,16]
     x_rot = x[:, None] * jnp.exp(1j*phis)[None, :]
     d2 = jnp.abs(y[:, None, None] - alpha * x_rot[:, :, None] * CONST_16QAM[None, None, :])**2
 
-    # —— 关键修正：把 m 变成 (T,1) 再做减法，避免 (T,16) ⊖ (T,) 的广播冲突 —— #
-    m = jnp.min(d2, axis=(1,2), keepdims=True)                        # [T,1,1]
-    m_term = (m[..., 0, 0] / (tau_eff * tau_eff))[:, None]            # [T,1] ✅
+    # 中心化以防下溢；m: [T,1,1], m_term: [T,1]
+    m = jnp.min(d2, axis=(1,2), keepdims=True)
+    m_term = (m[..., 0, 0] / (tau_eff * tau_eff))[:, None]
 
+    # 对 φ 边际化得到每个星座点的 log-likelihood：logits: [T,16]
     logits = (
         jax.scipy.special.logsumexp(
-            -(d2 - m) / (tau_eff * tau_eff) + jnp.log(wphi)[None, :, None],
+            -(d2 - m) / (tau_eff * tau_eff) + logw[None, :, None],
             axis=1
-        ) - m_term                                                    # [T,16]
-    )
+        ) - m_term
+    )  # [T,16]
 
-    logp  = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [T,16]
-    probs = jnp.exp(logp)
+    # logP(s|y)：logp_all用于规范化
+    logp_all = jax.nn.logsumexp(logits, axis=-1, keepdims=True)       # [T,1]
 
-    # bit 概率与交叉熵
-    p1 = probs @ BIT_MAP                                              # [T,4]
-    p1 = jnp.clip(p1, 1e-9, 1.0 - 1e-9)
-    p0 = 1.0 - p1
+    # —— 关键：直接在 log-space 做 bit 概率 —— #
+    # 对每个 bit，log P(b=1|y) = logsumexp( logits[s in S_b=1] ) - logsumexp(logits)
+    LOG_ZERO = -1e30  # 近似 -inf（JAX 对 -jnp.inf 也可，但这更稳）
+    # 把不属于该集合的 logits 置为 LOG_ZERO，再做 logsumexp
+    def _logsum_subset(logits_T16, mask16):  # logits_T16:[T,16], mask16:[16]
+        sel = jnp.where(mask16[None, :], logits_T16, LOG_ZERO)
+        return jax.nn.logsumexp(sel, axis=-1, keepdims=True)          # [T,1]
 
+    # 4 个 bit 分别计算（拼成 [T,4]）
+    logP1_list = []
+    logP0_list = []
+    for b in range(BIT_MASK1.shape[1]):
+        logP1 = _logsum_subset(logits, BIT_MASK1[:, b]) - logp_all    # [T,1]
+        logP0 = _logsum_subset(logits, BIT_MASK0[:, b]) - logp_all
+        logP1_list.append(logP1); logP0_list.append(logP0)
+    logP1 = jnp.concatenate(logP1_list, axis=-1)  # [T,4]
+    logP0 = jnp.concatenate(logP0_list, axis=-1)  # [T,4]
+
+    # 真实 bit 标签（按最近星座点取索引）
     idx = jnp.argmin(jnp.abs(x[:, None] - CONST_16QAM[None, :])**2, axis=-1)
-    bits_true = BIT_MAP[idx]                                          # [T,4]
+    bits_true = BIT_MAP[idx]                                         # [T,4]
 
-    bce = -(bits_true * jnp.log(p1) + (1. - bits_true) * jnp.log(p0))
-    return bce.mean()
+    # 直接用 log 概率做 CE（避免 exp→log）
+    bce = -(bits_true * logP1 + (1. - bits_true) * logP0)
+    return jnp.mean(bce)
 
 
 def loss_fn(module, params, state, y, x, aux, const, sparams,
             tau: float = 1.2, sigma_phi_deg: float = 3.0, K: int = 12):
-    # 前向保持不变
+    # 前向
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
@@ -417,9 +440,10 @@ def loss_fn(module, params, state, y, x, aux, const, sparams,
     x_ref = x[z_out.t.start:z_out.t.stop]
     yhat  = z_out.val
 
-    # 唯一主损失：稳定版 PN-aware bit-CE
-    loss = bit_ce_pnaware_stable(yhat, x_ref, tau=tau, sigma_phi_deg=sigma_phi_deg, K=K,
-                                 estimate_alpha=True)
+    # 唯一主损失：PN-aware bit-CE（log-space 稳定版）
+    loss = bit_ce_pnaware_logspace(yhat, x_ref,
+                                   tau=tau, sigma_phi_deg=sigma_phi_deg, K=K,
+                                   estimate_alpha=True)
     return loss, state_new
 
 
