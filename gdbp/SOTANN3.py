@@ -2,7 +2,7 @@
 # [np.float64(0.0040313247189296434), np.float64(0.002899352590274863)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from commplax import util, comm, cxopt, op, optim
+from commplax import util, comm, comm2, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
