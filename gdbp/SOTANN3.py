@@ -39,7 +39,7 @@ def make_base_module(steps: int = 3,
     if mode == 'train':
         mimo_train = True
     elif mode == 'test':
-        mimo_train = False
+        mimo_train = = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
 
