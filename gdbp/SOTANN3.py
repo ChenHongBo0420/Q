@@ -4,8 +4,7 @@
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
-from commplax.module import layer          # ★ 不再从 commplax.module 引 core
-from . import core1                        # ★ 使用你自己的 core1
+from commplax.module import core1, layer
 import numpy as np
 from functools import partial
 from collections import namedtuple
