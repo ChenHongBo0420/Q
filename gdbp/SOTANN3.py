@@ -1,10 +1,9 @@
 # [np.float64(8.463065186807782), np.float64(8.814882890880625)]
 # [np.float64(0.0040313247189296434), np.float64(0.002899352590274863)]
-
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
-from commplax.module import core1, layer
+from commplax.module import core, layer
 import numpy as np
 from functools import partial
 from collections import namedtuple
@@ -19,7 +18,6 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
-
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -30,7 +28,7 @@ def make_base_module(steps: int = 3,
                      dtaps: int = 261,
                      ntaps: int = 41,
                      rtaps: int = 61,
-                     init_fn: tuple = (core1.delta, core1.gauss),   # ★ 用 core1
+                     init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
 
@@ -48,16 +46,16 @@ def make_base_module(steps: int = 3,
     # 定义串联的 FDBP 层
     fdbp_series = layer.Serial(
         layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init,
-                   name='fdbp1'),
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init,
+                    name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
         layer.MIMOFOEAf(name='FOEAf1',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core1.conv1d_slicer(rtaps),  # ★ 用 core1
+                        preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
@@ -67,15 +65,15 @@ def make_base_module(steps: int = 3,
     # 定义原有的串行分支
     serial_branch = layer.Serial(
         layer.FDBP1(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init),
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core1.conv1d_slicer(rtaps),  # ★ 用 core1
+                        preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train),
@@ -137,8 +135,7 @@ def fdbp_init(a: dict,
             a['lpdbm'] - 3,  # rescale
             virtual_spans=steps)
 
-        # ★ 用 core1.gauss
-        return xi * n0[0, 0, 0] * core1.gauss(key, shape, dtype)
+        return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
 
     return d_init, n_init
 
@@ -156,6 +153,11 @@ def model_init(data: gdat.Input,
         data:
         base_conf: a dict of kwargs to make base module, see `make_base_module`
         sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+            For example, assume base module has parameters represented as nested dict
+            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+            regexp key is supportted.
         n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
             memory
         sps: sample per symbol. Only integer sps is supported now.
@@ -167,8 +169,7 @@ def model_init(data: gdat.Input,
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    # ★ 用 core1.Signal
-    z0, v0 = mod.init(rng0, core1.Signal(y0))
+    z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
     state = v0['af_state']
@@ -317,11 +318,11 @@ def loss_fn(module: layer.Layer,
     # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux,
-         'const': const, **state}, core1.Signal(y))    # ★ core1.Signal
+         'const': const, **state}, core.Signal(y))
 
     aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # ── (1) SNR + EVM  ───────────────────────────────────────────────
+    # ── (1) SNR + EVM  ───────────────────────────────
     snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
     evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
     loss_main = snr + 0.1 * evm
@@ -349,6 +350,21 @@ def update_step(module: layer.Layer,
                 const: Dict,
                 sparams: Dict):
     ''' single backprop step
+
+        Args:
+            model: model returned by `model_init`
+            opt: optimizer
+            i: iteration counter
+            opt_state: optimizer state
+            module_state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
+
+        Return:
+            loss, updated module state
     '''
 
     params = opt.params_fn(opt_state)
@@ -364,6 +380,16 @@ def get_train_batch(ds: gdat.Input,
                     overlaps: int,
                     sps: int = 2):
     ''' generate overlapped batch input for training
+
+        Args:
+            ds: dataset
+            batchsize: batch size in symbol unit
+            overlaps: overlaps in symbol unit
+            sps: samples per symbol
+
+        Returns:
+            number of symbols,
+            zipped batched triplet input: (recv, sent, fomul)
     '''
 
     flen = batchsize + overlaps
@@ -379,6 +405,15 @@ def train(model: Model,
           n_iter = None,
           opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
     '''
 
     params, module_state, aux, const, sparams = model.initvar
@@ -388,52 +423,51 @@ def train(model: Model,
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
     for i, (y, x) in tqdm(enumerate(batch_gen),
-                          total=n_iter, desc='training', leave=False):
-        if i >= n_iter:
-            break
-        # ★ 用 core1.dict_replace
-        aux = core1.dict_replace(aux, {'truth': x})
+                             total=n_iter, desc='training', leave=False):
+        if i >= n_iter: break
+        aux = core.dict_replace(aux, {'truth': x})
         loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                    module_state, y, x, aux,
-                                                    const, sparams)
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
         yield loss, opt.params_fn(opt_state), module_state
                                 
                        
 def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         L: int = 16,                 # 星座大小（每复维）：16/64/256...
-         d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
-         pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
-         use_oracle_noise: bool = True,
-         use_elliptical_llr: bool = True,
-         temp_grid: tuple = (0.75, 1.0, 1.25),
-         bitwidth: int = 6,
-         decoder=None,                # 可传入你的 ldpc_decoder_adapter；没有就 None
-         return_artifacts: bool = False):
+            params: Dict,
+            data: gdat.Input,
+            eval_range: tuple = (300000, -20000),
+            L: int = 16,                 # 星座大小（每复维）：16/64/256...
+            d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
+            pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
+            use_oracle_noise: bool = True,
+            use_elliptical_llr: bool = True,
+            temp_grid: tuple = (0.75, 1.0, 1.25),
+            bitwidth: int = 6,
+            decoder=None,                # 可传入你的 ldpc_decoder_adapter；没有就 None
+            return_artifacts: bool = False):
     """
     统一返回：
       res = {
         'HD':  DataFrame(only 'total' 行，含 BER/Q/SNR),
         'SD':  dict(含 GMI/NGMI、4D 聚合、可选 post-FEC 与调参信息)
       }, z = 等化后的信号对象
+    依赖：先把我给你的“精简版 SD 评估文件”放到你的工程并导入：
+      from sd_eval import evaluate_hd_and_sd, qamscale
     """
-
     # —— 前向 —— #
     state, aux, const, sparams = model.initvar[1:]
-    aux = core1.dict_replace(aux, {'truth': data.x})   # ★ core1
+    aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
         params = model.initvar[0]
 
     z, _ = jit(model.module.apply, backend='cpu')({
         'params': util.dict_merge(params, sparams),
         'aux_inputs': aux, 'const': const, **state
-    }, core1.Signal(data.y))                           # ★ core1
+    }, core.Signal(data.y))
 
     # —— 取对齐区间，并做 canonical 缩放（让 x_ref 变成标准 QAM 网格） —— #
     x_ref = data.x[z.t.start:z.t.stop]
-    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
+    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
     y_eq  = z.val * scale
     x_ref = x_ref * scale
 
@@ -447,7 +481,7 @@ def test(model: Model,
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
-    # —— SD 评估 —— #
+    # —— SD 评估（内部会：估噪→LLR→极性校→温度扫描→量化→（可选）软解码→GMI）—— #
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         elliptical_llr=use_elliptical_llr,
@@ -480,14 +514,15 @@ def test(model: Model,
     return res, z
 
 
+                
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
-    z, _ = jax.jit(model_te.module.apply, backend='cpu')(
+    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
-        core1.Signal(data.y))                    # ★ core1
+        core.Signal(data.y))
 
     start, stop = z.t.start, z.t.stop
-    z_eq  = np.asarray(z.val[:, 0])             # equalized
-    s_ref = np.asarray(data.x)[start:stop, 0]   # 保持原尺度
+    z_eq  = np.asarray(z.val[:,0])          # equalized
+    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
     return z_eq, s_ref
