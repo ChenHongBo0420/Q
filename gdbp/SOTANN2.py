@@ -116,7 +116,7 @@ def fdbp_init(a: dict,
             a['distance'] / a['spans'],
             a['spans'],
             dtaps,
-            a['lpdbm'] - 3,  # rescale as input power which has been norm to 2 in dataloader
+            a['lpdbm'] - 3,
             virtual_spans=steps)
         return d0[0, :, 0]
 
@@ -127,7 +127,7 @@ def fdbp_init(a: dict,
             a['distance'] / a['spans'],
             a['spans'],
             dtaps,
-            a['lpdbm'] - 3,  # rescale
+            a['lpdbm'] - 3,
             virtual_spans=steps)
 
         return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
@@ -185,22 +185,19 @@ def batch_phase_align(yhat: jnp.ndarray,
     注意：φ* 本身不回传梯度（stop_gradient），
          避免网络学成退化“自己转相位抵消损失”的 trivial 解。
     """
-    # flatten over time & channels
     yh = yhat.reshape(-1)
     xr = x_ref.reshape(-1)
 
-    # 估计 <yh, xr> 的相位： zc = <y, x>，p = zc / |zc|
     zc = jnp.vdot(yh, xr)
-    p = zc / (jnp.abs(zc) + eps)       # e^{j φ*}
-    p = lax.stop_gradient(p)           # 不让 φ* 参与反传
+    p = zc / (jnp.abs(zc) + eps)    # e^{j φ*}
+    p = lax.stop_gradient(p)
 
-    # 去相位：e^{-j φ*} = conj(p)
-    y_aligned = yhat * jnp.conj(p)
+    y_aligned = yhat * jnp.conj(p)  # e^{-j φ*} yhat
     return y_aligned
 
 
 # ============================
-# 3) Loss: MSE in quotient space
+# 3) Loss: SI-SNR in quotient space + EVM + tiny regularizer
 # ============================
 
 def loss_fn(module: layer.Layer,
@@ -210,16 +207,18 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict):
+            sparams: Dict,
+            beta_evm: float = 0.1,
+            lambda_kl: float = 1e-4):
     """
-    MSE + 商空间对齐版：
-      1) 用当前 batch 的 (yhat, x_ref) 估计全局相位 φ*
-      2) 用 e^{-j φ*} ⋅ yhat 做对齐，得到 y_aligned
-      3) 在 (y_aligned, x_ref) 上算简单的复数 MSE
+    训练用 loss：
+      - 先做 batch 商空间相位对齐；
+      - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
+      - 加一点 EVM（更接近 Q²）作为 secondary term；
+      - 再加非常轻微的能量正则（信息瓶颈风格）。
 
-    对比：
-      - 原始 MSE: 直接在含有残余相位自由度的空间里度量；
-      - 这里：先 mod 掉 U(1) 相位，再在商空间代表元上做 MSE。
+    这里故意不用 MSE 当主 loss，而是 SNR-style：
+      loss_main = -SNR_dB + 0.1*EVM
     """
 
     params_net = util.dict_merge(params, sparams)
@@ -229,16 +228,41 @@ def loss_fn(module: layer.Layer,
     )
 
     # 对齐时间区间
-    x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...] 真值符号
-    yhat = z_out.val                        # [T,...] 网络输出
+    x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
+    yhat = z_out.val                        # [T,...]
 
-    # batch 商空间对齐（仅相位）
+    # 1) 商空间相位对齐：只去除全局 φ*
     y_aligned = batch_phase_align(yhat, x_ref)
 
-    # MSE in quotient space
-    mse_loss = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
+    # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
+    t = x_ref.reshape(-1)
+    e = y_aligned.reshape(-1)
 
-    return mse_loss, state_new
+    num = jnp.vdot(t, e)
+    den = jnp.vdot(t, t) + 1e-8
+    alpha = num / den                      # 复数缩放
+    s_hat = alpha * t
+    err = e - s_hat
+
+    s_energy = jnp.real(jnp.vdot(s_hat, s_hat)) + 1e-8
+    n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
+    snr_db = 10.0 * jnp.log10(s_energy / n_energy)
+
+    # 我们最小化 loss → 用负 SNR
+    snr_loss = -snr_db
+
+    # 3) EVM（正规化到发射能量）
+    evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
+    evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
+    evm = evm_num / evm_den
+
+    # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
+    kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
+
+    loss_main = snr_loss + beta_evm * evm
+    total_loss = loss_main + lambda_kl * kl_ib
+
+    return total_loss, state_new
 
 
 # ============================
@@ -259,7 +283,6 @@ def update_step(module: layer.Layer,
     """
     单步反向传播
     """
-
     params = opt.params_fn(opt_state)
     (loss, module_state), grads = value_and_grad(
         loss_fn, argnums=1, has_aux=True
@@ -276,7 +299,6 @@ def get_train_batch(ds: gdat.Input,
     """
     生成带 overlap 的训练 batch
     """
-
     flen = batchsize + overlaps
     fstep = batchsize
     ds_y = op.frame_gen(ds.y, flen * sps, fstep * sps)
@@ -315,16 +337,16 @@ def train(model: Model,
 
 
 # ============================
-# 5) test：HD + SD 统一评估
+# 5) test：HD + SD 统一评估 + MSE_raw/MSE_qspace
 # ============================
 
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
          eval_range: tuple = (300000, -20000),
-         L: int = 16,                 # 星座大小（每复维）：16/64/256...
-         d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
-         pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
+         L: int = 16,
+         d4_dims: int = 2,
+         pilot_frac: float = 0.0,
          use_oracle_noise: bool = True,
          use_elliptical_llr: bool = True,
          temp_grid: tuple = (0.75, 1.0, 1.25),
@@ -335,7 +357,8 @@ def test(model: Model,
     前向 + HD/SD 统一评估
       res = {
         'HD': DataFrame(only 'total' 行, 含 BER / Q / SNR),
-        'SD': dict(含 GMI / NGMI / AIR / temp / alpha 等)
+        'SD': dict(含 GMI / NGMI / AIR / temp / alpha 等,
+                   以及附加 MSE_raw / MSE_qspace)
       }, z = 等化后的 Signal 对象
     """
 
@@ -365,6 +388,15 @@ def test(model: Model,
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
+    # ==== 新增：MSE_raw / MSE_qspace 作为诊断量 ====
+    # raw MSE（含残余相位）
+    mse_raw = float(jnp.mean(jnp.abs(y_eq - x_ref) ** 2))
+
+    # 商空间 MSE（去掉 batch 全局相位）
+    y_q = batch_phase_align(jnp.asarray(y_eq), jnp.asarray(x_ref))
+    mse_qspace = float(jnp.mean(jnp.abs(y_q - jnp.asarray(x_ref)) ** 2))
+    # ===========================================
+
     # SD 评估：估噪 → LLR → 温度扫描 → (可选)软解码 → GMI
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
@@ -392,7 +424,10 @@ def test(model: Model,
         'NGMI_4D': ngmi_4d,
         'AIR_bits_per_4D': air_4d,
         'pilot_frac': pilot_frac,
-        'd4_dims': d4_dims
+        'd4_dims': d4_dims,
+        # 把两种 MSE 一起挂在 SD 里方便你后处理
+        'MSE_raw': mse_raw,
+        'MSE_qspace': mse_qspace,
     })
 
     return res, z
