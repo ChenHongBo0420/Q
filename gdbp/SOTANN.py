@@ -1,8 +1,6 @@
-# [np.float64(8.488569856531333), np.float64(8.810227272425061)]
-# [np.float64(0.0039393303488155194), np.float64(0.0029124958132475207)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
-from commplax import util, comm, cxopt, op, optim
+from commplax import util, comm, comm2, cxopt, op, optim
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
@@ -146,25 +144,6 @@ def model_init(data: gdat.Input,
                n_symbols: int = 4000,
                sps : int = 2,
                name='Model'):
-    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-    depending on given N-filter length and trainable parameters
-
-    Args:
-        data:
-        base_conf: a dict of kwargs to make base module, see `make_base_module`
-        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-            For example, assume base module has parameters represented as nested dict
-            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supportted.
-        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-            memory
-        sps: sample per symbol. Only integer sps is supported now.
-
-    Returns:
-        a initialized model wrapped by a namedtuple
-    '''
     
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
@@ -193,239 +172,23 @@ def _estimate_kmean(y, x, blk=16384):
                           np.vdot(x[i:i+blk], x[i:i+blk])))
     return float(np.mean(kap))
 
-def _rms(sig, eps=1e-12):
-    return jnp.sqrt(jnp.mean(jnp.abs(sig)**2) + eps)
-
-def _proj_mse(z, s):
-    alpha = jnp.vdot(z, s) / jnp.vdot(s, s)
-    return jnp.mean(jnp.abs(z - alpha*s)**2)
-
-def energy(x):
-    return jnp.sum(jnp.square(x))
-
-def si_snr(target, estimate, eps=1e-8):
-    target_energy = energy(target)
-    dot_product = jnp.sum(target * estimate)
-    s_target = dot_product / (target_energy + eps) * target
-    e_noise = estimate - s_target
-    target_energy = energy(s_target)
-    noise_energy = energy(e_noise)
-    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value 
 
 
-def evm_ring(tx, rx, eps=1e-8,
-             thr_in=0.60, thr_mid=1.10,
-             w_in=1.0, w_mid=1.5, w_out=2.0):
-    r    = jnp.abs(tx)
-    err2 = jnp.abs(rx - tx)**2
-    sig2 = jnp.abs(tx)**2
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
 
-    # 0/1 masks — 必须是 float32 / float64，不能用 complex
-    m_in  = (r < thr_in).astype(jnp.float32)
-    m_mid = ((r >= thr_in) & (r < thr_mid)).astype(jnp.float32)
-    m_out = (r >= thr_mid).astype(jnp.float32)
-
-    def _evm(mask):
-        num = jnp.sum(err2 * mask)
-        den = jnp.sum(sig2 * mask)
-        den = jnp.where(den < 1e-8, 1e-8, den)  # ★ 护栏
-        return num / den
-
-    return (w_in  * _evm(m_in) +
-            w_mid * _evm(m_mid) +
-            w_out * _evm(m_out))
-
-        
-def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
-    """幅度|·|，两极化展平后算 α，再平分给两路"""
-    s  = jnp.reshape(jnp.abs(tx), (-1,))
-    x  = jnp.reshape(jnp.abs(rx), (-1,))
-    alpha = jnp.vdot(s, x).real / (jnp.vdot(s, s).real + eps)
-    e  = x - alpha * s
-    snr_db = 10. * jnp.log10( (jnp.vdot(alpha*s, alpha*s).real + eps) /
-                              (jnp.vdot(e, e).real + eps) )
-    return -snr_db                   
-
-def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
-    """
-    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
-    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
-    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
-    """
-    z = jnp.vdot(yhat, y)                          # <yhat, y>
-    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
-    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
-    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
-    return alpha * yhp, alpha, jnp.angle(p)
-  
-CONST_16QAM = jnp.array([
-    -3-3j, -3-1j, -3+3j, -3+1j,
-    -1-3j, -1-1j, -1+3j, -1+1j,
-     3-3j,  3-1j,  3+3j,  3+1j,
-     1-3j,  1-1j,  1+3j,  1+1j
-], dtype=jnp.complex64) / jnp.sqrt(10.)
-
-# 2. CE-loss helper  (可 jit / vmap)
-def _ce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    """
-    pred_sym : [N] complex  — 网络输出符号
-    true_sym : [N] complex  — 对齐后的发送符号
-    return    : 标量 cross-entropy 损失
-    """
-    # logits =  –|y − s_k|²   (欧氏距离越小 → logit 越大)
-    logits = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-
-    # 每个真实符号对应的 QAM 点下标
-    label_idx = jnp.argmin(
-        jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)),
-        axis=-1)                                                      # [N]
-
-    # softmax-cross-entropy:
-    log_prob = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    ce = -jnp.take_along_axis(log_prob, label_idx[..., None], axis=-1).squeeze(-1)
-
-    return ce.mean()
-
-_bits = (
-    (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
-    (0,1,0,0), (0,1,0,1), (0,1,1,0), (0,1,1,1),
-    (1,0,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
-    (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
-)
-BIT_MAP = jnp.array(_bits, dtype=jnp.float32)  # [16,4]
-# 每 bit 的权重向量，顺序 = [b3(MSB), b2, b1, b0(LSB)]
-BIT_WEIGHTS = jnp.array([1.2, 1.0, 1.0, 0.8], dtype=jnp.float32)
-
-def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
-    logits  = -jnp.square(jnp.abs(pred_sym[..., None] - CONST_16QAM))   # [N,16]
-    logp    = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True) # [N,16]
-    probs   = jnp.exp(logp)                                             # [N,16]
-
-    # bit 概率 & 真值
-    p1 = (probs @ BIT_MAP)                    # P(bit=1)
-    p0 = 1.0 - p1
-
-    idx  = jnp.argmin(jnp.square(jnp.abs(true_sym[..., None] - CONST_16QAM)), axis=-1)
-    bits = BIT_MAP[idx]                       # 真值 bits
-
-    bce  = -(bits * jnp.log(p1+1e-12) + (1.-bits) * jnp.log(p0+1e-12))  # [N,4]
-    return (bce * BIT_WEIGHTS).mean()          # 加权平均
-        
-
-
-# def loss_fn(module: layer.Layer,
-#             params: Dict,
-#             state : Dict,
-#             y     : Array,
-#             x     : Array,
-#             aux   : Dict,
-#             const : Dict,
-#             sparams: Dict,
-#             β_ce : float = 0.5,
-#             λ_kl : float = 1e-4):
-#     """
-#     商空间对齐版损失：
-#       1) 先在 U(1)×R+ 上把 ŷ 对齐到 x（相位×尺度闭式解）
-#       2) 在对齐后的输出上计算 EVM、SI-SNR、Bit-BCE
-#       3) KL 作为信息瓶颈正则（保持原实现）
-#     返回: (total_loss, state_new)
-#     """
-
-#     # ---- 前向 ----
-#     params_net = util.dict_merge(params, sparams)
-#     z_out, state_new = module.apply(
-#         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-#         core.Signal(y))
-
-#     # 参考与预测
-#     x_ref = x[z_out.t.start:z_out.t.stop]     # 真实符号（裁剪后）
-#     yhat  = z_out.val                          # 预测复符号（complex）
-
-#     # ---- 相位×尺度闭式对齐（可微，稳定）----
-#     # 先把对齐在扁平空间里计算（标量 α 与相位因子对整段生效），再还原形状
-#     y_flat = yhat.reshape(-1)
-#     x_flat = x_ref.reshape(-1)
-
-#     zc = jnp.vdot(y_flat, x_flat)                   # <ŷ, x>
-#     p  = zc / (jnp.abs(zc) + 1e-8)                  # 单位相位子，避免 atan2 奇异
-#     y_rm_phase = yhat * jnp.conj(p)                 # 去相位：e^{-jφ} = conj(p)
-
-#     num = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), x_flat))
-#     den = jnp.real(jnp.vdot(y_rm_phase.reshape(-1), y_rm_phase.reshape(-1))) + 1e-8
-#     alpha = num / den                                # 最优尺度
-#     y_aligned = alpha * y_rm_phase                   # 对齐后的预测 ŷ'
-
-#     # ---- 任务一致的评分（全部在 y_aligned 上计算）----
-#     # 1) EVM（归一化 MSE，Q² 代理）
-#     evm_num = jnp.mean(jnp.abs(y_aligned - x_ref)**2)
-#     evm_den = jnp.mean(jnp.abs(x_ref)**2) + 1e-8
-#     evm = evm_num / evm_den
-
-#     # 2) SI-SNR（复数版，贴近波形一致性）
-#     t = x_ref.reshape(-1)
-#     e = y_aligned.reshape(-1)
-#     a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-#     s = a * t
-#     err = e - s
-#     snr = -10.0 * jnp.log10(
-#         (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-#         (jnp.real(jnp.vdot(err, err)) + 1e-8)
-#     )
-
-#     # 3) Bit-BCE（在对齐后的星座上做判决概率）
-#     bit_bce = _bit_bce_loss_16qam(y_aligned, x_ref)
-
-#     # ---- 信息瓶颈 KL 正则（保持原实现；用未对齐输出以限制绝对幅度/能量）----
-#     kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
-
-#     # ---- 组合 ----
-#     loss_main  = snr + 0.1 * evm + β_ce * bit_bce
-#     total_loss = loss_main + λ_kl * kl_ib
-#     return total_loss, state_new
-
-def loss_fn(module, params, state, y, x, aux, const, sparams,
-            β_ce: float = 0.5, λ_kl: float = 1e-4):
-
-    params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
-
-    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
-    yhat  = z_out.val                       # 预测复符号
-
-    # --- 仅移除相位（商空间代表），并 stop-gradient ---
-    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
-    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
-    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
-    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
-
-    # --- 任务一致计分（在 y_al 上）---
-    # EVM（Q²代理）
-    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
-           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
-
-    # SI-SNR（复数版）
-    t = x_ref.reshape(-1); e = y_al.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-    s = a * t
-    snr = -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
-    )
-
-    # Bit-BCE（对齐后星座）
-    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
-
-    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
-
-    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
-    total_loss = loss_main + λ_kl * kl_ib
-    return total_loss, state_new
+    return mse_loss, updated_state
               
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -522,42 +285,85 @@ def train(model: Model,
                                 
                        
 def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple=(300000, -20000),
-         metric_fn=comm.qamqot):
-    ''' testing, a simple forward pass
-
-        Args:
-            model: Model namedtuple return by `model_init`
-        data: dataset
-        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
-        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
-            BER, Q, SER and more metrics.
-
-        Returns:
-            evaluated matrics and equalized symbols
-    '''
-
+            params: Dict,
+            data: gdat.Input,
+            eval_range: tuple = (300000, -20000),
+            L: int = 16,                 # 星座大小（每复维）：16/64/256...
+            d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
+            pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
+            use_oracle_noise: bool = True,
+            use_elliptical_llr: bool = True,
+            temp_grid: tuple = (0.75, 1.0, 1.25),
+            bitwidth: int = 6,
+            decoder=None,                # 可传入你的 ldpc_decoder_adapter；没有就 None
+            return_artifacts: bool = False):
+    """
+    统一返回：
+      res = {
+        'HD':  DataFrame(only 'total' 行，含 BER/Q/SNR),
+        'SD':  dict(含 GMI/NGMI、4D 聚合、可选 post-FEC 与调参信息)
+      }, z = 等化后的信号对象
+    依赖：先把我给你的“精简版 SD 评估文件”放到你的工程并导入：
+      from sd_eval import evaluate_hd_and_sd, qamscale
+    """
+    # —— 前向 —— #
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
-      params = model.initvar[0]
+        params = model.initvar[0]
 
-    z, _ = jit(model.module.apply,
-               backend='cpu')({
-                   'params': util.dict_merge(params, sparams),
-                   'aux_inputs': aux,
-                   'const': const,
-                   **state
-               }, core.Signal(data.y))
-    metric = metric_fn(z.val,
-                       data.x[z.t.start:z.t.stop],
-                       scale=np.sqrt(10),
-                       eval_range=eval_range)
-    return metric, z
+    z, _ = jit(model.module.apply, backend='cpu')({
+        'params': util.dict_merge(params, sparams),
+        'aux_inputs': aux, 'const': const, **state
+    }, core.Signal(data.y))
 
+    # —— 取对齐区间，并做 canonical 缩放（让 x_ref 变成标准 QAM 网格） —— #
+    x_ref = data.x[z.t.start:z.t.stop]
+    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
+    y_eq  = z.val * scale
+    x_ref = x_ref * scale
 
+    # —— eval_range 裁剪（与原口径一致）—— #
+    s0, s1 = eval_range
+    s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
+    y_eq = y_eq[s0:s1]
+    x_ref = x_ref[s0:s1]
+
+    # —— 将多复维拍平成 1D（把两极化当做同一分布的样本聚合，便于统一 LLR/GMI）—— #
+    y_1d = y_eq.reshape(-1)
+    x_1d = x_ref.reshape(-1)
+
+    # —— SD 评估（内部会：估噪→LLR→极性校→温度扫描→量化→（可选）软解码→GMI）—— #
+    sd_kwargs = dict(
+        use_oracle_noise=use_oracle_noise,
+        elliptical_llr=use_elliptical_llr,
+        temp_grid=temp_grid,
+        bitwidth=bitwidth,
+        return_artifacts=return_artifacts
+    )
+    res = comm2.evaluate_hd_and_sd(
+        y_1d, x_1d,
+        L=L if L is not None else 16,
+        decoder=decoder,
+        sd_kwargs=sd_kwargs
+    )
+
+    # —— 4D 聚合指标（基于同一份 LLR 结果）—— #
+    m_per_dim = int(np.log2(L if L is not None else 16))
+    gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
+    gmi_4d    = gmi_dim * d4_dims
+    ngmi_4d   = gmi_4d / (m_per_dim * d4_dims)
+    air_4d    = gmi_4d * (1.0 - pilot_frac)
+
+    res['SD'].update({
+        'GMI_bits_per_4D': gmi_4d,
+        'NGMI_4D': ngmi_4d,
+        'AIR_bits_per_4D': air_4d,
+        'pilot_frac': pilot_frac,
+        'd4_dims': d4_dims
+    })
+
+    return res, z
 
 
 
