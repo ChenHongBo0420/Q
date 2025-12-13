@@ -313,27 +313,166 @@ def train(model: Model,
           n_iter=None,
           opt: optim.Optimizer = optim.adam(
               optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])
-          )):
+          ),
+          diag: Optional[dict] = None):
     """
-    训练 1 epoch，yield (loss, params, module_state)
+    训练 1 epoch，yield (loss, params, module_state) —— 保持原接口不变。
+
+    额外功能（可选）：
+    传入 diag=dict(...) 后，会在训练过程中每隔 eval_every 迭代跑一次 test()
+    并把诊断指标记录到 train.diag_logs（list[dict]）里。
+
+    diag 支持的键（都可选，没给就用默认）：
+      - model_eval : Model   （必填，想算诊断就要给 test 用的 model）
+      - data_eval  : gdat.Input（必填）
+      - eval_every : int，默认 200
+      - eval_range : tuple，默认 (300000, -20000)（同 test()）
+      - L          : int，默认 16
+      - d4_dims    : int，默认 2
+      - pilot_frac : float，默认 0.0
+      - use_oracle_noise : bool，默认 True
+      - use_elliptical_llr : bool，默认 True
+      - temp_grid  : tuple，默认 (0.75, 1.0, 1.25)
+      - bitwidth   : int，默认 6
+      - decoder    : decoder，默认 None
+      - cpe_block_len : int，默认 2048 （用于 phi_blk 指标）
+      - callback   : callable(rec: dict) -> None（每次记录后回调）
     """
 
+    # -------- 0) 准备诊断配置（不影响原训练流程）--------
+    train.diag_logs = []  # 外部训练完可直接访问：gb.train.diag_logs
+    if diag is not None:
+        if ('model_eval' not in diag) or ('data_eval' not in diag):
+            raise ValueError("diag 开启时必须提供 diag['model_eval'] 和 diag['data_eval']")
+
+        model_eval = diag['model_eval']
+        data_eval = diag['data_eval']
+        eval_every = int(diag.get('eval_every', 200))
+        cpe_block_len = int(diag.get('cpe_block_len', 2048))
+        cb = diag.get('callback', None)
+
+        # test() 的参数（尽量跟你现在脚本一致）
+        test_kwargs = dict(
+            eval_range=diag.get('eval_range', (300000, -20000)),
+            L=int(diag.get('L', 16)),
+            d4_dims=int(diag.get('d4_dims', 2)),
+            pilot_frac=float(diag.get('pilot_frac', 0.0)),
+            use_oracle_noise=bool(diag.get('use_oracle_noise', True)),
+            use_elliptical_llr=bool(diag.get('use_elliptical_llr', True)),
+            temp_grid=diag.get('temp_grid', (0.75, 1.0, 1.25)),
+            bitwidth=int(diag.get('bitwidth', 6)),
+            decoder=diag.get('decoder', None),
+            return_artifacts=False
+        )
+
+        # 训练内用的小工具：从 test 输出的 z / data_eval 估计块级残余相位
+        def _phi_blk_metrics_from_z(z_sig, data_eval, L, eval_range, block_len):
+            # 复制 test() 中的 canonical scaling + eval_range 裁剪口径 :contentReference[oaicite:2]{index=2}
+            x_ref = _np.asarray(data_eval.x[z_sig.t.start:z_sig.t.stop])
+            scale = comm2.qamscale(L) if L is not None else _np.sqrt(10.0)
+            y_eq = _np.asarray(z_sig.val) * scale
+            x_ref = x_ref * scale
+
+            s0, s1 = eval_range
+            s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
+            y_eq = y_eq[s0:s1]
+            x_ref = x_ref[s0:s1]
+
+            T = min(y_eq.shape[0], x_ref.shape[0])
+            y_eq = y_eq[:T]
+            x_ref = x_ref[:T]
+
+            n_blk = T // block_len
+            if n_blk < 2:
+                return _np.nan, _np.nan, int(n_blk)
+
+            phis = []
+            for b in range(n_blk):
+                ys = y_eq[b * block_len:(b + 1) * block_len].reshape(-1)
+                xs = x_ref[b * block_len:(b + 1) * block_len].reshape(-1)
+                zc = _np.vdot(ys, xs)
+                phis.append(_np.angle(zc))
+            phis = _np.unwrap(_np.asarray(phis))
+
+            t = _np.arange(len(phis))
+            a, b0 = _np.polyfit(t, phis, 1)
+            res = phis - (a * t + b0)
+            rms = float(_np.sqrt(_np.mean(res ** 2)))
+            return rms, float(a), int(n_blk)
+
+    # -------- 1) 原 train() 初始化（保持一致）--------
     params, module_state, aux, const, sparams = model.initvar
     opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
+    # -------- 2) 训练主循环（yield 行为保持一致）--------
     for i, (y, x) in tqdm(enumerate(batch_gen),
                           total=n_iter, desc='training', leave=False):
         if i >= n_iter:
             break
+
         aux = core.dict_replace(aux, {'truth': x})
         loss, opt_state, module_state = update_step(
             model.module, opt, i, opt_state,
             module_state, y, x, aux, const, sparams
         )
-        yield loss, opt.params_fn(opt_state), module_state
+        cur_params = opt.params_fn(opt_state)
+
+        # -------- 3) 可选：周期性诊断（不改变 yield 输出）--------
+        if diag is not None and (i % eval_every == 0):
+            res, z = test(model_eval, cur_params, data_eval, **test_kwargs)
+            sd = res.get("SD", {})
+            hd = res.get("HD", None)
+
+            # 从 test() 里直接取（你已经算好的）MSE_raw / MSE_qspace :contentReference[oaicite:3]{index=3}
+            mse_raw = float(sd.get("MSE_raw", _np.nan))
+            mse_qspace = float(sd.get("MSE_qspace", _np.nan))
+            ngmi_4d = float(sd.get("NGMI_4D", _np.nan))
+            gmi_4d = float(sd.get("GMI_bits_per_4D", _np.nan))
+            air_4d = float(sd.get("AIR_bits_per_4D", _np.nan))
+
+            # 额外：残余相位时变（块级）
+            phi_rms, phi_slope, n_blk = _phi_blk_metrics_from_z(
+                z_sig=z,
+                data_eval=data_eval,
+                L=test_kwargs["L"],
+                eval_range=test_kwargs["eval_range"],
+                block_len=cpe_block_len
+            )
+
+            # HD 总指标（可选）
+            qsq = _np.nan
+            ber = _np.nan
+            try:
+                if hd is not None:
+                    qsq = float(hd.loc["total", "QSq"])
+                    ber = float(hd.loc["total", "BER"])
+            except Exception:
+                pass
+
+            rec = dict(
+                it=int(i),
+                loss=float(_np.asarray(loss)),
+                Q_dB=qsq,
+                BER=ber,
+                NGMI_4D=ngmi_4d,
+                GMI_b_per_4D=gmi_4d,
+                AIR_b_per_4D=air_4d,
+                MSE_raw=mse_raw,
+                MSE_qspace=mse_qspace,
+                phi_blk_residual_rms_rad=phi_rms,
+                phi_blk_slope_rad_per_block=phi_slope,
+                cpe_n_blocks=n_blk,
+                cpe_block_len=int(cpe_block_len),
+            )
+            train.diag_logs.append(rec)
+            if cb is not None:
+                cb(rec)
+
+        # 仍然按原来的格式 yield —— 外部脚本无需改任何一行 :contentReference[oaicite:4]{index=4}
+        yield loss, cur_params, module_state
 
 
 # ============================
@@ -448,3 +587,4 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq = np.asarray(z.val[:, 0])       # equalized
     s_ref = np.asarray(data.x)[start:stop, 0]  # 保持原尺度
     return z_eq, s_ref
+
