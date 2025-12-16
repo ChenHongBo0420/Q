@@ -1,3 +1,5 @@
+# [np.float64(8.463065186807782), np.float64(8.814882890880625)]
+# [np.float64(0.0040313247189296434), np.float64(0.002899352590274863)]
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
@@ -245,18 +247,6 @@ def si_snr_flat_amp_pair(tx, rx, eps=1e-8):
                               (jnp.vdot(e, e).real + eps) )
     return -snr_db                   
 
-def align_phase_scale(yhat: jnp.ndarray, y: jnp.ndarray, eps: float = 1e-8):
-    """
-    将预测 yhat 沿 U(1)×R+ 对齐到参考 y：
-    min_{phi, alpha} || alpha * e^{-j phi} yhat - y ||^2
-    返回对齐后的 yhat' 以及 (alpha, phi) 便于记录。
-    """
-    z = jnp.vdot(yhat, y)                          # <yhat, y>
-    p = z / (jnp.abs(z) + eps)                     # 单位相位子（避免 atan2 奇异）
-    yhp = yhat * jnp.conj(p)                       # 去相位：e^{-j phi} = conj(p)
-    alpha = jnp.real(jnp.vdot(yhp, y)) / (jnp.real(jnp.vdot(yhp, yhp)) + eps)
-    return alpha * yhp, alpha, jnp.angle(p)
-  
 CONST_16QAM = jnp.array([
     -3-3j, -3-1j, -3+3j, -3+1j,
     -1-3j, -1-1j, -1+3j, -1+1j,
@@ -311,49 +301,43 @@ def _bit_bce_loss_16qam(pred_sym: Array, true_sym: Array) -> Array:
     return (bce * BIT_WEIGHTS).mean()          # 加权平均
         
 
-def loss_fn(module, params, state, y, x, aux, const, sparams,
-            β_ce: float = 0.5, λ_kl: float = 1e-4):
+
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state : Dict,
+            y     : Array,
+            x     : Array,
+            aux   : Dict,
+            const : Dict,
+            sparams: Dict,
+            β_ce : float = 0.5,
+            λ_kl : float = 1e-4):             # ← IB-KL 权重
 
     params_net = util.dict_merge(params, sparams)
+
+    # ── 前向 ──────────────────────────────────────────
     z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
+        {'params': params_net, 'aux_inputs': aux,
+         'const': const, **state}, core.Signal(y))
 
-    x_ref = x[z_out.t.start:z_out.t.stop]   # 参考符号
-    yhat  = z_out.val                       # 预测复符号
+    aligned_x = x[z_out.t.start:z_out.t.stop]
 
-    # --- 仅移除相位（商空间代表），并 stop-gradient ---
-    zc   = jnp.vdot(yhat.reshape(-1), x_ref.reshape(-1))   # <ŷ, x>
-    p    = zc / (jnp.abs(zc) + 1e-8)                       # e^{jφ*}
-    p    = lax.stop_gradient(p)                            # ★ 不反传 φ*
-    y_al = yhat * jnp.conj(p)                              # 去相位后的输出
-    # 不做幅度对齐（alpha）；把幅度学习留给 BN/MIMOAF
+    # ── (1) SNR + EVM  ───────────────────────────────
+    snr = si_snr_flat_amp_pair(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    evm = evm_ring(jnp.abs(z_out.val), jnp.abs(aligned_x))
+    loss_main = snr + 0.1 * evm
 
-    # --- 任务一致计分（在 y_al 上）---
-    # EVM（Q²代理）
-    evm = (jnp.mean(jnp.abs(y_al - x_ref)**2) /
-           (jnp.mean(jnp.abs(x_ref)**2) + 1e-8))
+    # ── (2) Bit-BCE (含可学习 bit_w) ────────────────
+    bit_bce = _bit_bce_loss_16qam(z_out.val, aligned_x)
+    loss_main += β_ce * bit_bce
 
-    # SI-SNR（复数版）
-    t = x_ref.reshape(-1); e = y_al.reshape(-1)
-    a = jnp.vdot(t, e) / (jnp.vdot(t, t) + 1e-8)
-    s = a * t
-    snr = -10.0 * jnp.log10(
-        (jnp.real(jnp.vdot(s, s)) + 1e-8) /
-        (jnp.real(jnp.vdot(e - s, e - s)) + 1e-8)
-    )
-
-    # Bit-BCE（对齐后星座）
-    bit_bce = _bit_bce_loss_16qam(y_al, x_ref)
-
-    # 信息瓶颈 KL（保留在未对齐输出上，限制能量）
-    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(yhat)))
-
-    loss_main  = snr + 0.1 * evm + β_ce * bit_bce
+    # ── (3)  Information-Bottleneck KL  ★ NEW ★ ─────
+    # 近似  KL(qθ(Z|X) ‖ 𝒩(0,1))  →   0.5·E[|Z|²]
+    kl_ib = 0.5 * jnp.mean(jnp.square(jnp.abs(z_out.val)))
     total_loss = loss_main + λ_kl * kl_ib
+
     return total_loss, state_new
-              
+
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -530,7 +514,7 @@ def test(model: Model,
     return res, z
 
 
-
+                
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
     z,_ = jax.jit(model_te.module.apply, backend='cpu')(
