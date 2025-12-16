@@ -1,3 +1,4 @@
+# Only mixed by the SNR loss vs Q
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
@@ -587,4 +588,5 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq = np.asarray(z.val[:, 0])       # equalized
     s_ref = np.asarray(data.x)[start:stop, 0]  # 保持原尺度
     return z_eq, s_ref
+
 
