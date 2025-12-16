@@ -1,3 +1,4 @@
+# MSE problem for Q vs Loss
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
