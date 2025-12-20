@@ -26,7 +26,7 @@ def make_base_module(steps: int = 3,
                         dtaps: int = 261,
                         ntaps: int = 41,
                         rtaps: int = 61,
-                        init_fn: tuple = (mcore.delta, mcore.gauss),
+                        init_fn: tuple = (core.delta, core.gauss),
                         w0=0.,
                         mode: str = 'train',
                         # ===== NEW: FOE/CPE loop knobs =====
