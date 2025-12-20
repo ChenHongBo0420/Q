@@ -158,7 +158,7 @@ def model_init(data,
 
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    z0, v0 = mod.init(rng0, mcore.Signal(y0))
+    z0, v0 = mod.init(rng0, core.Signal(y0))
 
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
