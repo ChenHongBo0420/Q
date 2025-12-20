@@ -23,45 +23,78 @@ Dict = Union[dict, flax.core.FrozenDict]
 
 
 def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train',
-                     mu_h: float = 1e-4,   # ✅ DDLMS μh
-                     mu_f: float = 1e-4,   # ✅ DDLMS μf
-                     foe_strength: float = 1.0,
-                     foekwargs: dict | None = None):
-    _assert_taps(dtaps, ntaps, rtaps)
+                        dtaps: int = 261,
+                        ntaps: int = 41,
+                        rtaps: int = 61,
+                        init_fn: tuple = (mcore.delta, mcore.gauss),
+                        w0=0.,
+                        mode: str = 'train',
+                        # ===== NEW: FOE/CPE loop knobs =====
+                        framesize: int = 100,
+                        foe_strength: float = 1.0,
+                        foekwargs: dict | None = None,
+                        # ===== NEW: DDLMS step sizes =====
+                        mu_h: float | None = None,
+                        mu_f: float | None = None,
+                        mu_s: float | None = None,
+                        mu_b: float | None = None,
+                        # allow user override additional mimokwargs
+                        mimokwargs: dict | None = None):
+    """
+    与你原 make_base_module 结构完全一致，只是：
+      1) MIMOFOEAf 支持 framesize / foe_strength / foekwargs
+      2) MIMOAF(DDLMS) 支持 mu_h/mu_f/... 并映射到 ddlms 的 lr_w/lr_f/lr_s/lr_b
+    """
 
-    d_init, n_init = init_fn
-    if foekwargs is None:
-        foekwargs = {}
-
+    # ---- keep your original train/test policy ----
     if mode == 'train':
         mimo_train = True
     elif mode == 'test':
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
-        raise ValueError('invalid mode %s' % mode)
+        raise ValueError(f'invalid mode {mode}')
 
-    mimo_kwargs = dict(lr_w=float(mu_h), lr_f=float(mu_f))
+    d_init, n_init = init_fn
+    if foekwargs is None:
+        foekwargs = {}
+
+    # ---- build mimokwargs for DDLMS ----
+    # DDLMS 的真实参数名：lr_w/lr_f/lr_s/lr_b（不是 lr）
+    mk = {} if mimokwargs is None else dict(mimokwargs)
+    if mu_h is not None:
+        mk["lr_w"] = float(mu_h)
+    if mu_f is not None:
+        mk["lr_f"] = float(mu_f)
+    if mu_s is not None:
+        mk["lr_s"] = float(mu_s)
+    if mu_b is not None:
+        mk["lr_b"] = float(mu_b)
 
     base = layer.Serial(
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
+        layer.FDBP(steps=steps,
+                   dtaps=dtaps,
+                   ntaps=ntaps,
+                   d_init=d_init,
+                   n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
+
+        # ===== FOE/CPE + MIMO-for-FOE =====
+        # commplax.module.core.mimofoeaf 的签名里有 framesize/foe_strength/foekwargs :contentReference[oaicite:3]{index=3}
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
+                        preslicer=mcore.conv1d_slicer(rtaps),
                         foekwargs=foekwargs,
-                        foe_strength=foe_strength),
+                        framesize=int(framesize),
+                        foe_strength=float(foe_strength)),
+
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train, mimokwargs=mimo_kwargs)  # ✅ 关键：把 μh/μf 传进去
+
+        # ===== final adaptive MIMO (DDLMS) =====
+        # mimoaf 会把 mimokwargs 喂给 mimofn(train=..., **mimokwargs) :contentReference[oaicite:4]{index=4}
+        layer.MIMOAF(train=mimo_train, mimokwargs=mk),
     )
     return base
-
   
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
@@ -111,46 +144,27 @@ def fdbp_init(a: dict,
     return d_init, n_init
 
 
-def model_init(data: gdat.Input,
-               base_conf: dict,
-               sparams_flatkeys: list,
-               n_symbols: int = 4000,
-               sps: int = 2,
-               name='Model'):
+def model_init(data,
+                  base_conf: dict,
+                  sparams_flatkeys: list,
+                  n_symbols: int = 4000,
+                  sps: int = 2,
+                  name='Model'):
     """
-    Build Model with configurable base module.
-
-    Notes
-    -----
-    - `base_conf` will be expanded into `make_base_module(**base_conf, w0=data.w0)`.
-      So any extra keys you add into `base_conf` (e.g. framesize/foe_strength/foekwargs/mu_h/mu_f/...)
-      will work as long as your modified `make_base_module()` accepts them.
-    - The rest behavior is kept identical to the original implementation.
+    完全复刻你原 model_init 的结构，只是 mod = make_base_module_v2(...)
     """
-    if base_conf is None:
-        base_conf = {}
-    else:
-        base_conf = dict(base_conf)  # avoid side-effects
+    # ---- core change: call v2 ----
+    mod = make_base_module_v2(**base_conf, w0=data.w0)
 
-    # Core: forward all base_conf keys to make_base_module
-    mod = make_base_module(**base_conf, w0=data.w0)
-
-    # init with a short segment
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    z0, v0 = mod.init(rng0, core.Signal(y0))
+    z0, v0 = mod.init(rng0, mcore.Signal(y0))
 
-    # overlap length (kept identical)
     ol = z0.t.start - z0.t.stop
-
-    # split static params & trainable params
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-
-    # states / aux / const (kept identical)
     state = v0['af_state']
     aux = v0['aux_inputs']
     const = v0['const']
-
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
