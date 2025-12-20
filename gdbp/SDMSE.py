@@ -154,7 +154,7 @@ def model_init(data,
     完全复刻你原 model_init 的结构，只是 mod = make_base_module_v2(...)
     """
     # ---- core change: call v2 ----
-    mod = make_base_module_v2(**base_conf, w0=data.w0)
+    mod = make_base_module(**base_conf, w0=data.w0)
 
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
