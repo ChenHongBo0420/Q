@@ -115,18 +115,42 @@ def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps : int = 2,
+               sps: int = 2,
                name='Model'):
-    
+    """
+    Build Model with configurable base module.
+
+    Notes
+    -----
+    - `base_conf` will be expanded into `make_base_module(**base_conf, w0=data.w0)`.
+      So any extra keys you add into `base_conf` (e.g. framesize/foe_strength/foekwargs/mu_h/mu_f/...)
+      will work as long as your modified `make_base_module()` accepts them.
+    - The rest behavior is kept identical to the original implementation.
+    """
+    if base_conf is None:
+        base_conf = {}
+    else:
+        base_conf = dict(base_conf)  # avoid side-effects
+
+    # Core: forward all base_conf keys to make_base_module
     mod = make_base_module(**base_conf, w0=data.w0)
+
+    # init with a short segment
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
+
+    # overlap length (kept identical)
     ol = z0.t.start - z0.t.stop
+
+    # split static params & trainable params
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+
+    # states / aux / const (kept identical)
     state = v0['af_state']
     aux = v0['aux_inputs']
     const = v0['const']
+
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
