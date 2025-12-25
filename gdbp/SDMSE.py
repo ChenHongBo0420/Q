@@ -457,48 +457,42 @@ def train(model: Model,
 
         # 仍然按原来的格式 yield
         yield loss, cur_params, module_state
-def test(model: Model,
-         params: Dict,
-         data: gdat.Input,
-         eval_range: tuple = (300000, -20000),
-         L: int = 16,
-         d4_dims: int = 2,
-         pilot_frac: float = 0.0,
-         use_oracle_noise: bool = True,
-         use_elliptical_llr: bool = True,
-         temp_grid: tuple = (0.75, 1.0, 1.25),
-         bitwidth: int = 6,
+import numpy as np
+from functools import partial
+from jax import jit
+from commplax import util, comm2
+from commplax.module import core
+
+def test(model,
+         params,
+         data,
+         eval_range=(300000, -20000),
+         L=16,
+         d4_dims=2,
+         pilot_frac=0.0,
+         use_oracle_noise=True,
+         use_elliptical_llr=True,
+         temp_grid=(0.75, 1.0, 1.25),
+         bitwidth=6,
          decoder=None,
-         return_artifacts: bool = False,
-         inject_action_to_sd: bool = True):
+         return_artifacts=False):
     """
-    原口径 +（可选）把 mimofoeaf 写入 af_state/framefoeaf 的动作标量注入 res['SD']。
+    ✅ 原口径：
+      - 前向：model.module.apply(variables, core.Signal(data.y))
+      - 对齐：x_ref = data.x[z.t.start:z.t.stop]
+      - canonical scaling：comm2.qamscale(L)
+      - eval_range：手写 slice（支持 s1 为负）
+      - 聚合：reshape(-1) 做 1D 评估：comm2.evaluate_hd_and_sd
+      - 4D 聚合：GMI_dim * d4_dims
 
-    重要：你们 commplax Layer.apply 不支持外部传 mutable=...
-    所以这里绝对不传 mutable，而是“若 apply 有第二返回，就接住 new_state”。
+    ✅ 关键兼容：
+      - apply 可能返回：
+          A) Signal
+          B) (Signal, new_state)
+        其中 Signal 可能是 NamedTuple，本身也是 tuple → 不能用 isinstance(out, tuple) 直接拆
     """
 
-    # ---------- helper: 从 new_state 里找 framefoeaf ----------
-    def _find_framefoeaf(tree):
-        """
-        在 new_state（FrozenDict/dict 嵌套）里递归找 key == 'framefoeaf'
-        返回 value 或 None
-        """
-        if tree is None:
-            return None
-        try:
-            it = tree.items()
-        except Exception:
-            return None
-        for k, v in it:
-            if k == 'framefoeaf':
-                return v
-            vv = _find_framefoeaf(v)
-            if vv is not None:
-                return vv
-        return None
-
-    # ---------- 0) 前向 variables ----------
+    # ---------- 0) variables ----------
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
@@ -511,50 +505,48 @@ def test(model: Model,
         **state
     }
 
-    # ---------- 1) 前向（关键：不传 mutable！） ----------
+    # ---------- 1) forward ----------
     out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
 
-    # ---------- 2) 兼容解包 ----------
-    z, new_state = None, None
-    if isinstance(out, tuple):
-        # 常见：(z, new_state)
-        if len(out) >= 1:
-            z = out[0]
-        if len(out) >= 2:
-            new_state = out[1]
-    else:
+    # ---------- 2) robust unpack ----------
+    z = None
+    new_state = None
+
+    # Case A: out 本身就是 Signal（有 val/t）
+    if hasattr(out, "val") and hasattr(out, "t"):
         z = out
+        new_state = None
 
-    # 防御：极端情况下 z 不是 Signal（你之前遇到过 z 是 tuple 的情况）
-    if isinstance(z, tuple):
-        # 取第一个像 Signal 的东西
-        z = z[0]
+    # Case B: out 是 (Signal, state)
+    elif isinstance(out, (tuple, list)) and len(out) == 2 and hasattr(out[0], "val") and hasattr(out[0], "t"):
+        z = out[0]
+        new_state = out[1]
 
-    # ---------- 3) 对齐区间 + canonical scaling（原口径） ----------
-    x_ref = data.x[z.t.start:z.t.stop]
+    else:
+        raise TypeError(
+            f"Unexpected apply output type: {type(out)}. "
+            f"Got out={out} (maybe pytree). Expected Signal or (Signal, state)."
+        )
+
+    # ---------- 3) align + canonical scaling ----------
+    x_ref = np.asarray(data.x)[z.t.start:z.t.stop]
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
     y_eq  = np.asarray(z.val) * scale
     x_ref = np.asarray(x_ref) * scale
 
-    # ---------- 4) eval_range 裁剪（原口径，支持 s1<0） ----------
+    # ---------- 4) eval_range slice ----------
     s0, s1 = eval_range
-    if s0 is None:
-        s0 = 0
-    if s1 is None:
-        s1 = y_eq.shape[0]
-
-    s0 = int(s0)
-    s1 = int(s1)
+    s0 = 0 if s0 is None else int(s0)
+    s1 = y_eq.shape[0] if s1 is None else int(s1)
     if s1 <= 0:
         s1 = y_eq.shape[0] + s1
-
     s0 = max(0, s0)
     s1 = min(int(y_eq.shape[0]), s1)
 
     y_eq  = y_eq[s0:s1]
     x_ref = x_ref[s0:s1]
 
-    # ---------- 5) 多复维拍平做 1D SD/HD 评估（原口径） ----------
+    # ---------- 5) flatten to 1D ----------
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
@@ -573,7 +565,17 @@ def test(model: Model,
         sd_kwargs=sd_kwargs
     )
 
-    # ---------- 6) 4D 聚合指标（原口径） ----------
+    # ---------- 6) 补上你们常看的 MSE（避免 NaN） ----------
+    mse_raw = float(np.mean(np.abs(y_1d - x_1d) ** 2))
+    # “qspace / 去公共相位” MSE
+    zc = np.vdot(y_1d, x_1d)
+    p  = zc / (np.abs(zc) + 1e-12)
+    y_aligned = y_1d * np.conj(p)
+    mse_qsp = float(np.mean(np.abs(y_aligned - x_1d) ** 2))
+    res["SD"]["MSE_raw"] = mse_raw
+    res["SD"]["MSE_qspace"] = mse_qsp
+
+    # ---------- 7) 4D aggregation ----------
     m_per_dim = int(np.log2(L if L is not None else 16))
     gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
     gmi_4d    = gmi_dim * d4_dims
@@ -588,38 +590,14 @@ def test(model: Model,
         'd4_dims': d4_dims
     })
 
-    # ---------- 6.5) 注入动作标量到 SD（若拿得到 new_state） ----------
-    if inject_action_to_sd:
-        A_blk = np.nan
-        A_w   = np.nan
-        slip  = np.nan
-
-        framefoeaf = _find_framefoeaf(new_state)
-        # 期望 framefoeaf = (phi_last, af_step, af_stats, A_act_blk_std, A_act_w_std, slip_cnt)
-        try:
-            if isinstance(framefoeaf, tuple) and len(framefoeaf) >= 6:
-                A_blk = float(np.asarray(framefoeaf[3]))
-                A_w   = float(np.asarray(framefoeaf[4]))
-                slip  = float(np.asarray(framefoeaf[5]))
-        except Exception:
-            pass
-
-        res['SD'].update({
-            "FOE_A_act_blk_std_rad": A_blk,
-            "FOE_A_act_w_std_rad":   A_w,
-            "FOE_slip_act_cnt":      slip
-        })
-
-    # ---------- 7) 返回 ----------
     if not return_artifacts:
         return res, z
 
     artifacts = {
-        "module_state": new_state,
-        "eval_range": eval_range,
+        "module_state": new_state,   # 这里如果 commplax layer 配了 mutable，就能拿到 af_state
+        "align": (int(z.t.start), int(z.t.stop)),
         "slice": (int(s0), int(s1)),
-        "align_start": int(z.t.start),
-        "align_stop": int(z.t.stop),
+        "eval_range": eval_range,
     }
     return res, z, artifacts
 
