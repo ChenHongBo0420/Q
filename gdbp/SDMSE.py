@@ -477,37 +477,47 @@ def test(model: Model,
     return_artifacts=False: return (res, z)
     return_artifacts=True : return (res, z, artifacts)
         artifacts 至少包含：
-          - artifacts["module_state"] : module.apply 的第二返回（含 af_state/framefoeaf）
+          - artifacts["module_state"] : module.apply 的 mutable collections（含 af_state/.../framefoeaf）
     """
-    # —— 前向 —— #
+
+    # —— 准备 variables —— #
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
+
     if params is None:
         params = model.initvar[0]
 
-    # ✅ 把 apply 的第二个返回接出来（它就是 updated state / mutable collections）
-    z, new_state = jit(model.module.apply, backend='cpu')({
+    variables = {
         'params': util.dict_merge(params, sparams),
         'aux_inputs': aux,
         'const': const,
         **state
-    }, core.Signal(data.y))
+    }
+
+    # —— 前向（是否取 mutable）—— #
+    if return_artifacts:
+        # ✅ 关键：显式声明 af_state 是 mutable，这样 apply 才会返回 (z, new_state)
+        apply_fn = partial(model.module.apply, mutable=['af_state'])
+        z, new_state = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
+    else:
+        z = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
+        new_state = None
 
     # —— 取对齐区间，并做 canonical 缩放 —— #
     start, stop = z.t.start, z.t.stop
-    y = np.asarray(z.val[:, 0])  # equalized (complex)
-    x = np.asarray(data.x)[start:stop, 0]  # tx ref (complex)
+
+    # 这里你原来只取了一个 polarization：[:,0]；保留你原逻辑
+    y = np.asarray(z.val[:, 0])
+    x = np.asarray(data.x)[start:stop, 0]
 
     y = util.slice_signal(y, eval_range)
     x = util.slice_signal(x, eval_range)
 
-    # canonical scaling（与你当前版本保持一致）
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
     y_1d = y * scale
     x_1d = x * scale
 
-    # —— SD/HD 评估（保持你原来的调用）—— #
-    # 注意：这里假设你原 SDMSE.py 里已经有 evaluate_hd_and_sd / sd_kwargs 等
+    # —— SD/HD 评估 —— #
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         use_elliptical_llr=use_elliptical_llr,
@@ -522,7 +532,7 @@ def test(model: Model,
         sd_kwargs=sd_kwargs
     )
 
-    # —— 4D 聚合指标（保持你原逻辑）—— #
+    # —— 4D 聚合指标 —— #
     m_per_dim = int(np.log2(L if L is not None else 16))
     gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
     gmi_4d    = gmi_dim * d4_dims
@@ -541,7 +551,7 @@ def test(model: Model,
         return res, z
 
     artifacts = {
-        "module_state": new_state,   # ✅ 关键：af_state/framefoeaf 在这里
+        "module_state": new_state,   # ✅ 这里面才是 mutable collections（含 af_state）
         "eval_range": eval_range,
         "start": int(start),
         "stop": int(stop),
