@@ -457,29 +457,6 @@ def train(model: Model,
 
         # 仍然按原来的格式 yield
         yield loss, cur_params, module_state
-
-
-                       
-# ===================== SDMSE.py 里把 test() 整个替换成这一版（原口径兼容版） =====================
-# 目标：
-# 1) 完全沿用你贴的“原口径”：自己手写 eval_range slicing，不依赖 util.slice_signal
-# 2) 兼容 Flax apply 可能返回 z 或 (z, new_state)
-# 3) return_artifacts=False: (res, z)
-#    return_artifacts=True : (res, z, artifacts) 其中 artifacts["module_state"]=new_state（含 af_state/.../framefoeaf）
-# 4) 仍然使用 comm2.evaluate_hd_and_sd（与你原来的口径一致）
-#
-# 依赖你当前 SDMSE.py 文件里已经 import 了：
-#   import numpy as np
-#   from jax import jit
-#   from functools import partial
-#   from commplax import util, comm2
-#   from commplax.module import core
-#   以及 Model, Dict, gdat.Input 的类型（没有也没关系，只是注解）
-
-from functools import partial
-from jax import jit
-import numpy as np
-
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
@@ -493,36 +470,33 @@ def test(model: Model,
          bitwidth: int = 6,
          decoder=None,
          return_artifacts: bool = False,
-         # ✅ 新增：是否把 core 里的动作标量注入 SD（推荐默认 True）
          inject_action_to_sd: bool = True):
     """
-    原口径 +（可选）把 mimofoeaf 里写入 af_state/framefoeaf 的动作标量注入 res['SD']。
+    原口径 +（可选）把 mimofoeaf 写入 af_state/framefoeaf 的动作标量注入 res['SD']。
 
-    返回：
-      return_artifacts=False -> (res, z)
-      return_artifacts=True  -> (res, z, artifacts)
+    重要：你们 commplax Layer.apply 不支持外部传 mutable=...
+    所以这里绝对不传 mutable，而是“若 apply 有第二返回，就接住 new_state”。
     """
 
     # ---------- helper: 从 new_state 里找 framefoeaf ----------
-    def _find_framefoeaf(state_tree):
+    def _find_framefoeaf(tree):
         """
-        在 new_state（通常是 FrozenDict / dict 嵌套）里递归找 key == 'framefoeaf'
-        返回 (path, value) 或 (None, None)
+        在 new_state（FrozenDict/dict 嵌套）里递归找 key == 'framefoeaf'
+        返回 value 或 None
         """
+        if tree is None:
+            return None
         try:
-            items = state_tree.items()
+            it = tree.items()
         except Exception:
-            return None, None
-
-        for k, v in items:
+            return None
+        for k, v in it:
             if k == 'framefoeaf':
-                return (k,), v
-            # 递归
-            if isinstance(v, (dict,)) or hasattr(v, "items"):
-                p2, val2 = _find_framefoeaf(v)
-                if val2 is not None:
-                    return (k,) + p2, val2
-        return None, None
+                return v
+            vv = _find_framefoeaf(v)
+            if vv is not None:
+                return vv
+        return None
 
     # ---------- 0) 前向 variables ----------
     state, aux, const, sparams = model.initvar[1:]
@@ -537,24 +511,27 @@ def test(model: Model,
         **state
     }
 
-    # ---------- 1) 前向：如果要注入动作标量，也必须请求 mutable ----------
-    need_mutable = bool(return_artifacts or inject_action_to_sd)
-
-    if need_mutable:
-        apply_fn = partial(model.module.apply, mutable=['af_state'])
-        out = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
-    else:
-        out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
+    # ---------- 1) 前向（关键：不传 mutable！） ----------
+    out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
 
     # ---------- 2) 兼容解包 ----------
+    z, new_state = None, None
     if isinstance(out, tuple):
-        z, new_state = out
+        # 常见：(z, new_state)
+        if len(out) >= 1:
+            z = out[0]
+        if len(out) >= 2:
+            new_state = out[1]
     else:
-        z, new_state = out, None
+        z = out
+
+    # 防御：极端情况下 z 不是 Signal（你之前遇到过 z 是 tuple 的情况）
+    if isinstance(z, tuple):
+        # 取第一个像 Signal 的东西
+        z = z[0]
 
     # ---------- 3) 对齐区间 + canonical scaling（原口径） ----------
     x_ref = data.x[z.t.start:z.t.stop]
-
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
     y_eq  = np.asarray(z.val) * scale
     x_ref = np.asarray(x_ref) * scale
@@ -611,22 +588,21 @@ def test(model: Model,
         'd4_dims': d4_dims
     })
 
-    # ---------- 6.5) ✅ 注入动作标量到 res['SD'] ----------
+    # ---------- 6.5) 注入动作标量到 SD（若拿得到 new_state） ----------
     if inject_action_to_sd:
         A_blk = np.nan
         A_w   = np.nan
         slip  = np.nan
 
-        if new_state is not None:
-            _, framefoeaf = _find_framefoeaf(new_state)
-            # 期望 framefoeaf = (phi_last, af_step, af_stats, A_act_blk_std, A_act_w_std, slip_cnt)
-            try:
-                if isinstance(framefoeaf, tuple) and len(framefoeaf) >= 6:
-                    A_blk = float(np.asarray(framefoeaf[3]))
-                    A_w   = float(np.asarray(framefoeaf[4]))
-                    slip  = float(np.asarray(framefoeaf[5]))
-            except Exception:
-                pass
+        framefoeaf = _find_framefoeaf(new_state)
+        # 期望 framefoeaf = (phi_last, af_step, af_stats, A_act_blk_std, A_act_w_std, slip_cnt)
+        try:
+            if isinstance(framefoeaf, tuple) and len(framefoeaf) >= 6:
+                A_blk = float(np.asarray(framefoeaf[3]))
+                A_w   = float(np.asarray(framefoeaf[4]))
+                slip  = float(np.asarray(framefoeaf[5]))
+        except Exception:
+            pass
 
         res['SD'].update({
             "FOE_A_act_blk_std_rad": A_blk,
