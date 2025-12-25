@@ -460,13 +460,33 @@ def train(model: Model,
 
 
                        
+# ===================== SDMSE.py 里把 test() 整个替换成这一版（原口径兼容版） =====================
+# 目标：
+# 1) 完全沿用你贴的“原口径”：自己手写 eval_range slicing，不依赖 util.slice_signal
+# 2) 兼容 Flax apply 可能返回 z 或 (z, new_state)
+# 3) return_artifacts=False: (res, z)
+#    return_artifacts=True : (res, z, artifacts) 其中 artifacts["module_state"]=new_state（含 af_state/.../framefoeaf）
+# 4) 仍然使用 comm2.evaluate_hd_and_sd（与你原来的口径一致）
+#
+# 依赖你当前 SDMSE.py 文件里已经 import 了：
+#   import numpy as np
+#   from jax import jit
+#   from functools import partial
+#   from commplax import util, comm2
+#   from commplax.module import core
+#   以及 Model, Dict, gdat.Input 的类型（没有也没关系，只是注解）
+
+from functools import partial
+from jax import jit
+import numpy as np
+
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
          eval_range: tuple = (300000, -20000),
-         L: int = 16,
-         d4_dims: int = 2,
-         pilot_frac: float = 0.0,
+         L: int = 16,                 # 星座大小（每复维）
+         d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
+         pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
          use_oracle_noise: bool = True,
          use_elliptical_llr: bool = True,
          temp_grid: tuple = (0.75, 1.0, 1.25),
@@ -474,20 +494,24 @@ def test(model: Model,
          decoder=None,
          return_artifacts: bool = False):
     """
-    ✅ 兼容两种 apply 返回：
-      - out = z
-      - out = (z, new_state)  (当 mutable=['af_state'] 时)
+    原口径说明（与你贴的版本一致）：
+      - 前向：model.module.apply
+      - 对齐：x_ref = data.x[z.t.start:z.t.stop]
+      - canonical scaling：comm2.qamscale(L)
+      - eval_range：手写 slice（支持 s1 为负）
+      - 聚合：把多复维 reshape(-1) 做 1D 评估
+      - 评估：comm2.evaluate_hd_and_sd
+      - 4D 指标：GMI_dim * d4_dims
 
-    return_artifacts=False: return (res, z)
-    return_artifacts=True : return (res, z, artifacts)
-        artifacts 至少包含：
-          - artifacts["module_state"] : apply 的 mutable collections（含 af_state/framefoeaf）
+    返回：
+      return_artifacts=False -> (res, z)
+      return_artifacts=True  -> (res, z, artifacts)
+        artifacts["module_state"] 是 apply 的 mutable collections（含 af_state/.../framefoeaf）
     """
 
-    # -------- 0) 准备 variables --------
+    # ---------- 0) 前向 variables ----------
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-
     if params is None:
         params = model.initvar[0]
 
@@ -498,63 +522,69 @@ def test(model: Model,
         **state
     }
 
-    # -------- 1) 前向：只有 return_artifacts 才请求 mutable --------
+    # ---------- 1) 前向：只有 return_artifacts=True 才请求 mutable ----------
     if return_artifacts:
-        # ✅ 关键：只有需要 artifacts 才打开 mutable，否则会变慢
+        # ✅ 关键：不加 mutable 就拿不到 af_state；加了 mutable 返回值可能变成 (z, new_state)
         apply_fn = partial(model.module.apply, mutable=['af_state'])
         out = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
     else:
         out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
 
-    # ✅ 兼容：out 可能是 z，也可能是 (z, new_state)
+    # ---------- 2) 兼容解包 ----------
     if isinstance(out, tuple):
         z, new_state = out
     else:
         z, new_state = out, None
 
-    # -------- 2) 取对齐区间 + eval_range 裁剪 --------
-    start, stop = z.t.start, z.t.stop
+    # ---------- 3) 对齐区间 + canonical scaling（原口径） ----------
+    # 注意：z.val 通常形状 [T, C]；data.x 形状 [N, C]
+    x_ref = data.x[z.t.start:z.t.stop]
 
-    y_all = np.asarray(z.val)                  # equalized output
-    x_all = np.asarray(data.x)[start:stop]     # tx ref aligned
-
-    # 兼容：既可能是 [T]，也可能是 [T,C]
-    if y_all.ndim >= 2:
-        y = y_all[:, 0]
-    else:
-        y = y_all
-
-    if x_all.ndim >= 2:
-        x = x_all[:, 0]
-    else:
-        x = x_all
-
-    # eval_range 裁剪（你原逻辑）
-    y = util.slice_signal(y, eval_range)
-    x = util.slice_signal(x, eval_range)
-
-    # -------- 3) canonical scaling（与你原版本一致）--------
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
-    y_1d = y * scale
-    x_1d = x * scale
+    y_eq  = np.asarray(z.val) * scale
+    x_ref = np.asarray(x_ref) * scale
 
-    # -------- 4) SD/HD 评估（保持你原来的 evaluate_hd_and_sd 调用方式）--------
+    # ---------- 4) eval_range 裁剪（原口径，支持 s1<0） ----------
+    s0, s1 = eval_range
+    if s0 is None:
+        s0 = 0
+    if s1 is None:
+        s1 = y_eq.shape[0]
+
+    s0 = int(s0)
+    s1 = int(s1)
+
+    if s1 <= 0:
+        s1 = y_eq.shape[0] + s1
+
+    # clamp
+    s0 = max(0, s0)
+    s1 = min(int(y_eq.shape[0]), s1)
+
+    y_eq  = y_eq[s0:s1]
+    x_ref = x_ref[s0:s1]
+
+    # ---------- 5) 多复维拍平做 1D SD/HD 评估（原口径） ----------
+    y_1d = y_eq.reshape(-1)
+    x_1d = x_ref.reshape(-1)
+
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
-        use_elliptical_llr=use_elliptical_llr,
+        elliptical_llr=use_elliptical_llr,   # ✅ 注意：你原代码这里叫 elliptical_llr
         temp_grid=temp_grid,
         bitwidth=bitwidth,
+        return_artifacts=return_artifacts
     )
 
-    # 这里假设你 SDMSE.py 里已有 evaluate_hd_and_sd
-    res = evaluate_hd_and_sd(
+    # 你原代码用的是 comm2.evaluate_hd_and_sd（保持一致）
+    res = comm2.evaluate_hd_and_sd(
         y_1d, x_1d,
         L=L if L is not None else 16,
         decoder=decoder,
         sd_kwargs=sd_kwargs
     )
 
-    # -------- 5) 4D 聚合指标（保持你原逻辑）--------
+    # ---------- 6) 4D 聚合指标（原口径） ----------
     m_per_dim = int(np.log2(L if L is not None else 16))
     gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
     gmi_4d    = gmi_dim * d4_dims
@@ -569,15 +599,16 @@ def test(model: Model,
         'd4_dims': d4_dims
     })
 
-    # -------- 6) 返回 --------
+    # ---------- 7) 返回 ----------
     if not return_artifacts:
         return res, z
 
     artifacts = {
-        "module_state": new_state,   # ✅ 这里才是 mutable collections（含 af_state/framefoeaf）
+        "module_state": new_state,   # ✅ mutable collections（含 af_state/...）
         "eval_range": eval_range,
-        "start": int(start),
-        "stop": int(stop),
+        "slice": (int(s0), int(s1)),
+        "align_start": int(z.t.start),
+        "align_stop": int(z.t.stop),
     }
     return res, z, artifacts
 
