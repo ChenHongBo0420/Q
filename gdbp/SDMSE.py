@@ -484,30 +484,45 @@ def test(model: Model,
          params: Dict,
          data: gdat.Input,
          eval_range: tuple = (300000, -20000),
-         L: int = 16,                 # 星座大小（每复维）
-         d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
-         pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
+         L: int = 16,
+         d4_dims: int = 2,
+         pilot_frac: float = 0.0,
          use_oracle_noise: bool = True,
          use_elliptical_llr: bool = True,
          temp_grid: tuple = (0.75, 1.0, 1.25),
          bitwidth: int = 6,
          decoder=None,
-         return_artifacts: bool = False):
+         return_artifacts: bool = False,
+         # ✅ 新增：是否把 core 里的动作标量注入 SD（推荐默认 True）
+         inject_action_to_sd: bool = True):
     """
-    原口径说明（与你贴的版本一致）：
-      - 前向：model.module.apply
-      - 对齐：x_ref = data.x[z.t.start:z.t.stop]
-      - canonical scaling：comm2.qamscale(L)
-      - eval_range：手写 slice（支持 s1 为负）
-      - 聚合：把多复维 reshape(-1) 做 1D 评估
-      - 评估：comm2.evaluate_hd_and_sd
-      - 4D 指标：GMI_dim * d4_dims
+    原口径 +（可选）把 mimofoeaf 里写入 af_state/framefoeaf 的动作标量注入 res['SD']。
 
     返回：
       return_artifacts=False -> (res, z)
       return_artifacts=True  -> (res, z, artifacts)
-        artifacts["module_state"] 是 apply 的 mutable collections（含 af_state/.../framefoeaf）
     """
+
+    # ---------- helper: 从 new_state 里找 framefoeaf ----------
+    def _find_framefoeaf(state_tree):
+        """
+        在 new_state（通常是 FrozenDict / dict 嵌套）里递归找 key == 'framefoeaf'
+        返回 (path, value) 或 (None, None)
+        """
+        try:
+            items = state_tree.items()
+        except Exception:
+            return None, None
+
+        for k, v in items:
+            if k == 'framefoeaf':
+                return (k,), v
+            # 递归
+            if isinstance(v, (dict,)) or hasattr(v, "items"):
+                p2, val2 = _find_framefoeaf(v)
+                if val2 is not None:
+                    return (k,) + p2, val2
+        return None, None
 
     # ---------- 0) 前向 variables ----------
     state, aux, const, sparams = model.initvar[1:]
@@ -522,9 +537,10 @@ def test(model: Model,
         **state
     }
 
-    # ---------- 1) 前向：只有 return_artifacts=True 才请求 mutable ----------
-    if return_artifacts:
-        # ✅ 关键：不加 mutable 就拿不到 af_state；加了 mutable 返回值可能变成 (z, new_state)
+    # ---------- 1) 前向：如果要注入动作标量，也必须请求 mutable ----------
+    need_mutable = bool(return_artifacts or inject_action_to_sd)
+
+    if need_mutable:
         apply_fn = partial(model.module.apply, mutable=['af_state'])
         out = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
     else:
@@ -537,7 +553,6 @@ def test(model: Model,
         z, new_state = out, None
 
     # ---------- 3) 对齐区间 + canonical scaling（原口径） ----------
-    # 注意：z.val 通常形状 [T, C]；data.x 形状 [N, C]
     x_ref = data.x[z.t.start:z.t.stop]
 
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
@@ -553,11 +568,9 @@ def test(model: Model,
 
     s0 = int(s0)
     s1 = int(s1)
-
     if s1 <= 0:
         s1 = y_eq.shape[0] + s1
 
-    # clamp
     s0 = max(0, s0)
     s1 = min(int(y_eq.shape[0]), s1)
 
@@ -570,13 +583,12 @@ def test(model: Model,
 
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
-        elliptical_llr=use_elliptical_llr,   # ✅ 注意：你原代码这里叫 elliptical_llr
+        elliptical_llr=use_elliptical_llr,
         temp_grid=temp_grid,
         bitwidth=bitwidth,
         return_artifacts=return_artifacts
     )
 
-    # 你原代码用的是 comm2.evaluate_hd_and_sd（保持一致）
     res = comm2.evaluate_hd_and_sd(
         y_1d, x_1d,
         L=L if L is not None else 16,
@@ -599,19 +611,41 @@ def test(model: Model,
         'd4_dims': d4_dims
     })
 
+    # ---------- 6.5) ✅ 注入动作标量到 res['SD'] ----------
+    if inject_action_to_sd:
+        A_blk = np.nan
+        A_w   = np.nan
+        slip  = np.nan
+
+        if new_state is not None:
+            _, framefoeaf = _find_framefoeaf(new_state)
+            # 期望 framefoeaf = (phi_last, af_step, af_stats, A_act_blk_std, A_act_w_std, slip_cnt)
+            try:
+                if isinstance(framefoeaf, tuple) and len(framefoeaf) >= 6:
+                    A_blk = float(np.asarray(framefoeaf[3]))
+                    A_w   = float(np.asarray(framefoeaf[4]))
+                    slip  = float(np.asarray(framefoeaf[5]))
+            except Exception:
+                pass
+
+        res['SD'].update({
+            "FOE_A_act_blk_std_rad": A_blk,
+            "FOE_A_act_w_std_rad":   A_w,
+            "FOE_slip_act_cnt":      slip
+        })
+
     # ---------- 7) 返回 ----------
     if not return_artifacts:
         return res, z
 
     artifacts = {
-        "module_state": new_state,   # ✅ mutable collections（含 af_state/...）
+        "module_state": new_state,
         "eval_range": eval_range,
         "slice": (int(s0), int(s1)),
         "align_start": int(z.t.start),
         "align_stop": int(z.t.stop),
     }
     return res, z, artifacts
-
 
 
 
