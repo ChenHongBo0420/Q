@@ -474,13 +474,17 @@ def test(model: Model,
          decoder=None,
          return_artifacts: bool = False):
     """
+    ✅ 兼容两种 apply 返回：
+      - out = z
+      - out = (z, new_state)  (当 mutable=['af_state'] 时)
+
     return_artifacts=False: return (res, z)
     return_artifacts=True : return (res, z, artifacts)
         artifacts 至少包含：
-          - artifacts["module_state"] : module.apply 的 mutable collections（含 af_state/.../framefoeaf）
+          - artifacts["module_state"] : apply 的 mutable collections（含 af_state/framefoeaf）
     """
 
-    # —— 准备 variables —— #
+    # -------- 0) 准备 variables --------
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
 
@@ -494,30 +498,47 @@ def test(model: Model,
         **state
     }
 
-    # —— 前向（是否取 mutable）—— #
+    # -------- 1) 前向：只有 return_artifacts 才请求 mutable --------
     if return_artifacts:
-        # ✅ 关键：显式声明 af_state 是 mutable，这样 apply 才会返回 (z, new_state)
+        # ✅ 关键：只有需要 artifacts 才打开 mutable，否则会变慢
         apply_fn = partial(model.module.apply, mutable=['af_state'])
-        z, new_state = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
+        out = jit(apply_fn, backend='cpu')(variables, core.Signal(data.y))
     else:
-        z = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
-        new_state = None
+        out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
 
-    # —— 取对齐区间，并做 canonical 缩放 —— #
+    # ✅ 兼容：out 可能是 z，也可能是 (z, new_state)
+    if isinstance(out, tuple):
+        z, new_state = out
+    else:
+        z, new_state = out, None
+
+    # -------- 2) 取对齐区间 + eval_range 裁剪 --------
     start, stop = z.t.start, z.t.stop
 
-    # 这里你原来只取了一个 polarization：[:,0]；保留你原逻辑
-    y = np.asarray(z.val[:, 0])
-    x = np.asarray(data.x)[start:stop, 0]
+    y_all = np.asarray(z.val)                  # equalized output
+    x_all = np.asarray(data.x)[start:stop]     # tx ref aligned
 
+    # 兼容：既可能是 [T]，也可能是 [T,C]
+    if y_all.ndim >= 2:
+        y = y_all[:, 0]
+    else:
+        y = y_all
+
+    if x_all.ndim >= 2:
+        x = x_all[:, 0]
+    else:
+        x = x_all
+
+    # eval_range 裁剪（你原逻辑）
     y = util.slice_signal(y, eval_range)
     x = util.slice_signal(x, eval_range)
 
+    # -------- 3) canonical scaling（与你原版本一致）--------
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
     y_1d = y * scale
     x_1d = x * scale
 
-    # —— SD/HD 评估 —— #
+    # -------- 4) SD/HD 评估（保持你原来的 evaluate_hd_and_sd 调用方式）--------
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         use_elliptical_llr=use_elliptical_llr,
@@ -525,6 +546,7 @@ def test(model: Model,
         bitwidth=bitwidth,
     )
 
+    # 这里假设你 SDMSE.py 里已有 evaluate_hd_and_sd
     res = evaluate_hd_and_sd(
         y_1d, x_1d,
         L=L if L is not None else 16,
@@ -532,7 +554,7 @@ def test(model: Model,
         sd_kwargs=sd_kwargs
     )
 
-    # —— 4D 聚合指标 —— #
+    # -------- 5) 4D 聚合指标（保持你原逻辑）--------
     m_per_dim = int(np.log2(L if L is not None else 16))
     gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
     gmi_4d    = gmi_dim * d4_dims
@@ -547,11 +569,12 @@ def test(model: Model,
         'd4_dims': d4_dims
     })
 
+    # -------- 6) 返回 --------
     if not return_artifacts:
         return res, z
 
     artifacts = {
-        "module_state": new_state,   # ✅ 这里面才是 mutable collections（含 af_state）
+        "module_state": new_state,   # ✅ 这里才是 mutable collections（含 af_state/framefoeaf）
         "eval_range": eval_range,
         "start": int(start),
         "stop": int(stop),
