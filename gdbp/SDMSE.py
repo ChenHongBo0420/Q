@@ -457,99 +457,133 @@ def train(model: Model,
 
         # 仍然按原来的格式 yield
         yield loss, cur_params, module_state
-import numpy as np
-from functools import partial
-from jax import jit
-from commplax import util, comm2
-from commplax.module import core
 
-def test(model,
-         params,
-         data,
-         eval_range=(300000, -20000),
-         L=16,
-         d4_dims=2,
-         pilot_frac=0.0,
-         use_oracle_noise=True,
-         use_elliptical_llr=True,
-         temp_grid=(0.75, 1.0, 1.25),
-         bitwidth=6,
+
+ 
+
+def test(model: Model,
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple = (300000, -20000),
+         L: int = 16,
+         d4_dims: int = 2,
+         pilot_frac: float = 0.0,
+         use_oracle_noise: bool = True,
+         use_elliptical_llr: bool = True,
+         temp_grid: tuple = (0.75, 1.0, 1.25),
+         bitwidth: int = 6,
          decoder=None,
-         return_artifacts=False):
+         return_artifacts: bool = False,
+         # ===== NEW (optional) =====
+         return_state: bool = False,
+         inject_action_metrics: bool = True):
     """
-    ✅ 原口径：
-      - 前向：model.module.apply(variables, core.Signal(data.y))
-      - 对齐：x_ref = data.x[z.t.start:z.t.stop]
-      - canonical scaling：comm2.qamscale(L)
-      - eval_range：手写 slice（支持 s1 为负）
-      - 聚合：reshape(-1) 做 1D 评估：comm2.evaluate_hd_and_sd
-      - 4D 聚合：GMI_dim * d4_dims
+    返回：
+      - 默认：res, z
+      - return_state=True：res, z, updated_state
 
-    ✅ 关键兼容：
-      - apply 可能返回：
-          A) Signal
-          B) (Signal, new_state)
-        其中 Signal 可能是 NamedTuple，本身也是 tuple → 不能用 isinstance(out, tuple) 直接拆
+    兼容增强：
+      - 若传入 params 是空 dict/空 FrozenDict：自动回退到 model.initvar[0]，避免 ScopeCollectionNotFound
+      - 尝试从 updated_state['af_state'][...]['framefoeaf'] 的 tuple 里抽“动作强度”并写入 res['SD']
     """
 
-    # ---------- 0) variables ----------
+    import numpy as _np
+
+    # --------------------------
+    # 0) helpers
+    # --------------------------
+    def _is_empty_params(p):
+        # 兼容 dict / FrozenDict：只要“看起来没有任何 key”，就认为是空 params
+        try:
+            if p is None:
+                return True
+            # FrozenDict/dict 都支持 keys()
+            return len(list(p.keys())) == 0
+        except Exception:
+            # 万一是别的 pytree 类型，尽量别误伤
+            return False
+
+    def _walk_collect(obj, prefix=()):
+        """把 pytree 里所有叶子收集成 (path_tuple, leaf) 列表（轻量，不依赖 flax.traverse_util）"""
+        out = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                out.extend(_walk_collect(v, prefix + (str(k),)))
+        else:
+            # flax FrozenDict 也当 dict 处理
+            try:
+                import flax
+                if isinstance(obj, flax.core.FrozenDict):
+                    for k, v in dict(obj).items():
+                        out.extend(_walk_collect(v, prefix + (str(k),)))
+                else:
+                    out.append((prefix, obj))
+            except Exception:
+                out.append((prefix, obj))
+        return out
+
+    def _extract_framefoeaf_tuple(state_tree):
+        """
+        在 updated_state 里找 path 末尾包含 ('af_state', ..., 'framefoeaf') 的那个叶子。
+        你 core.mimofoeaf 里是：
+            scope.variable('af_state', 'framefoeaf', ...)
+        """
+        leaves = _walk_collect(state_tree, prefix=())
+        cand = []
+        for path, leaf in leaves:
+            p = "/".join(path).lower()
+            if ("af_state" in p) and ("framefoeaf" in p):
+                cand.append((path, leaf))
+        if not cand:
+            return None
+        # 如果有多个，优先选最深的（更具体的那条）
+        cand.sort(key=lambda x: len(x[0]), reverse=True)
+        return cand[0][1]
+
+    def _safe_float(x):
+        try:
+            return float(_np.asarray(x))
+        except Exception:
+            return _np.nan
+
+    # --------------------------
+    # 1) forward (get z + updated_state)
+    # --------------------------
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
-    if params is None:
+
+    # 关键：空 params -> fallback，修你遇到的 ScopeCollectionNotFound
+    if _is_empty_params(params):
         params = model.initvar[0]
 
-    variables = {
+    z, updated_state = jit(model.module.apply, backend='cpu')({
         'params': util.dict_merge(params, sparams),
-        'aux_inputs': aux,
-        'const': const,
-        **state
-    }
+        'aux_inputs': aux, 'const': const, **state
+    }, core.Signal(data.y))
 
-    # ---------- 1) forward ----------
-    out = jit(model.module.apply, backend='cpu')(variables, core.Signal(data.y))
+    # --------------------------
+    # 2) align + canonical scale
+    # --------------------------
+    x_ref = data.x[z.t.start:z.t.stop]
+    scale = comm2.qamscale(L) if L is not None else _np.sqrt(10.0)
+    y_eq  = _np.asarray(z.val) * scale
+    x_ref = _np.asarray(x_ref) * scale
 
-    # ---------- 2) robust unpack ----------
-    z = None
-    new_state = None
-
-    # Case A: out 本身就是 Signal（有 val/t）
-    if hasattr(out, "val") and hasattr(out, "t"):
-        z = out
-        new_state = None
-
-    # Case B: out 是 (Signal, state)
-    elif isinstance(out, (tuple, list)) and len(out) == 2 and hasattr(out[0], "val") and hasattr(out[0], "t"):
-        z = out[0]
-        new_state = out[1]
-
-    else:
-        raise TypeError(
-            f"Unexpected apply output type: {type(out)}. "
-            f"Got out={out} (maybe pytree). Expected Signal or (Signal, state)."
-        )
-
-    # ---------- 3) align + canonical scaling ----------
-    x_ref = np.asarray(data.x)[z.t.start:z.t.stop]
-    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
-    y_eq  = np.asarray(z.val) * scale
-    x_ref = np.asarray(x_ref) * scale
-
-    # ---------- 4) eval_range slice ----------
+    # eval_range slice
     s0, s1 = eval_range
-    s0 = 0 if s0 is None else int(s0)
-    s1 = y_eq.shape[0] if s1 is None else int(s1)
-    if s1 <= 0:
-        s1 = y_eq.shape[0] + s1
+    s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
     s0 = max(0, s0)
-    s1 = min(int(y_eq.shape[0]), s1)
-
-    y_eq  = y_eq[s0:s1]
+    s1 = min(y_eq.shape[0], s1)
+    y_eq = y_eq[s0:s1]
     x_ref = x_ref[s0:s1]
 
-    # ---------- 5) flatten to 1D ----------
+    # flatten to 1D for HD/SD
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
+    # --------------------------
+    # 3) HD + SD
+    # --------------------------
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         elliptical_llr=use_elliptical_llr,
@@ -557,7 +591,6 @@ def test(model,
         bitwidth=bitwidth,
         return_artifacts=return_artifacts
     )
-
     res = comm2.evaluate_hd_and_sd(
         y_1d, x_1d,
         L=L if L is not None else 16,
@@ -565,19 +598,9 @@ def test(model,
         sd_kwargs=sd_kwargs
     )
 
-    # ---------- 6) 补上你们常看的 MSE（避免 NaN） ----------
-    mse_raw = float(np.mean(np.abs(y_1d - x_1d) ** 2))
-    # “qspace / 去公共相位” MSE
-    zc = np.vdot(y_1d, x_1d)
-    p  = zc / (np.abs(zc) + 1e-12)
-    y_aligned = y_1d * np.conj(p)
-    mse_qsp = float(np.mean(np.abs(y_aligned - x_1d) ** 2))
-    res["SD"]["MSE_raw"] = mse_raw
-    res["SD"]["MSE_qspace"] = mse_qsp
-
-    # ---------- 7) 4D aggregation ----------
-    m_per_dim = int(np.log2(L if L is not None else 16))
-    gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
+    # 4D aggregation
+    m_per_dim = int(_np.log2(L if L is not None else 16))
+    gmi_dim   = float(res['SD'].get('GMI_bits_per_dim', _np.nan))
     gmi_4d    = gmi_dim * d4_dims
     ngmi_4d   = gmi_4d / (m_per_dim * d4_dims)
     air_4d    = gmi_4d * (1.0 - pilot_frac)
@@ -590,16 +613,47 @@ def test(model,
         'd4_dims': d4_dims
     })
 
-    if not return_artifacts:
-        return res, z
+    # 如果 evaluate_hd_and_sd 没给 MSE，我们补上（按你 test 口径：scale+eval_range 后的 y_eq/x_ref）
+    if ('MSE_raw' not in res['SD']) or ('MSE_qspace' not in res['SD']):
+        eps = 1e-8
+        mse_raw = float(_np.mean(_np.abs(y_1d - x_1d) ** 2))
+        zc = _np.vdot(y_1d, x_1d)
+        p = zc / (abs(zc) + eps)
+        y_aligned = y_1d * _np.conj(p)
+        mse_qsp = float(_np.mean(_np.abs(y_aligned - x_1d) ** 2))
+        res['SD']['MSE_raw'] = mse_raw
+        res['SD']['MSE_qspace'] = mse_qsp
 
-    artifacts = {
-        "module_state": new_state,   # 这里如果 commplax layer 配了 mutable，就能拿到 af_state
-        "align": (int(z.t.start), int(z.t.stop)),
-        "slice": (int(s0), int(s1)),
-        "eval_range": eval_range,
-    }
-    return res, z, artifacts
+    # --------------------------
+    # 4) (NEW) inject “action strength” from updated_state
+    # --------------------------
+    if inject_action_metrics:
+        # 你在 core.mimofoeaf 里如果把动作量写进了 framefoeaf 的 tuple，
+        # 这里就能直接取出来并塞进 res['SD']。
+        t = _extract_framefoeaf_tuple(updated_state)
+
+        # 兼容两种 state 形态：
+        #   old: (phi_last, af_step, af_stats)
+        #   new: (phi_last, af_step, af_stats, act_rms, act_std, act_mean_abs, ...)
+        if isinstance(t, tuple) and (len(t) >= 3):
+            res['SD']['FOE_phi_last_rad'] = _safe_float(t[0])
+            res['SD']['FOE_af_step'] = _safe_float(t[1])
+
+            # 如果你 core 里加了动作强度（推荐你用：act_rms / act_mean_abs）
+            if len(t) >= 4:
+                res['SD']['FOE_action_rms'] = _safe_float(t[3])
+            if len(t) >= 5:
+                res['SD']['FOE_action_std'] = _safe_float(t[4])
+            if len(t) >= 6:
+                res['SD']['FOE_action_mean_abs'] = _safe_float(t[5])
+
+            # 你要是还塞了别的统计量，也可以继续往后加
+            # if len(t) >= 7: res['SD']['FOE_xxx'] = _safe_float(t[6])
+
+    if return_state:
+        return res, z, updated_state
+    return res, z
+
 
 
 
