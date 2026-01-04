@@ -1,4 +1,4 @@
-# MSE problem for Q vs Loss
+# Only mixed by the SNR loss vs Q
 from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
@@ -17,88 +17,87 @@ from jax.scipy.stats import norm
 from jax import jit, lax
 from typing import Tuple
 import matplotlib.pyplot as plt
+
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
 
-def make_base_module(steps: int = 3,
-                        dtaps: int = 261,
-                        ntaps: int = 41,
-                        rtaps: int = 61,
-                        init_fn: tuple = (core.delta, core.gauss),
-                        w0=0.,
-                        mode: str = 'train',
-                        # ===== NEW: FOE/CPE loop knobs =====
-                        framesize: int = 100,
-                        foe_strength: float = 1.0,
-                        foekwargs: dict | None = None,
-                        # ===== NEW: DDLMS step sizes =====
-                        mu_h: float | None = None,
-                        mu_f: float | None = None,
-                        mu_s: float | None = None,
-                        mu_b: float | None = None,
-                        # allow user override additional mimokwargs
-                        mimokwargs: dict | None = None):
-    """
-    与你原 make_base_module 结构完全一致，只是：
-      1) MIMOFOEAf 支持 framesize / foe_strength / foekwargs
-      2) MIMOAF(DDLMS) 支持 mu_h/mu_f/... 并映射到 ddlms 的 lr_w/lr_f/lr_s/lr_b
-    """
+# ========================
+# 1) Base module (SOTANN2)
+# ========================
 
-    # ---- keep your original train/test policy ----
+def make_base_module(steps: int = 3,
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0=0.,
+                     mode: str = 'train'):
+
+    _assert_taps(dtaps, ntaps, rtaps)
+
+    d_init, n_init = init_fn
+
     if mode == 'train':
         mimo_train = True
     elif mode == 'test':
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
-        raise ValueError(f'invalid mode {mode}')
+        raise ValueError('invalid mode %s' % mode)
 
-    d_init, n_init = init_fn
-    if foekwargs is None:
-        foekwargs = {}
-
-    # ---- build mimokwargs for DDLMS ----
-    # DDLMS 的真实参数名：lr_w/lr_f/lr_s/lr_b（不是 lr）
-    mk = {} if mimokwargs is None else dict(mimokwargs)
-    if mu_h is not None:
-        mk["lr_w"] = float(mu_h)
-    if mu_f is not None:
-        mk["lr_f"] = float(mu_f)
-    if mu_s is not None:
-        mk["lr_s"] = float(mu_s)
-    if mu_b is not None:
-        mk["lr_b"] = float(mu_b)
-
-    base = layer.Serial(
+    # 分支 1：FDBP 串联支路
+    fdbp_series = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
                    d_init=d_init,
-                   n_init=n_init),
+                   n_init=n_init,
+                   name='fdbp1'),
         layer.BatchPowerNorm(mode=mode),
-
-        # ===== FOE/CPE + MIMO-for-FOE =====
-        # commplax.module.core.mimofoeaf 的签名里有 framesize/foe_strength/foekwargs :contentReference[oaicite:3]{index=3}
-        # layer.MIMOFOEAf(name='FOEAf',
-        #                 w0=w0,
-        #                 train=mimo_train,
-        #                 preslicer=core.conv1d_slicer(rtaps),
-        #                 foekwargs=foekwargs,
-        #                 framesize=int(framesize),
-        #                 foe_strength=float(foe_strength)),
-
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-
-        # ===== final adaptive MIMO (DDLMS) =====
-        # mimoaf 会把 mimokwargs 喂给 mimofn(train=..., **mimokwargs) :contentReference[oaicite:4]{index=4}
-        layer.MIMOAF(train=mimo_train, mimokwargs=mk),
+        layer.MIMOFOEAf(name='FOEAf1',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='fdbp_series'
     )
+
+    # 分支 2：FDBP1（带 XPM 近似）串联支路
+    serial_branch = layer.Serial(
+        layer.FDBP1(steps=steps,
+                    dtaps=dtaps,
+                    ntaps=ntaps,
+                    d_init=d_init,
+                    n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf',
+                        w0=w0,
+                        train=mimo_train,
+                        preslicer=core.conv1d_slicer(rtaps),
+                        foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train),
+        name='serial_branch'
+    )
+
+    # FanOut → Parallel(FDBP, FDBP1) → FanInMean
+    base = layer.Serial(
+        layer.FanOut(num=2),
+        layer.Parallel(
+            fdbp_series,
+            serial_branch
+        ),
+        layer.FanInMean()
+    )
+
     return base
-  
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
-    ''' we force odd taps to ease coding '''
+    """ we force odd taps to ease coding """
     assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
     assert ntaps % sps, f'ntaps must be odd number, got {ntaps} instead'
     assert rtaps % sps, f'rtaps must be odd number, got {rtaps} instead'
@@ -107,16 +106,9 @@ def _assert_taps(dtaps, ntaps, rtaps, sps=2):
 def fdbp_init(a: dict,
               xi: float = 1.1,
               steps: Optional[int] = None):
-    '''
-        initializer for the base module
-
-        Args:
-            xi: NLC scaling factor
-            steps: GDBP steps, used to calculate the theoretical profiles of D- and N-filters
-
-        Returns:
-            a pair of functions to initialize D- and N-filters
-    '''
+    """
+    initializer for the base module (D/N filter profiles)
+    """
 
     def d_init(key, shape, dtype=jnp.complex64):
         dtaps = shape[0]
@@ -125,7 +117,7 @@ def fdbp_init(a: dict,
             a['distance'] / a['spans'],
             a['spans'],
             dtaps,
-            a['lpdbm'] - 3,  # rescale as input power which has been norm to 2 in dataloader
+            a['lpdbm'] - 3,
             virtual_spans=steps)
         return d0[0, :, 0]
 
@@ -136,7 +128,7 @@ def fdbp_init(a: dict,
             a['distance'] / a['spans'],
             a['spans'],
             dtaps,
-            a['lpdbm'] - 3,  # rescale
+            a['lpdbm'] - 3,
             virtual_spans=steps)
 
         return xi * n0[0, 0, 0] * core.gauss(key, shape, dtype)
@@ -148,9 +140,12 @@ def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps : int = 2,
+               sps: int = 2,
                name='Model'):
-    
+    """
+    初始化模型：得到 module, (params, state, aux, const, sparams), overlaps
+    """
+
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
@@ -163,22 +158,48 @@ def model_init(data: gdat.Input,
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
-
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
-  
 
 
 def _estimate_kmean(y, x, blk=16384):
-    kap=[]
-    for i in range(0, len(x)-blk, blk):
-        kap.append(np.abs(np.vdot(y[i:i+blk], x[i:i+blk]) /
-                          np.vdot(x[i:i+blk], x[i:i+blk])))
+    kap = []
+    for i in range(0, len(x) - blk, blk):
+        kap.append(np.abs(np.vdot(y[i:i + blk], x[i:i + blk]) /
+                          np.vdot(x[i:i + blk], x[i:i + blk])))
     return float(np.mean(kap))
 
 
+# ============================================
+# 2) Batch-level 商空间对齐: 仅去除全局相位
+# ============================================
+
+def batch_phase_align(yhat: jnp.ndarray,
+                      x_ref: jnp.ndarray,
+                      eps: float = 1e-8) -> jnp.ndarray:
+    """
+    在一个 batch 上做 U(1) 商空间对齐：
+      - 展平所有样本 / 维度，估计一个全局相位 φ*
+      - 返回 e^{-j φ*} ⋅ yhat（与 x_ref 对齐）
+    注意：φ* 本身不回传梯度（stop_gradient），
+         避免网络学成退化“自己转相位抵消损失”的 trivial 解。
+    """
+    yh = yhat.reshape(-1)
+    xr = x_ref.reshape(-1)
+
+    zc = jnp.vdot(yh, xr)
+    p = zc / (jnp.abs(zc) + eps)    # e^{j φ*}
+    p = lax.stop_gradient(p)
+
+    y_aligned = yhat * jnp.conj(p)  # e^{-j φ*} yhat
+    return y_aligned
+
+
+# ============================
+# 3) Loss: SI-SNR in quotient space + EVM + tiny regularizer
+# ============================
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -187,15 +208,68 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+            sparams: Dict,
+            beta_evm: float = 0.1,
+            lambda_kl: float = 1e-4):
+    """
+    训练用 loss：
+      - 先做 batch 商空间相位对齐；
+      - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
+      - 加一点 EVM（更接近 Q²）作为 secondary term；
+      - 再加非常轻微的能量正则（信息瓶颈风格）。
 
-    return mse_loss, updated_state
-              
+    这里故意不用 MSE 当主 loss，而是 SNR-style：
+      loss_main = -SNR_dB + 0.1*EVM
+    """
+
+    params_net = util.dict_merge(params, sparams)
+    z_out, state_new = module.apply(
+        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+        core.Signal(y)
+    )
+
+    # 对齐时间区间
+    x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
+    yhat = z_out.val                        # [T,...]
+
+    # 1) 商空间相位对齐：只去除全局 φ*
+    y_aligned = batch_phase_align(yhat, x_ref)
+
+    # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
+    t = x_ref.reshape(-1)
+    e = y_aligned.reshape(-1)
+
+    num = jnp.vdot(t, e)
+    den = jnp.vdot(t, t) + 1e-8
+    alpha = num / den                      # 复数缩放
+    s_hat = alpha * t
+    err = e - s_hat
+
+    s_energy = jnp.real(jnp.vdot(s_hat, s_hat)) + 1e-8
+    n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
+    snr_db = 10.0 * jnp.log10(s_energy / n_energy)
+
+    # 我们最小化 loss → 用负 SNR
+    snr_loss = -snr_db
+
+    # 3) EVM（正规化到发射能量）
+    evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
+    evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
+    evm = evm_num / evm_den
+
+    # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
+    kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
+
+    loss_main = snr_loss + beta_evm * evm
+    total_loss = loss_main + lambda_kl * kl_ib
+
+    return total_loss, state_new
+
+
+# ============================
+# 4) update_step / train
+# ============================
+
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
@@ -207,55 +281,32 @@ def update_step(module: layer.Layer,
                 aux: Dict,
                 const: Dict,
                 sparams: Dict):
-    ''' single backprop step
-
-        Args:
-            model: model returned by `model_init`
-            opt: optimizer
-            i: iteration counter
-            opt_state: optimizer state
-            module_state: module state
-            y: transmitted waveforms
-            x: aligned sent symbols
-            aux: auxiliary input
-            const: contants (internal info generated by model)
-            sparams: static parameters
-
-        Return:
-            loss, updated module state
-    '''
-
+    """
+    单步反向传播
+    """
     params = opt.params_fn(opt_state)
     (loss, module_state), grads = value_and_grad(
-        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-                                          aux, const, sparams)
+        loss_fn, argnums=1, has_aux=True
+    )(module, params, module_state, y, x, aux, const, sparams)
+
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
-                  
-                        
+
+
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
                     overlaps: int,
                     sps: int = 2):
-    ''' generate overlapped batch input for training
-
-        Args:
-            ds: dataset
-            batchsize: batch size in symbol unit
-            overlaps: overlaps in symbol unit
-            sps: samples per symbol
-
-        Returns:
-            number of symbols,
-            zipped batched triplet input: (recv, sent, fomul)
-    '''
-
+    """
+    生成带 overlap 的训练 batch
+    """
     flen = batchsize + overlaps
     fstep = batchsize
     ds_y = op.frame_gen(ds.y, flen * sps, fstep * sps)
     ds_x = op.frame_gen(ds.x, flen, fstep)
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
+
 
 def train(model: Model,
           data: gdat.Input,
@@ -268,12 +319,29 @@ def train(model: Model,
     """
     训练 1 epoch，yield (loss, params, module_state) —— 保持原接口不变。
 
-    diag 开启后：每隔 eval_every 跑一次 test()，只记录 Q/BER + MSE_raw/MSE_qspace
-    + 相位块级稳定性指标（phi_rms / std(dphi_blk) / slip_count），以及可选的 MIMO taps 漂移。
+    额外功能（可选）：
+    传入 diag=dict(...) 后，会在训练过程中每隔 eval_every 迭代跑一次 test()
+    并把诊断指标记录到 train.diag_logs（list[dict]）里。
+
+    diag 支持的键（都可选，没给就用默认）：
+      - model_eval : Model   （必填，想算诊断就要给 test 用的 model）
+      - data_eval  : gdat.Input（必填）
+      - eval_every : int，默认 200
+      - eval_range : tuple，默认 (300000, -20000)（同 test()）
+      - L          : int，默认 16
+      - d4_dims    : int，默认 2
+      - pilot_frac : float，默认 0.0
+      - use_oracle_noise : bool，默认 True
+      - use_elliptical_llr : bool，默认 True
+      - temp_grid  : tuple，默认 (0.75, 1.0, 1.25)
+      - bitwidth   : int，默认 6
+      - decoder    : decoder，默认 None
+      - cpe_block_len : int，默认 2048 （用于 phi_blk 指标）
+      - callback   : callable(rec: dict) -> None（每次记录后回调）
     """
 
     # -------- 0) 准备诊断配置（不影响原训练流程）--------
-    train.diag_logs = []
+    train.diag_logs = []  # 外部训练完可直接访问：gb.train.diag_logs
     if diag is not None:
         if ('model_eval' not in diag) or ('data_eval' not in diag):
             raise ValueError("diag 开启时必须提供 diag['model_eval'] 和 diag['data_eval']")
@@ -284,10 +352,7 @@ def train(model: Model,
         cpe_block_len = int(diag.get('cpe_block_len', 2048))
         cb = diag.get('callback', None)
 
-        # 可选：提取 MIMO taps 的函数（你自己提供，返回一个 ndarray/DeviceArray）
-        # 例子：diag['taps_getter'] = lambda params, module_state: params['mimo']['W']
-        taps_getter = diag.get('taps_getter', None)
-
+        # test() 的参数（尽量跟你现在脚本一致）
         test_kwargs = dict(
             eval_range=diag.get('eval_range', (300000, -20000)),
             L=int(diag.get('L', 16)),
@@ -301,15 +366,9 @@ def train(model: Model,
             return_artifacts=False
         )
 
+        # 训练内用的小工具：从 test 输出的 z / data_eval 估计块级残余相位
         def _phi_blk_metrics_from_z(z_sig, data_eval, L, eval_range, block_len):
-            """
-            返回：
-              phi_rms         : 去线性趋势后的 block-phase 残余 RMS
-              phi_slope       : block-phase 线性斜率（频偏/漂移 proxy）
-              dphi_std        : std(Δphi_blk) —— block-to-block 更新量 RMS（稳定性）
-              slip_count      : slip 计数（以 raw 相位差跨越 π 作为 wrap/slip proxy）
-              n_blk           : block 数
-            """
+            # 复制 test() 中的 canonical scaling + eval_range 裁剪口径 :contentReference[oaicite:2]{index=2}
             x_ref = _np.asarray(data_eval.x[z_sig.t.start:z_sig.t.stop])
             scale = comm2.qamscale(L) if L is not None else _np.sqrt(10.0)
             y_eq = _np.asarray(z_sig.val) * scale
@@ -326,36 +385,21 @@ def train(model: Model,
 
             n_blk = T // block_len
             if n_blk < 2:
-                return _np.nan, _np.nan, _np.nan, 0, int(n_blk)
+                return _np.nan, _np.nan, int(n_blk)
 
-            # 1) 每块一个“原始相位”phi_raw[b] = angle(<y_b, x_b>)
-            phi_raw = _np.empty((n_blk,), dtype=_np.float64)
+            phis = []
             for b in range(n_blk):
                 ys = y_eq[b * block_len:(b + 1) * block_len].reshape(-1)
                 xs = x_ref[b * block_len:(b + 1) * block_len].reshape(-1)
                 zc = _np.vdot(ys, xs)
-                phi_raw[b] = _np.angle(zc)
+                phis.append(_np.angle(zc))
+            phis = _np.unwrap(_np.asarray(phis))
 
-            # 2) slip proxy：看 raw 相位差是否跨越 π（wrap）
-            dphi_raw = _np.diff(phi_raw)
-            slip_count = int(_np.sum(_np.abs(dphi_raw) > _np.pi))
-
-            # 3) unwrap 后做线性拟合，得到 residual RMS
-            phi = _np.unwrap(phi_raw)
-            t = _np.arange(n_blk)
-            a, b0 = _np.polyfit(t, phi, 1)
-            res = phi - (a * t + b0)
-            phi_rms = float(_np.sqrt(_np.mean(res ** 2)))
-            phi_slope = float(a)
-
-            # 4) block-to-block 更新量 RMS：std(Δphi_blk)（用 unwrap 后的差分更合理）
-            dphi = _np.diff(phi)
-            dphi_std = float(_np.std(dphi))
-
-            return phi_rms, phi_slope, dphi_std, slip_count, int(n_blk)
-
-        # 用于计算 ||W|| 和 ||ΔW|| 的缓存
-        _prev_W = None
+            t = _np.arange(len(phis))
+            a, b0 = _np.polyfit(t, phis, 1)
+            res = phis - (a * t + b0)
+            rms = float(_np.sqrt(_np.mean(res ** 2)))
+            return rms, float(a), int(n_blk)
 
     # -------- 1) 原 train() 初始化（保持一致）--------
     params, module_state, aux, const, sparams = model.initvar
@@ -377,18 +421,21 @@ def train(model: Model,
         )
         cur_params = opt.params_fn(opt_state)
 
-        # -------- 3) 可选：周期性诊断（只记 Q/BER + 跟踪稳定性）--------
+        # -------- 3) 可选：周期性诊断（不改变 yield 输出）--------
         if diag is not None and (i % eval_every == 0):
             res, z = test(model_eval, cur_params, data_eval, **test_kwargs)
             sd = res.get("SD", {})
             hd = res.get("HD", None)
 
-            # test() 里已有的两种 MSE 诊断
+            # 从 test() 里直接取（你已经算好的）MSE_raw / MSE_qspace :contentReference[oaicite:3]{index=3}
             mse_raw = float(sd.get("MSE_raw", _np.nan))
             mse_qspace = float(sd.get("MSE_qspace", _np.nan))
+            ngmi_4d = float(sd.get("NGMI_4D", _np.nan))
+            gmi_4d = float(sd.get("GMI_bits_per_4D", _np.nan))
+            air_4d = float(sd.get("AIR_bits_per_4D", _np.nan))
 
-            # 相位块级稳定性指标
-            phi_rms, phi_slope, dphi_std, slip_count, n_blk = _phi_blk_metrics_from_z(
+            # 额外：残余相位时变（块级）
+            phi_rms, phi_slope, n_blk = _phi_blk_metrics_from_z(
                 z_sig=z,
                 data_eval=data_eval,
                 L=test_kwargs["L"],
@@ -396,7 +443,7 @@ def train(model: Model,
                 block_len=cpe_block_len
             )
 
-            # 只取 HD 的 Q/BER
+            # HD 总指标（可选）
             qsq = _np.nan
             ber = _np.nan
             try:
@@ -406,78 +453,55 @@ def train(model: Model,
             except Exception:
                 pass
 
-            # 可选：MIMO taps 漂移（需要你提供 taps_getter）
-            W_norm = _np.nan
-            dW_norm = _np.nan
-            if taps_getter is not None:
-                try:
-                    W = taps_getter(cur_params, module_state)
-                    W = _np.asarray(W)
-                    W_norm = float(_np.linalg.norm(W.reshape(-1)))
-                    if _prev_W is not None:
-                        dW_norm = float(_np.linalg.norm((W - _prev_W).reshape(-1)))
-                    _prev_W = W
-                except Exception:
-                    # 不让诊断影响训练
-                    pass
-
             rec = dict(
                 it=int(i),
                 loss=float(_np.asarray(loss)),
-
-                # 最终判决性能（你要的主线）
                 Q_dB=qsq,
                 BER=ber,
-
-                # 几何误差诊断
+                NGMI_4D=ngmi_4d,
+                GMI_b_per_4D=gmi_4d,
+                AIR_b_per_4D=air_4d,
                 MSE_raw=mse_raw,
                 MSE_qspace=mse_qspace,
-
-                # 跟踪稳定性诊断（你点名要的三项）
                 phi_blk_residual_rms_rad=phi_rms,
                 phi_blk_slope_rad_per_block=phi_slope,
-                phi_blk_dphi_std_rad=dphi_std,      # std(Δphi_blk)
-                phi_blk_slip_count=slip_count,      # wrap/slip proxy
-
                 cpe_n_blocks=n_blk,
                 cpe_block_len=int(cpe_block_len),
-
-                # 可选：MIMO taps 漂移（如果 taps_getter 给了）
-                mimo_W_norm=W_norm,
-                mimo_dW_norm=dW_norm,
             )
             train.diag_logs.append(rec)
             if cb is not None:
                 cb(rec)
 
-        # 仍然按原来的格式 yield
+        # 仍然按原来的格式 yield —— 外部脚本无需改任何一行 :contentReference[oaicite:4]{index=4}
         yield loss, cur_params, module_state
 
 
-                       
+# ============================
+# 5) test：HD + SD 统一评估 + MSE_raw/MSE_qspace
+# ============================
+
 def test(model: Model,
-            params: Dict,
-            data: gdat.Input,
-            eval_range: tuple = (300000, -20000),
-            L: int = 16,                 # 星座大小（每复维）：16/64/256...
-            d4_dims: int = 2,            # 四维聚合时的复维数（PDM=2）
-            pilot_frac: float = 0.0,     # 导频占比（算 AIR 用）
-            use_oracle_noise: bool = True,
-            use_elliptical_llr: bool = True,
-            temp_grid: tuple = (0.75, 1.0, 1.25),
-            bitwidth: int = 6,
-            decoder=None,                # 可传入你的 ldpc_decoder_adapter；没有就 None
-            return_artifacts: bool = False):
+         params: Dict,
+         data: gdat.Input,
+         eval_range: tuple = (300000, -20000),
+         L: int = 16,
+         d4_dims: int = 2,
+         pilot_frac: float = 0.0,
+         use_oracle_noise: bool = True,
+         use_elliptical_llr: bool = True,
+         temp_grid: tuple = (0.75, 1.0, 1.25),
+         bitwidth: int = 6,
+         decoder=None,
+         return_artifacts: bool = False):
     """
-    统一返回：
+    前向 + HD/SD 统一评估
       res = {
-        'HD':  DataFrame(only 'total' 行，含 BER/Q/SNR),
-        'SD':  dict(含 GMI/NGMI、4D 聚合、可选 post-FEC 与调参信息)
-      }, z = 等化后的信号对象
-    依赖：先把我给你的“精简版 SD 评估文件”放到你的工程并导入：
-      from sd_eval import evaluate_hd_and_sd, qamscale
+        'HD': DataFrame(only 'total' 行, 含 BER / Q / SNR),
+        'SD': dict(含 GMI / NGMI / AIR / temp / alpha 等,
+                   以及附加 MSE_raw / MSE_qspace)
+      }, z = 等化后的 Signal 对象
     """
-    # —— 前向 —— #
+
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
     if params is None:
@@ -488,23 +512,32 @@ def test(model: Model,
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
 
-    # —— 取对齐区间，并做 canonical 缩放（让 x_ref 变成标准 QAM 网格） —— #
+    # canonical 缩放，让 x_ref 落在标准 QAM 网格
     x_ref = data.x[z.t.start:z.t.stop]
-    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)  # 与你原先口径一致
-    y_eq  = z.val * scale
+    scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
+    y_eq = z.val * scale
     x_ref = x_ref * scale
 
-    # —— eval_range 裁剪（与原口径一致）—— #
+    # eval_range 裁剪
     s0, s1 = eval_range
     s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
     y_eq = y_eq[s0:s1]
     x_ref = x_ref[s0:s1]
 
-    # —— 将多复维拍平成 1D（把两极化当做同一分布的样本聚合，便于统一 LLR/GMI）—— #
+    # flatten 复维
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
-    # —— SD 评估（内部会：估噪→LLR→极性校→温度扫描→量化→（可选）软解码→GMI）—— #
+    # ==== 新增：MSE_raw / MSE_qspace 作为诊断量 ====
+    # raw MSE（含残余相位）
+    mse_raw = float(jnp.mean(jnp.abs(y_eq - x_ref) ** 2))
+
+    # 商空间 MSE（去掉 batch 全局相位）
+    y_q = batch_phase_align(jnp.asarray(y_eq), jnp.asarray(x_ref))
+    mse_qspace = float(jnp.mean(jnp.abs(y_q - jnp.asarray(x_ref)) ** 2))
+    # ===========================================
+
+    # SD 评估：估噪 → LLR → 温度扫描 → (可选)软解码 → GMI
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         elliptical_llr=use_elliptical_llr,
@@ -519,33 +552,40 @@ def test(model: Model,
         sd_kwargs=sd_kwargs
     )
 
-    # —— 4D 聚合指标（基于同一份 LLR 结果）—— #
+    # 4D 聚合指标
     m_per_dim = int(np.log2(L if L is not None else 16))
-    gmi_dim   = float(res['SD']['GMI_bits_per_dim'])
-    gmi_4d    = gmi_dim * d4_dims
-    ngmi_4d   = gmi_4d / (m_per_dim * d4_dims)
-    air_4d    = gmi_4d * (1.0 - pilot_frac)
+    gmi_dim = float(res['SD']['GMI_bits_per_dim'])
+    gmi_4d = gmi_dim * d4_dims
+    ngmi_4d = gmi_4d / (m_per_dim * d4_dims)
+    air_4d = gmi_4d * (1.0 - pilot_frac)
 
     res['SD'].update({
         'GMI_bits_per_4D': gmi_4d,
         'NGMI_4D': ngmi_4d,
         'AIR_bits_per_4D': air_4d,
         'pilot_frac': pilot_frac,
-        'd4_dims': d4_dims
+        'd4_dims': d4_dims,
+        # 把两种 MSE 一起挂在 SD 里方便你后处理
+        'MSE_raw': mse_raw,
+        'MSE_qspace': mse_qspace,
     })
 
     return res, z
 
 
+# ============================
+# 6) equalize_dataset（保持不变）
+# ============================
 
 def equalize_dataset(model_te, params, state_bundle, data):
     module_state, aux, const, sparams = state_bundle
-    z,_ = jax.jit(model_te.module.apply, backend='cpu')(
+    z, _ = jax.jit(model_te.module.apply, backend='cpu')(
         {'params': util.dict_merge(params, sparams),
          'aux_inputs': aux, 'const': const, **module_state},
         core.Signal(data.y))
 
     start, stop = z.t.start, z.t.stop
-    z_eq  = np.asarray(z.val[:,0])          # equalized
-    s_ref = np.asarray(data.x)[start:stop,0]   # 保持原尺度
+    z_eq = np.asarray(z.val[:, 0])       # equalized
+    s_ref = np.asarray(data.x)[start:stop, 0]  # 保持原尺度
     return z_eq, s_ref
+
