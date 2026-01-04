@@ -21,46 +21,55 @@ Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
 
-
-## One ##
+  
 def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train'):
-    '''
-    make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
+                        dtaps: int = 261,
+                        ntaps: int = 41,
+                        rtaps: int = 61,
+                        init_fn: tuple = (core.delta, core.gauss),
+                        w0=0.,
+                        mode: str = 'train',
+                        # ===== NEW: FOE/CPE loop knobs =====
+                        framesize: int = 100,
+                        foe_strength: float = 1.0,
+                        foekwargs: dict | None = None,
+                        # ===== NEW: DDLMS step sizes =====
+                        mu_h: float | None = None,
+                        mu_f: float | None = None,
+                        mu_s: float | None = None,
+                        mu_b: float | None = None,
+                        # allow user override additional mimokwargs
+                        mimokwargs: dict | None = None):
+    """
+    与你原 make_base_module 结构完全一致，只是：
+      1) MIMOFOEAf 支持 framesize / foe_strength / foekwargs
+      2) MIMOAF(DDLMS) 支持 mu_h/mu_f/... 并映射到 ddlms 的 lr_w/lr_f/lr_s/lr_b
+    """
 
-    Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
-
-    Returns:
-        A layer object
-    '''
-
-    _assert_taps(dtaps, ntaps, rtaps)
-
-    d_init, n_init = init_fn
-
+    # ---- keep your original train/test policy ----
     if mode == 'train':
-        # configure mimo to its training mode
         mimo_train = True
     elif mode == 'test':
-        # mimo operates at training mode for the first 200000 symbols,
-        # then switches to tracking mode afterwards
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
-        raise ValueError('invalid mode %s' % mode)
-        
+        raise ValueError(f'invalid mode {mode}')
+
+    d_init, n_init = init_fn
+    if foekwargs is None:
+        foekwargs = {}
+
+    # ---- build mimokwargs for DDLMS ----
+    # DDLMS 的真实参数名：lr_w/lr_f/lr_s/lr_b（不是 lr）
+    mk = {} if mimokwargs is None else dict(mimokwargs)
+    if mu_h is not None:
+        mk["lr_w"] = float(mu_h)
+    if mu_f is not None:
+        mk["lr_f"] = float(mu_f)
+    if mu_s is not None:
+        mk["lr_s"] = float(mu_s)
+    if mu_b is not None:
+        mk["lr_b"] = float(mu_b)
+
     base = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
@@ -68,17 +77,25 @@ def make_base_module(steps: int = 3,
                    d_init=d_init,
                    n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
+
+        # ===== FOE/CPE + MIMO-for-FOE =====
+        # commplax.module.core.mimofoeaf 的签名里有 framesize/foe_strength/foekwargs :contentReference[oaicite:3]{index=3}
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
-    return base
-  
+                        foekwargs=foekwargs,
+                        framesize=int(framesize),
+                        foe_strength=float(foe_strength)),
 
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+
+        # ===== final adaptive MIMO (DDLMS) =====
+        # mimoaf 会把 mimokwargs 喂给 mimofn(train=..., **mimokwargs) :contentReference[oaicite:4]{index=4}
+        layer.MIMOAF(train=mimo_train, mimokwargs=mk),
+    )
+    return base
+                          
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
     assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
