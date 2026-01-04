@@ -518,10 +518,6 @@ def train(model: Model,
         yield loss, cur_params, module_state
 
 
-# ============================
-# 5) test：HD + SD 统一评估 + MSE_raw/MSE_qspace
-# ============================
-
 def test(model: Model,
          params: Dict,
          data: gdat.Input,
@@ -554,13 +550,97 @@ def test(model: Model,
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
 
-    # canonical 缩放，让 x_ref 落在标准 QAM 网格
-    x_ref = data.x[z.t.start:z.t.stop]
+    # ----------------------------
+    # 1) canonical 缩放
+    # ----------------------------
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
-    y_eq = z.val * scale
-    x_ref = x_ref * scale
+    y_samp = z.val * scale  # 可能是“采样域/含overlap”的输出
+    x_all = data.x * scale  # 符号域
 
-    # eval_range 裁剪
+    t0 = int(z.t.start)
+    t1 = int(z.t.stop)
+
+    # ----------------------------
+    # 2) 自动选择 sps + 对齐方式
+    #    - mode="sym_t": t0/t1 是符号索引 → y 用 [t*sps]
+    #    - mode="samp_t": t0/t1 是采样索引 → x 用 [t/sps]
+    # ----------------------------
+    def _clip(a, lo, hi):
+        return max(lo, min(int(a), int(hi)))
+
+    def _slice_safe(arr, a, b):
+        n = int(arr.shape[0])
+        a = _clip(a, 0, n)
+        b = _clip(b, 0, n)
+        if b < a:
+            b = a
+        return arr[a:b]
+
+    Ty = int(y_samp.shape[0])
+    Tx = int(x_all.shape[0])
+
+    best = None  # (score, prefer, mode, sps, y_win, x_ref)
+    sps_candidates = range(1, 9)
+
+    for mode in ("sym_t", "samp_t"):
+        for sps in sps_candidates:
+            if mode == "sym_t":
+                # x_ref: 符号域窗口
+                x_ref = _slice_safe(x_all, t0, t1)
+                # y_win: 采样域窗口（用 sps 映射）
+                ys = t0 * sps
+                ye = t1 * sps
+                y_win = _slice_safe(y_samp, ys, ye)
+            else:
+                # y_win: 采样域窗口（直接用 t）
+                y_win = _slice_safe(y_samp, t0, t1)
+                # x_ref: 符号域窗口（用 sps 反映射）
+                xs = int(round(t0 / float(sps)))
+                xe = int(round(t1 / float(sps)))
+                x_ref = _slice_safe(x_all, xs, xe)
+
+            xlen = int(x_ref.shape[0])
+            ylen = int(y_win.shape[0])
+            if xlen == 0 or ylen == 0:
+                continue
+
+            # 期望 ylen ≈ xlen*sps
+            target = xlen * sps
+            rel_err = abs(ylen - target) / (target + 1e-9)
+
+            # 偏好：sym_t 且 sps=2（常见光纤系统）
+            prefer = 0
+            if mode == "sym_t":
+                prefer += 1
+            if sps == 2:
+                prefer += 1
+
+            score = (rel_err, -prefer)
+            if best is None or score < best[0]:
+                best = (score, prefer, mode, sps, y_win, x_ref)
+
+    if best is None:
+        # 兜底：按最常见的 sym_t + sps=2
+        sps = 2
+        x_ref = _slice_safe(x_all, t0, t1)
+        y_win = _slice_safe(y_samp, t0 * sps, t1 * sps)
+    else:
+        _, _, mode, sps, y_win, x_ref = best
+
+    # 极端防御：窗口裁空就退化成整段（避免后面 vdot/stack 报错）
+    if int(x_ref.shape[0]) == 0:
+        x_ref = x_all
+    if int(y_win.shape[0]) == 0:
+        y_win = y_samp
+
+    # ----------------------------
+    # 3) 采样域 → 符号域（自动选最佳 phase）并确保同长度
+    # ----------------------------
+    y_eq, x_ref, _best_phase = _downsample_best_phase(y_win, x_ref, sps=sps)
+
+    # ----------------------------
+    # 4) eval_range 裁剪（注意：此时 y_eq/x_ref 已经是“符号域”长度）
+    # ----------------------------
     s0, s1 = eval_range
     s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
     y_eq = y_eq[s0:s1]
@@ -570,14 +650,11 @@ def test(model: Model,
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
-    # ==== 新增：MSE_raw / MSE_qspace 作为诊断量 ====
-    # raw MSE（含残余相位）
+    # ==== 诊断量：MSE_raw / MSE_qspace ====
     mse_raw = float(jnp.mean(jnp.abs(y_eq - x_ref) ** 2))
-
-    # 商空间 MSE（去掉 batch 全局相位）
     y_q = batch_phase_align(jnp.asarray(y_eq), jnp.asarray(x_ref))
     mse_qspace = float(jnp.mean(jnp.abs(y_q - jnp.asarray(x_ref)) ** 2))
-    # ===========================================
+    # ====================================
 
     # SD 评估：估噪 → LLR → 温度扫描 → (可选)软解码 → GMI
     sd_kwargs = dict(
@@ -613,6 +690,7 @@ def test(model: Model,
     })
 
     return res, z
+
 
 
 # ============================
