@@ -74,7 +74,8 @@ def make_base_module(steps: int = 3,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        # layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+        # layer.MIMOAF(train=mimo_train)
+        )  
         
     return base
 
