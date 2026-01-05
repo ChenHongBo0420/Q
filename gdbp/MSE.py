@@ -155,70 +155,16 @@ def _estimate_kmean(y, x, blk=16384):
     return float(np.mean(kap))
 
 
-# ============================================
-# 2) Batch-level 商空间对齐: 仅去除全局相位
-# ============================================
-
-# ============================================
-# 2) Batch-level 商空间对齐 + 符号率对齐工具
-# ============================================
-
-def _infer_sps_from_shapes(yhat: jnp.ndarray, x: jnp.ndarray, default: int = 2) -> int:
-    """
-    通过 shape 推断 sps：
-      - x 是符号域帧，长度 flen
-      - yhat 是采样域帧，长度 flen*sps
-    """
-    Ty = int(yhat.shape[0])
-    Tx = int(x.shape[0])
-    if Tx <= 0:
-        return default
-    if Ty % Tx == 0:
-        sps = Ty // Tx
-        return int(max(1, sps))
-    return default
-
-
-def _downsample_best_phase(y_samples: jnp.ndarray,
-                           x_symbols: jnp.ndarray,
-                           sps: int) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    将采样域 y_samples 下采样到符号率，并在 phase=0..sps-1 中选相关性最大的相位。
-    返回: (y_sym, x_sym, best_phase)
-    """
-    sps = int(max(1, sps))
-    Ty = int(y_samples.shape[0])
-    Tx = int(x_symbols.shape[0])
-
-    # 每个 phase 下采样后的可用长度
-    cand_lens = [(Ty - p + sps - 1) // sps for p in range(sps)]
-    T = min([Tx] + cand_lens)
-
-    x_c = x_symbols[:T]
-    y_cands = [y_samples[p::sps][:T] for p in range(sps)]
-
-    # 用 |<y, x>| 做相位选择（只用于选 phase，不回传梯度也没问题）
-    scores = [jnp.abs(jnp.vdot(y.reshape(-1), x_c.reshape(-1))) for y in y_cands]
-    scores = jnp.stack(scores, axis=0)  # [sps]
-    best = jnp.argmax(scores)           # scalar
-
-    # 由于我们强制所有候选都裁到同一长度 T，所以可以 stack 后索引
-    y_stack = jnp.stack(y_cands, axis=0)  # [sps, T, ...]
-    y_best = y_stack[best]
-    return y_best, x_c, best
-
-
 def batch_phase_align(yhat: jnp.ndarray,
                       x_ref: jnp.ndarray,
                       eps: float = 1e-8) -> jnp.ndarray:
     """
-    在一个 batch 上做 U(1) 商空间对齐：只去除全局相位 φ*。
+    在一个 batch 上做 U(1) 商空间对齐：
+      - 展平所有样本 / 维度，估计一个全局相位 φ*
+      - 返回 e^{-j φ*} ⋅ yhat（与 x_ref 对齐）
+    注意：φ* 本身不回传梯度（stop_gradient），
+         避免网络学成退化“自己转相位抵消损失”的 trivial 解。
     """
-    # 防御：确保长度一致（避免其他地方又出现 shape mismatch）
-    T = min(int(yhat.shape[0]), int(x_ref.shape[0]))
-    yhat = yhat[:T]
-    x_ref = x_ref[:T]
-
     yh = yhat.reshape(-1)
     xr = x_ref.reshape(-1)
 
@@ -226,7 +172,8 @@ def batch_phase_align(yhat: jnp.ndarray,
     p = zc / (jnp.abs(zc) + eps)    # e^{j φ*}
     p = lax.stop_gradient(p)
 
-    return yhat * jnp.conj(p)       # e^{-j φ*} yhat
+    y_aligned = yhat * jnp.conj(p)  # e^{-j φ*} yhat
+    return y_aligned
 
 
 # ============================
@@ -244,11 +191,14 @@ def loss_fn(module: layer.Layer,
             beta_evm: float = 0.1,
             lambda_kl: float = 1e-4):
     """
-    训练用 loss（符号率域）：
-      1) 用 z_out.t.start/t.stop 在符号域切出 x_ref（长度=batch_size）
-      2) 用同样的窗口 *sps 在采样域切出 yhat_win（长度=batch_size*sps）
-      3) yhat_win 下采样到符号率（自动选最佳 phase）
-      4) 对齐全局相位后算 SI-SNR + EVM + 轻微能量正则
+    训练用 loss：
+      - 先做 batch 商空间相位对齐；
+      - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
+      - 加一点 EVM（更接近 Q²）作为 secondary term；
+      - 再加非常轻微的能量正则（信息瓶颈风格）。
+
+    这里故意不用 MSE 当主 loss，而是 SNR-style：
+      loss_main = -SNR_dB + 0.1*EVM
     """
 
     params_net = util.dict_merge(params, sparams)
@@ -257,28 +207,15 @@ def loss_fn(module: layer.Layer,
         core.Signal(y)
     )
 
-    # -------- 0) 取出输出与对齐窗口 --------
-    yhat_full = z_out.val
+    # 对齐时间区间
+    x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
+    yhat = z_out.val                        # [T,...]
 
-    # x 是符号域帧 (flen)，yhat_full 是采样域帧 (flen*sps) → 推断 sps
-    sps = _infer_sps_from_shapes(yhat_full, x, default=2)
+    # 1) 商空间相位对齐：只去除全局 φ*
+    y_aligned = batch_phase_align(yhat, x_ref)
 
-    # 符号域有效窗口（目标 truth）
-    x_ref = x[z_out.t.start:z_out.t.stop]  # [batch_size, ...]
-
-    # 采样域有效窗口（和 x_ref 对应的那一段）
-    ys = z_out.t.start * sps
-    ye = z_out.t.stop * sps
-    yhat_win = yhat_full[ys:ye]            # [batch_size*sps, ...]
-
-    # -------- 1) 下采样到符号率（选最佳采样相位）--------
-    y_sym, x_sym, _best_phase = _downsample_best_phase(yhat_win, x_ref, sps=sps)
-
-    # -------- 2) 商空间全局相位对齐 --------
-    y_aligned = batch_phase_align(y_sym, x_sym)
-
-    # -------- 3) SI-SNR（复数版）--------
-    t = x_sym.reshape(-1)
+    # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
+    t = x_ref.reshape(-1)
     e = y_aligned.reshape(-1)
 
     num = jnp.vdot(t, e)
@@ -291,16 +228,16 @@ def loss_fn(module: layer.Layer,
     n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
     snr_db = 10.0 * jnp.log10(s_energy / n_energy)
 
-    # 最小化 loss → 用负 SNR
+    # 我们最小化 loss → 用负 SNR
     snr_loss = -snr_db
 
-    # -------- 4) EVM（正规化到发射能量）--------
-    evm_num = jnp.mean(jnp.abs(y_aligned - x_sym) ** 2)
-    evm_den = jnp.mean(jnp.abs(x_sym) ** 2) + 1e-8
+    # 3) EVM（正规化到发射能量）
+    evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
+    evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
     evm = evm_num / evm_den
 
-    # -------- 5) 轻微能量正则（用符号率的 y_sym，更稳定）--------
-    kl_ib = 0.5 * jnp.mean(jnp.abs(y_sym) ** 2)
+    # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
+    kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
 
     loss_main = snr_loss + beta_evm * evm
     total_loss = loss_main + lambda_kl * kl_ib
