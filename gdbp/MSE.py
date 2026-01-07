@@ -28,39 +28,25 @@ def make_base_module(steps: int = 3,
                      ntaps: int = 41,
                      rtaps: int = 61,
                      init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train'):
-    '''
-    make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
-
-    Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
-
-    Returns:
-        A layer object
-    '''
+                     w0=0.,
+                     mode: str = 'train',
+                     switch_symbols: int = 200000):   # ✅ 新增：切换点(符号数)
+    """
+    switch_symbols: 在 test 模式下，mimo train->track 的切换点（单位：symbols）
+    """
 
     _assert_taps(dtaps, ntaps, rtaps)
 
     d_init, n_init = init_fn
 
     if mode == 'train':
-        # configure mimo to its training mode
         mimo_train = True
     elif mode == 'test':
-        # mimo operates at training mode for the first 200000 symbols,
-        # then switches to tracking mode afterwards
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+        # ✅ 用可配置切换点替代硬编码 200000
+        mimo_train = cxopt.piecewise_constant([int(switch_symbols)], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-        
+
     base = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
@@ -73,11 +59,12 @@ def make_base_module(steps: int = 3,
                         train=mimo_train,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
-        )  
-        
+    )
+
     return base
+
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     """ we force odd taps to ease coding """
