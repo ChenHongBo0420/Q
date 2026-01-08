@@ -167,6 +167,70 @@ def batch_phase_align(yhat: jnp.ndarray,
 # 3) Loss: SI-SNR in quotient space + EVM + tiny regularizer
 # ============================
 
+# def loss_fn(module: layer.Layer,
+#             params: Dict,
+#             state: Dict,
+#             y: Array,
+#             x: Array,
+#             aux: Dict,
+#             const: Dict,
+#             sparams: Dict,
+#             beta_evm: float = 0.1,
+#             lambda_kl: float = 1e-4):
+#     """
+#     训练用 loss：
+#       - 先做 batch 商空间相位对齐；
+#       - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
+#       - 加一点 EVM（更接近 Q²）作为 secondary term；
+#       - 再加非常轻微的能量正则（信息瓶颈风格）。
+
+#     这里故意不用 MSE 当主 loss，而是 SNR-style：
+#       loss_main = -SNR_dB + 0.1*EVM
+#     """
+
+#     params_net = util.dict_merge(params, sparams)
+#     z_out, state_new = module.apply(
+#         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
+#         core.Signal(y)
+#     )
+
+#     # 对齐时间区间
+#     x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
+#     yhat = z_out.val                        # [T,...]
+
+#     # 1) 商空间相位对齐：只去除全局 φ*
+#     y_aligned = batch_phase_align(yhat, x_ref)
+
+#     # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
+#     t = x_ref.reshape(-1)
+#     e = y_aligned.reshape(-1)
+
+#     num = jnp.vdot(t, e)
+#     den = jnp.vdot(t, t) + 1e-8
+#     alpha = num / den                      # 复数缩放
+#     s_hat = alpha * t
+#     err = e - s_hat
+
+#     s_energy = jnp.real(jnp.vdot(s_hat, s_hat)) + 1e-8
+#     n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
+#     snr_db = 10.0 * jnp.log10(s_energy / n_energy)
+
+#     # 我们最小化 loss → 用负 SNR
+#     snr_loss = -snr_db
+
+#     # 3) EVM（正规化到发射能量）
+#     evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
+#     evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
+#     evm = evm_num / evm_den
+
+#     # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
+#     kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
+
+#     loss_main = snr_loss + beta_evm * evm
+#     total_loss = loss_main + lambda_kl * kl_ib
+
+#     return total_loss, state_new
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -174,64 +238,14 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,
-            beta_evm: float = 0.1,
-            lambda_kl: float = 1e-4):
-    """
-    训练用 loss：
-      - 先做 batch 商空间相位对齐；
-      - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
-      - 加一点 EVM（更接近 Q²）作为 secondary term；
-      - 再加非常轻微的能量正则（信息瓶颈风格）。
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y)) 
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
 
-    这里故意不用 MSE 当主 loss，而是 SNR-style：
-      loss_main = -SNR_dB + 0.1*EVM
-    """
-
-    params_net = util.dict_merge(params, sparams)
-    z_out, state_new = module.apply(
-        {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
-        core.Signal(y)
-    )
-
-    # 对齐时间区间
-    x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
-    yhat = z_out.val                        # [T,...]
-
-    # 1) 商空间相位对齐：只去除全局 φ*
-    y_aligned = batch_phase_align(yhat, x_ref)
-
-    # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
-    t = x_ref.reshape(-1)
-    e = y_aligned.reshape(-1)
-
-    num = jnp.vdot(t, e)
-    den = jnp.vdot(t, t) + 1e-8
-    alpha = num / den                      # 复数缩放
-    s_hat = alpha * t
-    err = e - s_hat
-
-    s_energy = jnp.real(jnp.vdot(s_hat, s_hat)) + 1e-8
-    n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
-    snr_db = 10.0 * jnp.log10(s_energy / n_energy)
-
-    # 我们最小化 loss → 用负 SNR
-    snr_loss = -snr_db
-
-    # 3) EVM（正规化到发射能量）
-    evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
-    evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
-    evm = evm_num / evm_den
-
-    # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
-    kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
-
-    loss_main = snr_loss + beta_evm * evm
-    total_loss = loss_main + lambda_kl * kl_ib
-
-    return total_loss, state_new
-
-
+    return mse_loss, updated_state
 # ============================
 # 4) update_step / train
 # ============================
