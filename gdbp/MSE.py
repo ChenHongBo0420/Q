@@ -61,7 +61,7 @@ def make_base_module(steps: int = 3,
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         # layer.MIMOAF(train=mimo_train)
-        layer.MIMOAF(train=mimo_train, mimofn="static2x2")
+        layer.MIMOAF(train=mimo_train, mimofn="static_fir")
     )
 
     return base
