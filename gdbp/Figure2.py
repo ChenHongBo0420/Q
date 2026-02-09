@@ -1,5 +1,6 @@
 # Only mixed by the SNR loss vs Q
-from jax import numpy as jnp, random, jit, value_and_grad, nn
+
+from jax import numpy as jnp, random, jit, value_and_grad
 import flax
 from commplax import util, comm, comm2, cxopt, op, optim
 from commplax.module import core, layer
@@ -8,15 +9,23 @@ from functools import partial
 from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union, Tuple
-from . import data as gdat
+
+# keep relative import if you're in a package; fallback for single-file usage
+try:
+    from . import data as gdat
+except Exception:
+    import data as gdat  # type: ignore
+
 import jax
-from scipy import signal
-from flax import linen as nn
-from sklearn.neighbors import KernelDensity
-from jax.scipy.stats import norm
-from jax import jit, lax
-from typing import Tuple
-import matplotlib.pyplot as plt
+from scipy import signal  # (kept as-is; optional)
+from flax import linen as nn  # (kept as-is; optional)
+from sklearn.neighbors import KernelDensity  # (kept as-is; optional)
+from jax.scipy.stats import norm  # (kept as-is; optional)
+from jax import lax
+import matplotlib.pyplot as plt  # (kept as-is; optional)
+
+# keep the original _np usage in your train diag helper
+_np = np
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -24,7 +33,7 @@ Dict = Union[dict, flax.core.FrozenDict]
 
 
 # ========================
-# 1) Base module (SOTANN2)
+# 1) Base module (Single network, NOT parallel)
 # ========================
 
 def make_base_module(steps: int = 3,
@@ -34,6 +43,11 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0=0.,
                      mode: str = 'train'):
+    """
+    NOTE:
+    - No switch_symbols parameter.
+    - In test mode, mimo train->track switching uses the original hard-coded schedule.
+    """
 
     _assert_taps(dtaps, ntaps, rtaps)
 
@@ -42,36 +56,17 @@ def make_base_module(steps: int = 3,
     if mode == 'train':
         mimo_train = True
     elif mode == 'test':
+        # hard-coded switching point (original behavior)
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
 
-    # 分支 1：FDBP 串联支路
-    fdbp_series = layer.Serial(
+    base = layer.Serial(
         layer.FDBP(steps=steps,
                    dtaps=dtaps,
                    ntaps=ntaps,
                    d_init=d_init,
-                   n_init=n_init,
-                   name='fdbp1'),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf1',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv1', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
-        name='fdbp_series'
-    )
-
-    # 分支 2：FDBP1（带 XPM 近似）串联支路
-    serial_branch = layer.Serial(
-        layer.FDBP1(steps=steps,
-                    dtaps=dtaps,
-                    ntaps=ntaps,
-                    d_init=d_init,
-                    n_init=n_init),
+                   n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
         layer.MIMOFOEAf(name='FOEAf',
                         w0=w0,
@@ -79,18 +74,7 @@ def make_base_module(steps: int = 3,
                         preslicer=core.conv1d_slicer(rtaps),
                         foekwargs={}),
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train),
-        name='serial_branch'
-    )
-
-    # FanOut → Parallel(FDBP, FDBP1) → FanInMean
-    base = layer.Serial(
-        layer.FanOut(num=2),
-        layer.Parallel(
-            fdbp_series,
-            serial_branch
-        ),
-        layer.FanInMean()
+        layer.MIMOAF(train=mimo_train)
     )
 
     return base
@@ -198,7 +182,7 @@ def batch_phase_align(yhat: jnp.ndarray,
 
 
 # ============================
-# 3) Loss: SI-SNR in quotient space + EVM + tiny regularizer
+# 3) Loss (Merged): SNR-style (quotient space) OR MSE
 # ============================
 
 def loss_fn(module: layer.Layer,
@@ -209,39 +193,40 @@ def loss_fn(module: layer.Layer,
             aux: Dict,
             const: Dict,
             sparams: Dict,
+            loss_mode: str = "snr",     # "snr" or "mse"
             beta_evm: float = 0.1,
             lambda_kl: float = 1e-4):
     """
-    训练用 loss：
-      - 先做 batch 商空间相位对齐；
-      - 在去相位后的输出上算 SI-SNR（任务一致：类似 post-CPE 的 SNR）；
-      - 加一点 EVM（更接近 Q²）作为 secondary term；
-      - 再加非常轻微的能量正则（信息瓶颈风格）。
-
-    这里故意不用 MSE 当主 loss，而是 SNR-style：
-      loss_main = -SNR_dB + 0.1*EVM
+    loss_mode:
+      - "snr": SI-SNR (in quotient space) + beta_evm*EVM + lambda_kl*energy_reg
+      - "mse": plain complex MSE (raw, no phase quotient)
     """
-
     params_net = util.dict_merge(params, sparams)
     z_out, state_new = module.apply(
         {'params': params_net, 'aux_inputs': aux, 'const': const, **state},
         core.Signal(y)
     )
 
-    # 对齐时间区间
     x_ref = x[z_out.t.start:z_out.t.stop]   # [T,...]
     yhat = z_out.val                        # [T,...]
 
-    # 1) 商空间相位对齐：只去除全局 φ*
+    if loss_mode == "mse":
+        mse_loss = jnp.mean(jnp.abs(yhat - x_ref) ** 2)
+        return mse_loss, state_new
+
+    if loss_mode != "snr":
+        raise ValueError(f"loss_mode must be 'snr' or 'mse', got {loss_mode}")
+
+    # 1) quotient-space phase align (remove global phase only)
     y_aligned = batch_phase_align(yhat, x_ref)
 
-    # 2) SI-SNR（复数版）：在 y_aligned vs x_ref 上
+    # 2) complex SI-SNR (scale-invariant)
     t = x_ref.reshape(-1)
     e = y_aligned.reshape(-1)
 
     num = jnp.vdot(t, e)
     den = jnp.vdot(t, t) + 1e-8
-    alpha = num / den                      # 复数缩放
+    alpha = num / den
     s_hat = alpha * t
     err = e - s_hat
 
@@ -249,20 +234,18 @@ def loss_fn(module: layer.Layer,
     n_energy = jnp.real(jnp.vdot(err, err)) + 1e-8
     snr_db = 10.0 * jnp.log10(s_energy / n_energy)
 
-    # 我们最小化 loss → 用负 SNR
+    # minimize loss => negative SNR
     snr_loss = -snr_db
 
-    # 3) EVM（正规化到发射能量）
+    # 3) EVM (normalized by tx energy)
     evm_num = jnp.mean(jnp.abs(y_aligned - x_ref) ** 2)
     evm_den = jnp.mean(jnp.abs(x_ref) ** 2) + 1e-8
     evm = evm_num / evm_den
 
-    # 4) 轻微能量正则（在原始 yhat 上，避免爆能量）
-    kl_ib = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
+    # 4) tiny energy regularizer (avoid energy blow-up)
+    energy_reg = 0.5 * jnp.mean(jnp.abs(yhat) ** 2)
 
-    loss_main = snr_loss + beta_evm * evm
-    total_loss = loss_main + lambda_kl * kl_ib
-
+    total_loss = snr_loss + beta_evm * evm + lambda_kl * energy_reg
     return total_loss, state_new
 
 
@@ -270,7 +253,7 @@ def loss_fn(module: layer.Layer,
 # 4) update_step / train
 # ============================
 
-@partial(jit, backend='cpu', static_argnums=(0, 1))
+@partial(jit, backend='cpu', static_argnums=(0, 1, 10))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
                 i: int,
@@ -280,14 +263,19 @@ def update_step(module: layer.Layer,
                 x: Array,
                 aux: Dict,
                 const: Dict,
-                sparams: Dict):
+                sparams: Dict,
+                loss_mode: str = "snr",
+                beta_evm: float = 0.1,
+                lambda_kl: float = 1e-4):
     """
     单步反向传播
     """
     params = opt.params_fn(opt_state)
+
     (loss, module_state), grads = value_and_grad(
         loss_fn, argnums=1, has_aux=True
-    )(module, params, module_state, y, x, aux, const, sparams)
+    )(module, params, module_state, y, x, aux, const, sparams,
+      loss_mode, beta_evm, lambda_kl)
 
     opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
@@ -315,33 +303,20 @@ def train(model: Model,
           opt: optim.Optimizer = optim.adam(
               optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6])
           ),
-          diag: Optional[dict] = None):
+          diag: Optional[dict] = None,
+          loss_mode: str = "snr",          # "snr" or "mse"
+          beta_evm: float = 0.1,
+          lambda_kl: float = 1e-4):
     """
     训练 1 epoch，yield (loss, params, module_state) —— 保持原接口不变。
 
     额外功能（可选）：
     传入 diag=dict(...) 后，会在训练过程中每隔 eval_every 迭代跑一次 test()
     并把诊断指标记录到 train.diag_logs（list[dict]）里。
-
-    diag 支持的键（都可选，没给就用默认）：
-      - model_eval : Model   （必填，想算诊断就要给 test 用的 model）
-      - data_eval  : gdat.Input（必填）
-      - eval_every : int，默认 200
-      - eval_range : tuple，默认 (300000, -20000)（同 test()）
-      - L          : int，默认 16
-      - d4_dims    : int，默认 2
-      - pilot_frac : float，默认 0.0
-      - use_oracle_noise : bool，默认 True
-      - use_elliptical_llr : bool，默认 True
-      - temp_grid  : tuple，默认 (0.75, 1.0, 1.25)
-      - bitwidth   : int，默认 6
-      - decoder    : decoder，默认 None
-      - cpe_block_len : int，默认 2048 （用于 phi_blk 指标）
-      - callback   : callable(rec: dict) -> None（每次记录后回调）
     """
 
     # -------- 0) 准备诊断配置（不影响原训练流程）--------
-    train.diag_logs = []  # 外部训练完可直接访问：gb.train.diag_logs
+    train.diag_logs = []  # 外部训练完可直接访问：train.diag_logs
     if diag is not None:
         if ('model_eval' not in diag) or ('data_eval' not in diag):
             raise ValueError("diag 开启时必须提供 diag['model_eval'] 和 diag['data_eval']")
@@ -352,7 +327,6 @@ def train(model: Model,
         cpe_block_len = int(diag.get('cpe_block_len', 2048))
         cb = diag.get('callback', None)
 
-        # test() 的参数（尽量跟你现在脚本一致）
         test_kwargs = dict(
             eval_range=diag.get('eval_range', (300000, -20000)),
             L=int(diag.get('L', 16)),
@@ -366,9 +340,7 @@ def train(model: Model,
             return_artifacts=False
         )
 
-        # 训练内用的小工具：从 test 输出的 z / data_eval 估计块级残余相位
         def _phi_blk_metrics_from_z(z_sig, data_eval, L, eval_range, block_len):
-            # 复制 test() 中的 canonical scaling + eval_range 裁剪口径 :contentReference[oaicite:2]{index=2}
             x_ref = _np.asarray(data_eval.x[z_sig.t.start:z_sig.t.stop])
             scale = comm2.qamscale(L) if L is not None else _np.sqrt(10.0)
             y_eq = _np.asarray(z_sig.val) * scale
@@ -417,7 +389,8 @@ def train(model: Model,
         aux = core.dict_replace(aux, {'truth': x})
         loss, opt_state, module_state = update_step(
             model.module, opt, i, opt_state,
-            module_state, y, x, aux, const, sparams
+            module_state, y, x, aux, const, sparams,
+            loss_mode, beta_evm, lambda_kl
         )
         cur_params = opt.params_fn(opt_state)
 
@@ -427,14 +400,12 @@ def train(model: Model,
             sd = res.get("SD", {})
             hd = res.get("HD", None)
 
-            # 从 test() 里直接取（你已经算好的）MSE_raw / MSE_qspace :contentReference[oaicite:3]{index=3}
             mse_raw = float(sd.get("MSE_raw", _np.nan))
             mse_qspace = float(sd.get("MSE_qspace", _np.nan))
             ngmi_4d = float(sd.get("NGMI_4D", _np.nan))
             gmi_4d = float(sd.get("GMI_bits_per_4D", _np.nan))
             air_4d = float(sd.get("AIR_bits_per_4D", _np.nan))
 
-            # 额外：残余相位时变（块级）
             phi_rms, phi_slope, n_blk = _phi_blk_metrics_from_z(
                 z_sig=z,
                 data_eval=data_eval,
@@ -443,7 +414,6 @@ def train(model: Model,
                 block_len=cpe_block_len
             )
 
-            # HD 总指标（可选）
             qsq = _np.nan
             ber = _np.nan
             try:
@@ -456,6 +426,7 @@ def train(model: Model,
             rec = dict(
                 it=int(i),
                 loss=float(_np.asarray(loss)),
+                loss_mode=str(loss_mode),
                 Q_dB=qsq,
                 BER=ber,
                 NGMI_4D=ngmi_4d,
@@ -472,7 +443,6 @@ def train(model: Model,
             if cb is not None:
                 cb(rec)
 
-        # 仍然按原来的格式 yield —— 外部脚本无需改任何一行 :contentReference[oaicite:4]{index=4}
         yield loss, cur_params, module_state
 
 
@@ -512,32 +482,27 @@ def test(model: Model,
         'aux_inputs': aux, 'const': const, **state
     }, core.Signal(data.y))
 
-    # canonical 缩放，让 x_ref 落在标准 QAM 网格
+    # canonical scaling
     x_ref = data.x[z.t.start:z.t.stop]
     scale = comm2.qamscale(L) if L is not None else np.sqrt(10.0)
     y_eq = z.val * scale
     x_ref = x_ref * scale
 
-    # eval_range 裁剪
+    # eval_range crop
     s0, s1 = eval_range
     s1 = y_eq.shape[0] + s1 if s1 <= 0 else s1
     y_eq = y_eq[s0:s1]
     x_ref = x_ref[s0:s1]
 
-    # flatten 复维
+    # flatten
     y_1d = y_eq.reshape(-1)
     x_1d = x_ref.reshape(-1)
 
-    # ==== 新增：MSE_raw / MSE_qspace 作为诊断量 ====
-    # raw MSE（含残余相位）
+    # diagnostics: MSE_raw / MSE_qspace
     mse_raw = float(jnp.mean(jnp.abs(y_eq - x_ref) ** 2))
-
-    # 商空间 MSE（去掉 batch 全局相位）
     y_q = batch_phase_align(jnp.asarray(y_eq), jnp.asarray(x_ref))
     mse_qspace = float(jnp.mean(jnp.abs(y_q - jnp.asarray(x_ref)) ** 2))
-    # ===========================================
 
-    # SD 评估：估噪 → LLR → 温度扫描 → (可选)软解码 → GMI
     sd_kwargs = dict(
         use_oracle_noise=use_oracle_noise,
         elliptical_llr=use_elliptical_llr,
@@ -552,7 +517,7 @@ def test(model: Model,
         sd_kwargs=sd_kwargs
     )
 
-    # 4D 聚合指标
+    # 4D aggregate
     m_per_dim = int(np.log2(L if L is not None else 16))
     gmi_dim = float(res['SD']['GMI_bits_per_dim'])
     gmi_4d = gmi_dim * d4_dims
@@ -565,7 +530,6 @@ def test(model: Model,
         'AIR_bits_per_4D': air_4d,
         'pilot_frac': pilot_frac,
         'd4_dims': d4_dims,
-        # 把两种 MSE 一起挂在 SD 里方便你后处理
         'MSE_raw': mse_raw,
         'MSE_qspace': mse_qspace,
     })
@@ -586,7 +550,5 @@ def equalize_dataset(model_te, params, state_bundle, data):
 
     start, stop = z.t.start, z.t.stop
     z_eq = np.asarray(z.val[:, 0])       # equalized
-    s_ref = np.asarray(data.x)[start:stop, 0]  # 保持原尺度
+    s_ref = np.asarray(data.x)[start:stop, 0]  # keep original scale
     return z_eq, s_ref
-
-
