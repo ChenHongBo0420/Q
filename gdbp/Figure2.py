@@ -2,7 +2,7 @@
 
 from jax import numpy as jnp, random, jit, value_and_grad
 import flax
-from commplax import util, comm2, cxopt, op, optim
+from commplax import util, comm2, cxopt, op, optim, comm
 from commplax.module import core, layer
 import numpy as np
 from functools import partial
@@ -552,4 +552,5 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq = np.asarray(z.val[:, 0])       # equalized
     s_ref = np.asarray(data.x)[start:stop, 0]  # keep original scale
     return z_eq, s_ref
+
 
