@@ -253,7 +253,7 @@ def loss_fn(module: layer.Layer,
 # 4) update_step / train
 # ============================
 
-@partial(jit, backend='cpu', static_argnums=(0, 1, 10))
+# @partial(jit, backend='cpu', static_argnums=(0, 1, 10))
 def update_step(module: layer.Layer,
                 opt: cxopt.Optimizer,
                 i: int,
@@ -552,5 +552,6 @@ def equalize_dataset(model_te, params, state_bundle, data):
     z_eq = np.asarray(z.val[:, 0])       # equalized
     s_ref = np.asarray(data.x)[start:stop, 0]  # keep original scale
     return z_eq, s_ref
+
 
 
